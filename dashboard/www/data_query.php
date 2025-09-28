@@ -37,12 +37,12 @@ function connect_db()
             {
                 if (stristr($line, "host=") != false)
                 {
-                    parse_str($line);
+                    parse_str($line, $tmp);
                     $mysql_host = trim($host);
                 }
                 if (stristr($line, "passwd=") != false)
                 {
-                    parse_str($line);
+                    parse_str($line, $tmp);
                     $mysql_password = trim($passwd);
                 }
             }
