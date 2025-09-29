@@ -203,32 +203,33 @@ bool mmdvmToOpenMT(const char* openmt_in, uint8_t mmdvm_out)
 
 void setFrequency(const char* rxFreq, const char* txFreq, const char* pocsagFreq, uint8_t rfPower)
 {
-    uint8_t buffer[16];
+    uint8_t buffer[17];
     buffer[0] = MODEM_FRAME_START;
-    buffer[1] = 16;
+    buffer[1] = 17;
     buffer[2] = MODEM_SET_FREQ;
+    buffer[3] = 0;
 
     uint32_t freq = atol(rxFreq);
-    buffer[3] = freq & 0x000000ff;
-    buffer[4] = (freq & 0x0000ff00) >> 8;
-    buffer[5] = (freq & 0x00ff0000) >> 16;
-    buffer[6] = (freq & 0xff000000) >> 24;
+    buffer[4] = freq & 0x000000ff;
+    buffer[5] = (freq & 0x0000ff00) >> 8;
+    buffer[6] = (freq & 0x00ff0000) >> 16;
+    buffer[7] = (freq & 0xff000000) >> 24;
 
     freq = atol(txFreq);
-    buffer[7] = freq & 0x000000ff;
-    buffer[8] = (freq & 0x0000ff00) >> 8;
-    buffer[9] = (freq & 0x00ff0000) >> 16;
-    buffer[10] = (freq & 0xff000000) >> 24;
+    buffer[8] = freq & 0x000000ff;
+    buffer[9] = (freq & 0x0000ff00) >> 8;
+    buffer[10] = (freq & 0x00ff0000) >> 16;
+    buffer[11] = (freq & 0xff000000) >> 24;
 
-    buffer[11] = rfPower;
+    buffer[12] = rfPower;
 
     freq = atol(pocsagFreq);
-    buffer[12] = freq & 0x000000ff;
-    buffer[13] = (freq & 0x0000ff00) >> 8;
-    buffer[14] = (freq & 0x00ff0000) >> 16;
-    buffer[15] = (freq & 0xff000000) >> 24;
+    buffer[13] = freq & 0x000000ff;
+    buffer[14] = (freq & 0x0000ff00) >> 8;
+    buffer[15] = (freq & 0x00ff0000) >> 16;
+    buffer[16] = (freq & 0xff000000) >> 24;
 
-    for (uint8_t i=0;i<16;i++)
+    for (uint8_t i=0;i<17;i++)
         modemCommandBuffer.put(buffer[i]);
 }
 
