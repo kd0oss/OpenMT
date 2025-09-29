@@ -58,7 +58,7 @@ using namespace std;
 
 #define    VERSION               "2025-8-14"
 #define    MAX_LINE_LENGTH        256
-#define    BUFFER_LENGTH          2000
+#define    BUFFER_LENGTH          500
 #define    MAX_CLIENT_CONNECTIONS 20
 #define    TX_TIMEOUT             300000
 
@@ -306,8 +306,16 @@ int openSerial(char *serial)
             speed = B460800;
             break;
 
+        case 230400:
+            speed = B230400;
+            break;
+
+        case 115200:
+            speed = B115200;
+            break;
+
         default:
-            speed = 115000;
+            speed = B115200;
     }
 
     cfsetospeed(&tty, speed);
@@ -474,7 +482,7 @@ void* modeRxThread(void *arg)
     }
     hostClient[conn_id].active = false;
     delay(50000);
-    fprintf(stderr, "Mode TX thread exited. Connection Id: %d\n", conn_id);
+    fprintf(stderr, "Mode RX thread exited. Connection Id: %d\n", conn_id);
     int iRet = 500;
     pthread_exit(&iRet);
     return NULL;
@@ -525,10 +533,6 @@ void* modeTxThread(void *arg)
                     txBuffer.put(0x03);
                     txBuffer.put(MODEM_STATUS);
                 }
-            }
-            else
-            {
-                fprintf(stderr, "Len: %d   Space: %d\n", len, getModemSpace(currentMode.c_str()));
             }
             frameTimeout = false;
         }
@@ -621,7 +625,10 @@ void* commandThread(void *arg)
             std::string parameter = readDashbCommand("modemHost");
             if (parameter == "setConfig")
             {
-                set_Config();
+                if (modem == "mmdvmhs")
+                    set_ConfigHS();
+                else
+                    set_Config();
                 uint8_t buffer[9];
                 buffer[0] = 0x61;
                 buffer[1] = 0x00;
@@ -921,7 +928,10 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
     free(mode[conn_id].tx_filter_pCoeffs);
     free(mode[conn_id].tx_filter_pState);
     delMode("main", mode[conn_id].name);
-    set_Config();
+    if (modem == "mmdvmhs")
+        set_ConfigHS();
+    else
+        set_Config();
     delay(50000);
     close(sockFd);
     fprintf(stderr, "Client thread exited. Connection Id: %d\n", conn_id);
@@ -970,13 +980,6 @@ void *startTCPServer(void *arg)
         fprintf(stderr, "Modem_Host: error when binding the socket to port %u: %s\n", host_port, strerror(errno));
         exit(1);
     }
-
-    // Set the server socket to non-blocking mode
-//    if (fcntl(sockFd, F_SETFL, O_NONBLOCK) < 0) {
-//        perror("fcntl failed");
-//        close(sockFd);
-//        exit(EXIT_FAILURE);
-//    }
 
     if (debugM)
         fprintf(stdout, "Opened the TCP socket on port %u\n", host_port);
@@ -1142,21 +1145,24 @@ int processSerialmod17(void)
         txModeBuffer.reset();
     }
 
-//    dump((char*)"SERIAL:", buffer, respLen);
-    if (type == TYPE_DSTAR_HEADER)
+    if (debugM)
     {
-        if (respLen != 46)
-            fprintf(stderr, "DSTAR header wrong length. [%d]\n", respLen);
-    }
-    if (type == TYPE_DSTAR_DATA)
-    {
-        if (respLen != 15 && respLen != 17)
-            fprintf(stderr, "DSTAR data wrong length. [%d]\n", respLen);
-    }
-    if (type == TYPE_M17_LSF || type == TYPE_M17_STREAM || type == TYPE_M17_PACKET)
-    {
-        if (respLen != 54)
-            fprintf(stderr, "M17 frame wrong length. [%d]\n", respLen);
+        dump((char*)"SERIAL:", buffer, respLen);
+        if (type == TYPE_DSTAR_HEADER)
+        {
+            if (respLen != 46)
+                fprintf(stderr, "DSTAR header wrong length. [%d]\n", respLen);
+        }
+        if (type == TYPE_DSTAR_DATA)
+        {
+            if (respLen != 15 && respLen != 17)
+                fprintf(stderr, "DSTAR data wrong length. [%d]\n", respLen);
+        }
+        if (type == TYPE_M17_LSF || type == TYPE_M17_STREAM || type == TYPE_M17_PACKET)
+        {
+            if (respLen != 54)
+                fprintf(stderr, "M17 frame wrong length. [%d]\n", respLen);
+        }
     }
 
     if (type == MODEM_NACK)
@@ -1180,8 +1186,8 @@ int processSerialmod17(void)
     }
     else if (type == MODEM_STATUS)
     {
-   //     if (debugM)
-     //       dump((char*)"STATUS:", buffer, respLen);
+        if (debugM)
+            dump((char*)"STATUS:", buffer, respLen);
         setM17Space(buffer[12]);
         setDSTARSpace(buffer[6]);
     }
@@ -1367,6 +1373,7 @@ int main(int argc, char **argv)
         hostClient[i].command.reset();
     }
 
+    modem = readModemConfig("modem1", "modem");
     commPort = readModemConfig("modem1", "port");
     modemBaud = readModemConfig("modem1", "baud");
 
@@ -1436,7 +1443,11 @@ int main(int argc, char **argv)
             fprintf(stderr, "Command thread created successfully\n");
     }
 
-    set_Config();
+    if (modem == "mmdvmhs")
+        set_ConfigHS();
+    else
+        set_Config();
+
     setHostConfig("main", "gateways", "none");
     setHostConfig("main", "activeModes", "none");
     delay(10000);

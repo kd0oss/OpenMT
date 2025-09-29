@@ -77,6 +77,7 @@ uint8_t getM17Space();
 void setDSTARSpace(uint8_t space);
 uint8_t getDSTARSpace();
 bool set_Config();
+bool set_ConfigHS();
 void setFrequency(const char* rxFreq, const char* txFreq, const char* pocsagFreq, uint8_t rfPower);
 
 #endif /* MMDVM_H */

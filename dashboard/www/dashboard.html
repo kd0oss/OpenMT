@@ -722,10 +722,9 @@ function updateGatewayStatus()
         if (found)
         {
           createReflDropDown(tmp[i]);
-          getReflList(tmp[i]);
         }
       }
-      table += "</table><br>";
+      table += "</table>";
     }
   }
   document.getElementById('activeGW').innerHTML = table;
@@ -1366,15 +1365,15 @@ function createReflDropDown(reflType)
   html += "<span id='"+reflType+"'>";
   html += "<label for='"+reflType+"net'>Reflector:</label>";
   html += "<select id='"+reflType+"net' name='"+reflType+"net'></select>";
-
   html += "&nbsp;<select id='"+reflType+"netmod'>";
   for (x=65;x<65+26;x++)
     html += "<option value='"+String.fromCharCode(x)+"'>"+String.fromCharCode(x)+"</option>";
   html += "</select>";
   html += "&nbsp;<button id='"+reflType+"link' class='linkto' onclick='reflConnect(\""+reflType+"\")'>Link</button>";
 //        <button class='saveButton' onclick='saveMode("M17", document.getElementById("m17enabled").checked, document.getElementById("m17net").value)'>Save</button>
-  html += "</span><br>";
+  html += "</span>";
   document.getElementById('modetab').innerHTML = html;
+  setTimeout(getReflList, 1000, reflType);
 }
 
 function createMap(lat, long)
@@ -1514,6 +1513,7 @@ function addMessage(source, message)
         <select id='deviceType' name='devtype'>
           <option value="Module17">Module17</option>
           <option value="mmdvm">MMDVM</option>
+          <option value="mmdvmhs">MMDVM_HS</option>
         </select>
         <label for='commPort'>Comm Port:</label>
         <select id='commPort' name='commPort'>
@@ -1532,7 +1532,6 @@ function addMessage(source, message)
         </select>
         <label for='baud'>Baud:</label>
         <select id='baud' name='baud'>
-          <option value="57600">57600</option>
           <option value="115200">115200</option>
           <option value="230400">230400</option>
           <option value="460800">460800</option>

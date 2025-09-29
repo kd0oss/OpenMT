@@ -74,6 +74,7 @@ float            modem_ax25TXLevel      = 50U;
 
 extern CRingBuffer<uint8_t> txBuffer;
 extern CRingBuffer<uint8_t> modemCommandBuffer;
+extern std::string modem;
 
 uint8_t getM17Space()
 {
@@ -100,7 +101,10 @@ void enableM17()
     char buffer[4];
 
     modem_m17Enabled = true;
-    set_Config();
+    if (modem == "mmdvmhs")
+        set_ConfigHS();
+    else
+        set_Config();
     sleep(1);
 
     buffer[0] = 0xE0;
@@ -116,7 +120,10 @@ void disableM17()
     char buffer[4];
 
     modem_m17Enabled = false;
-    set_Config();
+    if (modem == "mmdvmhs")
+        set_ConfigHS();
+    else
+        set_Config();
     sleep(1);
 }
 
@@ -125,7 +132,10 @@ void enableDSTAR()
     char buffer[4];
 
     modem_dstarEnabled = true;
-    set_Config();
+    if (modem == "mmdvmhs")
+        set_ConfigHS();
+    else
+        set_Config();
     sleep(1);
 
     buffer[0] = 0xE0;
@@ -141,7 +151,10 @@ void disableDSTAR()
     char buffer[4];
 
     modem_dstarEnabled = false;
-    set_Config();
+    if (modem == "mmdvmhs")
+        set_ConfigHS();
+    else
+        set_Config();
     sleep(1);
 }
 
@@ -374,6 +387,120 @@ bool set_Config()
     buffer[39U] = 0x00U;
 
     for (int x=0;x<40;x++)
+        modemCommandBuffer.put(buffer[x]);
+
+    return true;
+}
+
+bool set_ConfigHS()
+{
+    unsigned char buffer[30U];
+
+    buffer[0U] = MODEM_FRAME_START;
+    buffer[1U] = 26U;
+    buffer[2U] = MODEM_CONFIG;
+
+    buffer[3U] = 0x00U;
+    modem_rxInvert = readModemConfig("modem1", "rxInvert") == "true" ? true : false;
+    modem_txInvert = readModemConfig("modem1", "txInvert") == "true" ? true : false;
+    modem_pttInvert = readModemConfig("modem1", "pttInvert") == "true" ? true : false;
+//    modem_ysfLoDev = readModemConfig("modem1", "ysfLoDev") == "true" ? true : false;
+    modem_debug = readModemConfig("modem1", "debug") == "true" ? true : false;
+    modem_trace = readModemConfig("modem1", "trace") == "true" ? true : false;
+    modem_useCOSAsLockout = readModemConfig("modem1", "useCOSAsLockout") == "true" ? true : false;
+    modem_duplex = readModemConfig("modem1", "mode") == "duplex" ? true : false;
+
+	if (modem_rxInvert)
+		buffer[3U] |= 0x01U;
+	if (modem_txInvert)
+		buffer[3U] |= 0x02U;
+	if (modem_pttInvert)
+		buffer[3U] |= 0x04U;
+    if (modem_ysfLoDev)
+        buffer[3U] |= 0x08U;
+	if (modem_debug)
+		buffer[3U] |= 0x10U;
+	if (modem_useCOSAsLockout)
+		buffer[3U] |= 0x20U;
+    if (!modem_duplex)
+        buffer[3U] |= 0x80U;
+
+//    modem_dstarEnabled = readModemConfig("modem1", "dstarEnabled") == "true" ? true : false;
+//    modem_dmrEnabled = readModemConfig("modem1", "dmrEnabled") == "true" ? true : false;
+//    modem_ysfEnabled = readModemConfig("modem1", "ysfEnabled") == "true" ? true : false;
+//    modem_p25Enabled = readModemConfig("modem1", "p25Enabled") == "true" ? true : false;
+//    modem_nxdnEnabled = readModemConfig("modem1", "nxdnEnabled") == "true" ? true : false;
+//    modem_fmEnabled = readModemConfig("modem1", "fmEnabled") == "true" ? true : false;
+//    modem_m17Enabled = readModemConfig("modem1", "m17Enabled") == "true" ? true : false;
+//    modem_pocsagEnabled = readModemConfig("modem1", "pocsagEnabled") == "true" ? true : false;
+
+    buffer[4U] = 0x00U;
+    if (modem_dstarEnabled)
+        buffer[4U] |= 0x01U;
+    if (modem_dmrEnabled)
+        buffer[4U] |= 0x02U;
+    if (modem_ysfEnabled)
+        buffer[4U] |= 0x04U;
+    if (modem_p25Enabled)
+        buffer[4U] |= 0x08U;
+    if (modem_nxdnEnabled)
+        buffer[4U] |= 0x10U;
+    if (modem_pocsagEnabled)
+        buffer[4U] |= 0x20U;
+    if (modem_m17Enabled)
+        buffer[4U] |= 0x40U;
+
+    modem_txDelay = atoi(readModemConfig("modem1", "txdelay").c_str());
+
+    buffer[5U] = modem_txDelay / 10U;        // In 10ms units
+
+    buffer[6U] = MODE_IDLE;
+	buffer[7U] = (unsigned char)(modem_rxLevel * 2.55F + 0.5F);
+
+//    modem_cwIdTXLevel = atoi(readModemConfig("modem1", "cwIdTxLevel").c_str());
+//    modem_dstarTXLevel = atoi(readModemConfig("modem1", "dstarTxLevel").c_str());
+//    modem_dmrTXLevel = atoi(readModemConfig("modem1", "dmrTxLevel").c_str());
+//    modem_ysfTXLevel = atoi(readModemConfig("modem1", "ysfTxLevel").c_str());
+//    modem_p25TXLevel = atoi(readModemConfig("modem1", "p25TxLevel").c_str());
+//    modem_nxdnTXLevel = atoi(readModemConfig("modem1", "nxdnTxLevel").c_str());
+//    modem_m17TXLevel = atoi(readModemConfig("modem1", "m17TxLevel").c_str());
+//    modem_pocsagTXLevel = atoi(readModemConfig("modem1", "pocsagTxLevel").c_str());
+//    modem_ysfTXHang = atoi(readModemConfig("modem1", "ysfTXHang").c_str());
+//    modem_p25TXHang = atoi(readModemConfig("modem1", "p25TXHang").c_str());
+//    modem_nxdnTXHang = atoi(readModemConfig("modem1", "nxdnTXHang").c_str());
+//    modem_m17TXHang = atoi(readModemConfig("modem1", "m17TXHang").c_str());
+
+    buffer[8] = (unsigned char)(modem_cwIdTXLevel * 2.55F + 0.5F) << 2;
+	buffer[9U] = modem_dmrColorCode;
+
+	buffer[10U] = modem_dmrDelay;
+
+	buffer[11U] = 128U;           // Was OscOffset
+
+    buffer[12U] = (unsigned char)(modem_dstarTXLevel * 2.55F + 0.5F);
+    buffer[13U] = (unsigned char)(modem_dmrTXLevel * 2.55F + 0.5F);
+    buffer[14U] = (unsigned char)(modem_ysfTXLevel * 2.55F + 0.5F);
+    buffer[15U] = (unsigned char)(modem_p25TXLevel * 2.55F + 0.5F);
+	buffer[16U] = (unsigned char)(modem_txDCOffset + 128);
+	buffer[17U] = (unsigned char)(modem_rxDCOffset + 128);
+
+	buffer[18U] = (unsigned char)(modem_nxdnTXLevel * 2.55F + 0.5F);
+
+	buffer[19U] = (unsigned char)modem_ysfTXHang;
+
+	buffer[20U] = (unsigned char)(modem_pocsagTXLevel * 2.55F + 0.5F);
+
+	buffer[21U] = (unsigned char)(modem_fmTXLevel * 2.55F + 0.5F);
+
+	buffer[22U] = (unsigned char)modem_p25TXHang;
+
+	buffer[23U] = (unsigned char)modem_nxdnTXHang;
+
+	buffer[24U] = (unsigned char)(modem_m17TXLevel * 2.55F + 0.5F);
+
+	buffer[25U] = (unsigned char)modem_m17TXHang;
+
+    for (int x=0;x<26;x++)
         modemCommandBuffer.put(buffer[x]);
 
     return true;
