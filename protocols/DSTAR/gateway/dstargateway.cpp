@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2025 by Rick KD0OSS             *
+ *   Copyright (C) 2025 by Rick KD0OSS                                     *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -14,6 +14,7 @@
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  *                                                                         *
+ *   Some functions based on or inspired by Jonathan Naylor G4KLX          *
  ***************************************************************************/
 
 #include <stdio.h>
@@ -93,10 +94,14 @@ CRingBuffer<uint8_t> txBuffer(3300);
 const char *TYPE_HEADER         = "DSTH";
 const char *TYPE_DATA           = "DSTD";
 const char *TYPE_EOT            = "DSTE";
+const char *TYPE_ACK            = "ACK ";
 const char *TYPE_NACK           = "NACK";
 const char *TYPE_DISCONNECT     = "DISC";
 const char *TYPE_CONNECT        = "CONN";
 const char *TYPE_STATUS         = "STAT";
+const char *TYPE_COMMAND        = "COMM";
+
+const uint8_t COMM_UPDATE_CONF  = 0x04;
 
 const uint8_t  AMBE_HEADER[]    = {0x61, 0x00, 0x0B, 0x01, 0x01, 0x48};
 const uint8_t  AMBE_HEADER_LEN  = 6U;
@@ -131,6 +136,8 @@ void delay(uint32_t delay)
     nanosleep(&req, &rem);
 };
 
+// Print debug data.
+// From MMDVM project by Jonathan Naylor G4KLX.
 void dump(char *text, unsigned char *data, unsigned int length)
 {
     unsigned int offset = 0U;
@@ -174,6 +181,7 @@ void dump(char *text, unsigned char *data, unsigned int length)
     }
 }
 
+// Search DSTAR reflector files for given reflect name. Currently not used.
 int searchDSTARHostFile(const char *refl, char *ipaddr)
 {
     FILE *file = NULL;
@@ -272,6 +280,7 @@ int searchDSTARHostFile(const char *refl, char *ipaddr)
     return ret;
 }
 
+// Thread used to send data to IRDDDB gateway.
 void* txThread(void *arg)
 {
     int  sockfd = (intptr_t)arg;
@@ -288,7 +297,6 @@ void* txThread(void *arg)
             {
                 if (txBuffer.peek() != 0x61)
                 {
-                 //   txBuffer.reset();
                     fprintf(stderr, "TX EOT invalid header.\n");
                     continue;
                 }
@@ -322,6 +330,7 @@ void* txThread(void *arg)
     return NULL;
 }
 
+// Decode GPS data in slow-speed bytes.
 bool decodeGPS(unsigned char c)
 {
     static char      tgps[200];
@@ -393,8 +402,13 @@ bool decodeGPS(unsigned char c)
                             fLong = ((deg*1.0) + (min/60.0))*-1.0;
                         else
                             fLong = ((deg*1.0) + (min/60.0));
-                        fields = splitString(lon[1], 'A');
-                        altitude = atoi(fields[1].c_str());
+                        if (lon[1].c_str()[3] == 'A')
+                        {
+                            fields = splitString(lon[1], 'A');
+                            altitude = atoi(fields[1].c_str());
+                        }
+                        else
+                            altitude = 0;
                     }
                     else
                         if (sGps.find("DSTAR*:!") != std::string::npos)
@@ -414,7 +428,7 @@ bool decodeGPS(unsigned char c)
                                 fLat = ((deg*1.0) + (min/60.0))*-1.0;
 
                             fields = splitString(sGps, '/');
-                            std::vector<std::string> lon = splitString(fields[2], '.');
+                            std::vector<std::string> lon = splitString(fields[1], '.');
                             fract = modff(atoi(lon[0].c_str())/100.0, &deg)*100.0;
                             sTmp[0] = lon[1].c_str()[0];
                             sTmp[1] = lon[1].c_str()[1];
@@ -423,8 +437,9 @@ bool decodeGPS(unsigned char c)
                                 fLong = ((deg*1.0) + (min/60.0))*-1.0;
                             else
                                 fLong = ((deg*1.0) + (min/60.0));
-                            fields = splitString(lon[1], 'A');
-                            altitude = atoi(fields[1].c_str());
+                      //      fields = splitString(lon[1], 'A');
+                      //      altitude = atoi(fields[1].c_str());
+                            altitude = 0;
                         }
                         else
                             if (sGps.find("DSTAR*:;") != std::string::npos && splitString(sGps, 'z')[1].find("I") != std::string::npos)
@@ -453,8 +468,13 @@ bool decodeGPS(unsigned char c)
                                     fLong = ((deg*1.0) + (min/60.0))*-1.0;
                                 else
                                     fLong = ((deg*1.0) + (min/60.0));
-                                fields = splitString(lon[1], 'A');
-                                altitude = atoi(fields[1].c_str());
+                                if (lon[1].c_str()[3] == 'A')
+                                {
+                                    fields = splitString(lon[1], 'A');
+                                    altitude = atoi(fields[1].c_str());
+                                }
+                                else
+                                    altitude = 0;
                             }
                     gpsidx = 0;
                     return true;
@@ -469,9 +489,9 @@ bool decodeGPS(unsigned char c)
         return false;
     }
     return false;
-} // end decodeGPS
+}
 
-
+// Decode slow-speed data bytes.
 int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
 {
   static bool          bSyncFound;
@@ -536,7 +556,6 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
       default:
         bFirstSection = true;
         break;
-
     }
   }
   else
@@ -582,6 +601,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
   return iRet;
 }
 
+// Encode message to slow-speed bytes.
 void slowSpeedDataEncode(char *cMessage, unsigned char *ucBytes, unsigned char ucMode)
 {
     static int           iIndex;
@@ -668,6 +688,7 @@ void slowSpeedDataEncode(char *cMessage, unsigned char *ucBytes, unsigned char u
     }
 }
 
+// Queue up bytes to send to IRCDDB gateway;
 void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
 {
     CCCITTChecksumReverse ccr;
@@ -676,6 +697,7 @@ void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
     static int       iFrameCount;
     static uint16_t  iStreamId;
     static bool      bSentHeader;
+    int8_t n = 0;
 
     mcrc.m_crc16 = 0xFFFF;
 
@@ -692,7 +714,9 @@ void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
         ucBuffer[4] = 0x0a;
         memcpy(ucBuffer+5, "linux_pirptr-20250926", 21);
         ucBuffer[26] = 0x00;
-        sendto(sockoutfd, ucBuffer, 27, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
+        n = sendto(sockoutfd, ucBuffer, 27, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
+    if (n < 0)
+      error((char*)"ERROR in sendto");
         ucBuffer[4] = 0x20;
         iStreamId = (rand() % 0xffff) + 1;
         ucBuffer[5] = (iStreamId & 0xff00) >> 8;
@@ -704,7 +728,9 @@ void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
         memcpy(ucBuffer+11, cHeader, 36);
         ccr.update(ucBuffer + 8, 39); // 4 * 8 + 4 + 3
         ccr.result(ucBuffer + 47);
-        sendto(sockoutfd, ucBuffer, 49, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
+        n = sendto(sockoutfd, ucBuffer, 49, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
+    if (n < 0)
+      error((char*)"ERROR in sendto");
         ucBuffer[4] = 0x21;
         bSentHeader = true;
     }
@@ -742,13 +768,17 @@ void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
         ucBuffer[18] = 0x55;
         ucBuffer[19] = 0x55;
         ucBuffer[20] = 0x55;
-        sendto(sockoutfd, ucBuffer, 21, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
+        n = sendto(sockoutfd, ucBuffer, 21, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
+    if (n < 0)
+      error((char*)"ERROR in sendto");
         ucBuffer[7] = iPktCount;
         ucBuffer[7] |= 0x40;			// End of data marker
         ucBuffer[21] = 0x55;
         ucBuffer[22] = 0xc8;
         ucBuffer[23] = 0x7a;
-        sendto(sockoutfd, ucBuffer, 24, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
+        n = sendto(sockoutfd, ucBuffer, 24, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
+    if (n < 0)
+      error((char*)"ERROR in sendto");
         iPktCount = -1;
         iFrameCount = 0;
         bSentHeader = false;
@@ -767,6 +797,7 @@ void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
     }
 }
 
+// Connect to and process incoming IRCDDB gateway bytes.
 void *connectIRCDDBGateway(void *argv)
 {
     int      sockinfd;
@@ -777,9 +808,10 @@ void *connectIRCDDBGateway(void *argv)
     uint8_t  cRecvline[50];
     uint8_t  cRxBuffer[400];
     uint8_t  cTxHeader[37];
+    uint8_t  buffer[BUFFER_SIZE];
     uint16_t timeout = 0;
 
-    sscanf((char*)argv, "%d %s %s %d %d", &hostfd, local_address, gw_address, &portin, &portout);
+    sscanf((char*)argv, "%d %s %s %d %d", &hostfd, local_address, gw_address, &portout, &portin);
 
     sockinfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockinfd < 0)
@@ -802,7 +834,27 @@ void *connectIRCDDBGateway(void *argv)
     servaddrout.sin_addr.s_addr = inet_addr(gw_address);
     servaddrout.sin_port = htons(portout);
 
+    fprintf(stderr, "Connected to IRCDDB gateway.\n");
     DSTARReflDisconnect = false;
+
+    char    cBuffer[40];
+    uint8_t ucBytes[12];
+    sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, "       U", myCall, "TEST");
+    memset(ucBytes, 0, 9);
+    ucBytes[9] = 0x55;
+    ucBytes[10] = 0x2d;
+    ucBytes[11] = 0x16;
+    sendToGw(cBuffer, ucBytes, true, true);
+    txBuffer.put(0x61);
+    txBuffer.put(0x00);
+    txBuffer.put(0x0F);
+    txBuffer.put(0x04);
+    txBuffer.put(TYPE_DISCONNECT[0]);
+    txBuffer.put(TYPE_DISCONNECT[1]);
+    txBuffer.put(TYPE_DISCONNECT[2]);
+    txBuffer.put(TYPE_DISCONNECT[3]);
+    for (uint8_t x=0;x<7;x++)
+        txBuffer.put(DSTARName[x]);
 
     while (connected)
     {
@@ -816,10 +868,11 @@ void *connectIRCDDBGateway(void *argv)
             if (debugM)
                 dump((char*)"DSTAR gateway recv data:", (uint8_t*)cRecvline, n);
         }
-        if (n > 0 && (n != 21 && n != 49))
+        if (n > 0 && (n != 21 && n != 49 && n != 34))
             fprintf(stderr, "n=%d\n", n);
-        if (n > 24)
+        if (n == 49 && !txOn)
         {
+            txOn = true;
             bzero(myCall, 9);
             bzero(suffix, 5);
             bzero(urCall, 9);
@@ -836,14 +889,47 @@ void *connectIRCDDBGateway(void *argv)
                 sprintf((char*)cTxHeader, "%8s%4s%8s%8s%8s", myCall, suffix, urCall, rpt1Call, rpt2Call);
                 strcpy(lastCall, myCall);
             }
+            buffer[0] = 0x61;
+            buffer[1] = 0x00;
+            buffer[2] = 0x31;
+            buffer[3] = 0x04;
+            memcpy(buffer+4, TYPE_HEADER, 4);
+            buffer[8] = 0x40;
+            buffer[9] = 0x00;
+            buffer[10] = 0x00;
+            memcpy(buffer+11, cTxHeader, 36);
+            write(hostfd, buffer, 49);
         }
-        else
-        if (n == 21)
+        else if (n == 21 && txOn)
         {
          //   fec.regenerate((unsigned char*)cRecvline+9);
-            memcpy(cRxBuffer, AMBE_HEADER, AMBE_HEADER_LEN);
-            memcpy(cRxBuffer+AMBE_HEADER_LEN, cRecvline+9, 9);
-            slowSpeedDataDecode(cRecvline[18], cRecvline[19], cRecvline[20]);
+            if (cRecvline[7] & 0x40)
+            {
+                buffer[0] = 0x61;
+                buffer[1] = 0x00;
+                buffer[2] = 0x08;
+                buffer[3] = 0x04;
+                memcpy(buffer+4, TYPE_EOT, 4);
+                write(hostfd, buffer, 8);
+                fprintf(stderr, "EOT\n");
+                txOn = false;
+            }
+            else
+            {
+                buffer[0] = 0x61;
+                buffer[1] = 0x00;
+                buffer[2] = 0x14;
+                buffer[3] = 0x04;
+                memcpy(buffer+4, TYPE_DATA, 4);
+                memcpy(buffer+8, cRecvline+9, 12);
+                write(hostfd, buffer, 20);
+            }
+        }
+        else if (n == 34)
+        {
+            bzero(buffer, 30);
+            memcpy(buffer, cRecvline+5, 29);
+            fprintf(stderr, "%s\n", buffer);
         }
 
         if (DSTARReflDisconnect)
@@ -851,12 +937,7 @@ void *connectIRCDDBGateway(void *argv)
             DSTARReflConnected = false;
         }
 
-        delay(10000);
-
-  //      if (timeout > 1500)
-  //          break;
-  //      else
-  //          timeout++;
+        delay(1000);
     }
     txBuffer.put(0x61);
     txBuffer.put(0x00);
@@ -877,6 +958,7 @@ void *connectIRCDDBGateway(void *argv)
     return 0;
 }
 
+// Create threads for gateway communication.
 void connectToIRCDDB(int sockfd, const char *local_address, const char *gw_address, uint16_t portout, uint16_t portin)
 {
     static char server[80] = "";
@@ -905,6 +987,7 @@ void connectToIRCDDB(int sockfd, const char *local_address, const char *gw_addre
     }
 }
 
+// Start up connection to DSTAR service.
 void* startClient(void *arg)
 {
     int sockfd = 0;
@@ -959,6 +1042,7 @@ void* startClient(void *arg)
     uint8_t  offset = 0;
     uint16_t respLen = 0;
     uint8_t  typeLen = 0;
+    char     source[7];
 
     while (connected)
     {
@@ -1023,11 +1107,27 @@ void* startClient(void *arg)
         if (debugM)
             dump((char*)"DSTAR Service data:", (unsigned char*)buffer, respLen);
 
-        if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
+        if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
+        {
+            if (buffer[8] == COMM_UPDATE_CONF)
+            {
+                strcpy(rpt1Call, readHostConfig("DSTAR", "rpt1Call").c_str());
+                strcpy(rpt2Call, readHostConfig("DSTAR", "rpt2Call").c_str());
+                strcpy(myCall, readHostConfig("main", "callsign").c_str());
+                txBuffer.put(0x61);
+                txBuffer.put(0x00);
+                txBuffer.put(0x08);
+                txBuffer.put(0x04);
+                txBuffer.put(TYPE_COMMAND[0]);
+                txBuffer.put(TYPE_COMMAND[1]);
+                txBuffer.put(TYPE_COMMAND[2]);
+                txBuffer.put(TYPE_COMMAND[3]);
+            }
+        }
+        else if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
         {
             if (!DSTARReflConnected)
             {
-                char source[7];
                 bzero(source, 7);
                 bzero(DSTARName, 8);
                 bzero(DSTARModule, 2);
@@ -1035,40 +1135,57 @@ void* startClient(void *arg)
                 memcpy(DSTARName, buffer+14, 7);
                 memcpy(DSTARModule, buffer+21, 1);
                 fprintf(stderr, "Name: %s  Mod: %s\n", DSTARName, DSTARModule);
-                char ipaddr[15];
-                uint16_t  port;
-       //         if (findReflector("DPLUS", DSTARName, ipaddr, &port))
-                {
-                    char    cBuffer[40];
-                    uint8_t ucBytes[12];
-//                    sprintf(cBuffer, "%8s%8s%8s%8s%4s", cRpt2Call, cRpt1Call, "        ", source, "TEST");
-                    sprintf(cBuffer, "%8s%8s%8s%8s%4s", "KD0OSS G", "KD0OSS B", "        ", source, "TEST");
-                    memcpy(cBuffer+16, DSTARName, 6);
-                    cBuffer[22] = DSTARModule[0];
-                    cBuffer[23] = 'L';
-                    memset(ucBytes, 0, 9);
-                    ucBytes[9] = 0x55;
-                    ucBytes[10] = 0x2d;
-                    ucBytes[11] = 0x16;
-                    sendToGw(cBuffer, ucBytes, true, true);
-             //       connectToRefl(sockfd, source, ipaddr, DSTARModule, port);
-    txBuffer.put(0x61);
-    txBuffer.put(0x00);
-    txBuffer.put(0x10);
-    txBuffer.put(0x04);
-    txBuffer.put(TYPE_CONNECT[0]);
-    txBuffer.put(TYPE_CONNECT[1]);
-    txBuffer.put(TYPE_CONNECT[2]);
-    txBuffer.put(TYPE_CONNECT[3]);
-    for (uint8_t x=0;x<7;x++)
-        txBuffer.put(DSTARName[x]);
-    txBuffer.put(DSTARModule[0]);
 
-                }
+                char    cBuffer[40];
+                uint8_t ucBytes[12];
+                sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, "        ", source, "TEST");
+                memcpy(cBuffer+16, DSTARName, 6);
+                cBuffer[22] = DSTARModule[0];
+                cBuffer[23] = 'L';
+                memset(ucBytes, 0, 9);
+                ucBytes[9] = 0x55;
+                ucBytes[10] = 0x2d;
+                ucBytes[11] = 0x16;
+                sendToGw(cBuffer, ucBytes, true, true);
+
+                txBuffer.put(0x61);
+                txBuffer.put(0x00);
+                txBuffer.put(0x10);
+                txBuffer.put(0x04);
+                txBuffer.put(TYPE_CONNECT[0]);
+                txBuffer.put(TYPE_CONNECT[1]);
+                txBuffer.put(TYPE_CONNECT[2]);
+                txBuffer.put(TYPE_CONNECT[3]);
+                for (uint8_t x=0;x<7;x++)
+                    txBuffer.put(DSTARName[x]);
+                txBuffer.put(DSTARModule[0]);
+                DSTARReflConnected = true;
             }
         }
         else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
         {
+            if (DSTARReflConnected)
+            {
+                char    cBuffer[40];
+                uint8_t ucBytes[12];
+                sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, "       U", source, "TEST");
+                memset(ucBytes, 0, 9);
+                ucBytes[9] = 0x55;
+                ucBytes[10] = 0x2d;
+                ucBytes[11] = 0x16;
+                sendToGw(cBuffer, ucBytes, true, true);
+
+                txBuffer.put(0x61);
+                txBuffer.put(0x00);
+                txBuffer.put(0x0F);
+                txBuffer.put(0x04);
+                txBuffer.put(TYPE_DISCONNECT[0]);
+                txBuffer.put(TYPE_DISCONNECT[1]);
+                txBuffer.put(TYPE_DISCONNECT[2]);
+                txBuffer.put(TYPE_DISCONNECT[3]);
+                for (uint8_t x=0;x<7;x++)
+                    txBuffer.put(DSTARName[x]);
+            }
             DSTARReflDisconnect = true;
         }
         else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
@@ -1076,28 +1193,31 @@ void* startClient(void *arg)
         }
         else if (memcmp(type, TYPE_HEADER, typeLen) == 0)
         {
-            if (!txOn)
-            {
-                streamId = (rand() & 0x7ff);
-            }
-   //         frame_t frame;
-    //        for (uint8_t x=0;x<48;x++)
-     //           frame.data()[x] = buffer[x+4+typeLen];
+            txOn = true;
+            char    cBuffer[40];
+            uint8_t ucBytes[12];
+            memcpy(rpt2Call, buffer+11, 8);
+            memcpy(rpt1Call, buffer+19, 8);
+            memcpy(urCall, buffer+27, 8);
+            memcpy(myCall, buffer+35, 8);
+            memcpy(suffix, buffer+43, 4);
+            sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, urCall, myCall, suffix);
+            fprintf(stderr, "Header: %s\n", cBuffer);
+            memset(ucBytes, 0, 9);
+            ucBytes[9] = 0x55;
+            ucBytes[10] = 0x2d;
+            ucBytes[11] = 0x16;
+            sendToGw(cBuffer, ucBytes, false, false);
         }
         else if (memcmp(type, TYPE_DATA, typeLen) == 0)
         {
-   //         frame_t frame;
-    //        for (uint8_t x=0;x<48;x++)
-     //           frame.data()[x] = buffer[x+4+typeLen];
-     //       if (lsfOk)
-            {
-                txOn = true;
-                if (DSTARReflConnected)
-                {
-               //     for (int x=0;x<18;x++)
-                 //       reflTxBuffer.put(sf.getData()[x]);
-                }
-            }
+            txOn = true;
+            char    cBuffer[40];
+            sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, urCall, myCall, suffix);
+            if (buffer[17] == 0x55 && buffer[18] == 0x55 && buffer[19] == 0x55)
+                sendToGw(cBuffer, (uint8_t*)buffer+8, false, true);
+            else
+                sendToGw(cBuffer, (uint8_t*)buffer+8, false, false);
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
@@ -1158,6 +1278,10 @@ int main(int argc, char **argv)
 
         umask(0);
     }
+
+    strcpy(rpt1Call, readHostConfig("DSTAR", "rpt1Call").c_str());
+    strcpy(rpt2Call, readHostConfig("DSTAR", "rpt2Call").c_str());
+    strcpy(myCall, readHostConfig("main", "callsign").c_str());
 
     int err = pthread_create(&(clientid), NULL, &startClient, DSTARHost);
     if (err != 0)

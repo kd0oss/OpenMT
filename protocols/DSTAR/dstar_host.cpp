@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2025 by Rick KD0OSS             *
+ *   Copyright (C) 2025 by Rick KD0OSS                                     *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -14,11 +14,13 @@
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  *                                                                         *
+ *   Some functions based on or inspired by Jonathan Naylor G4KLX          *
  ***************************************************************************/
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <strings.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <errno.h>
@@ -55,6 +57,8 @@ using namespace std;
 #define VERSION     "2025-09-13"
 #define BUFFER_SIZE 1024
 
+// Mode specific data sent to configure modem. Data from MMDVM project by Jonathan Naylor G4KLX
+//==============================================================================================================================
 static int16_t TX_GAUSSIAN_0_35_FILTER[] = {0, 0, 0, 0, 1001, 3514, 9333, 18751, 28499, 32767, 28499, 18751, 9333, 3514, 1001}; // numTaps = 15, L = 5
 uint8_t        TX_GAUSSIAN_0_35_FILTER_PHASE_LEN = 3; // phaseLength = numTaps/L
 uint8_t        TX_FILTER_STATE_LEN = 20;
@@ -67,6 +71,7 @@ char           MODE_NAME[11]        = "DSTAR";
 char           MODEM_TYPE[6]        = "GMSK";
 bool           USE_DC_FILTER        = true;
 bool           USE_LP_FILTER        = false;
+//================================================================================================================================
 
 const char *TYPE_HEADER         = "DSTH";
 const char *TYPE_DATA           = "DSTD";
@@ -83,38 +88,39 @@ const uint8_t COMM_SET_DUPLEX   = 0x00;
 const uint8_t COMM_SET_SIMPLEX  = 0x01;
 const uint8_t COMM_SET_MODE     = 0x02;
 const uint8_t COMM_SET_IDLE     = 0x03;
+const uint8_t COMM_UPDATE_CONF  = 0x04;
 
-int      sockfd           = 0;
-char     modemHost[80]    = "127.0.0.1";
-char     myCall[9]        = "";
-char     urCall[9]        = "";
-char     rpt1Call[9]      = "";
-char     rpt2Call[9]      = "";
-char     suffix[5]        = "";
-char     metaText[23]     = "";
-bool     txOn             = false;
-bool     slowSpeedUpdate  = false;
-bool     validFrame       = false;
-bool     debugM           = false;
-bool     connected        = true;
-bool     modem_duplex     = true;
+int      sockfd             = 0;
+char     modemHost[80]      = "127.0.0.1";
+char     myCall[9]          = "";
+char     urCall[9]          = "";
+char     rpt1Call[9]        = "";
+char     rpt2Call[9]        = "";
+char     suffix[5]          = "";
+char     metaText[23]       = "";
+bool     txOn               = false;
+bool     slowSpeedUpdate    = false;
+bool     validFrame         = false;
+bool     debugM             = false;
+bool     connected          = true;
+bool     modem_duplex       = true;
 bool     dstarReflConnected = false;
 bool     dstarGWConnected   = false;
-bool     statusTimeout    = false;
-bool     reflBusy         = false;
-uint8_t  duration         = 0;
-uint8_t  dstar_space      = 0;
-uint16_t serverPort       = 18101;
-uint16_t clientPort       = 18000;
-uint16_t streamId         = 0;
-uint16_t modeHang         = 30000;
+bool     statusTimeout      = false;
+bool     reflBusy           = false;
+uint8_t  duration           = 0;
+uint8_t  dstar_space        = 0;
+uint16_t serverPort         = 18101;
+uint16_t clientPort         = 18000;
+uint16_t streamId           = 0;
+uint16_t modeHang           = 30000;
 time_t   start_time;
 
-std::string sGps     = "";
-std::string sGPSCall = "";
-float       fLat     = 0.0f;
-float       fLong    = 0.0f;
-uint16_t    altitude = 0;
+std::string sGps            = "";
+std::string sGPSCall        = "";
+float       fLat            = 0.0f;
+float       fLong           = 0.0f;
+uint16_t    altitude        = 0;
 
 unsigned int       clientlen;  //< byte size of client's address
 char              *hostaddrp;  //< dotted decimal host addr string
@@ -124,10 +130,10 @@ struct sockaddr_in clientaddr; //< client addr
 
 CRingBuffer<uint8_t> txBuffer(3600);
 CRingBuffer<uint8_t> rxBuffer(3600);
-CRingBuffer<uint8_t> reflTxBuffer(3600);
-CRingBuffer<uint8_t> reflCommand(200);
+CRingBuffer<uint8_t> gwTxBuffer(3600);
+CRingBuffer<uint8_t> gwCommand(200);
 CRingBuffer<uint8_t> echoBuffer(20000);
-uint8_t header[49]; // store header for echo function
+uint8_t header[49];           //< store header for echo function
 
 pthread_t modemHostid;
 pthread_t gwHostid;
@@ -158,6 +164,8 @@ void delay(uint32_t delay)
     nanosleep(&req, &rem);
 };
 
+// Print debug data.
+// From MMDVM project by Jonathan Naylor G4KLX.
 void dump(char *text, unsigned char *data, unsigned int length)
 {
     struct timespec ts;
@@ -175,8 +183,6 @@ void dump(char *text, unsigned char *data, unsigned int length)
     milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 
     fprintf(stdout, "%s: %llu\n", text, milliseconds);
-//    fputs(text, stdout);
-//    fputc('\n', stdout);
 
     while (length > 0U)
     {
@@ -213,6 +219,8 @@ void dump(char *text, unsigned char *data, unsigned int length)
     }
 }
 
+// Simple timer thread.
+// Each loop through the while statement takes 1 millisecond.
 void* timerThread(void *arg)
 {
     uint32_t loop[3] = {0, 0, 0};
@@ -266,12 +274,16 @@ void* timerThread(void *arg)
     return NULL;
 }
 
+// ***** Echo function created for testing. Currently not used. ********
+//=============================================================================
+// Record received packets for re-transmit.
 void recordEcho(const uint8_t* data)
 {
     for (uint8_t x=0;x<12;x++)
         echoBuffer.put(data[x]);
 }
 
+// Playbach recorded packets.
 void echoPlayback(int sockfd)
 {
     uint8_t buf[20] = {0x61, 0x00, 0x14, 0x04, 'D', 'S', 'T', 'D'};
@@ -298,7 +310,9 @@ void echoPlayback(int sockfd)
         fprintf(stderr, "ERROR: host disconnect\n");
     }
 }
+//=====================================================================================
 
+// Decode GPS packets in slow-speed bytes.
 bool decodeGPS(unsigned char c)
 {
     static char      tgps[200];
@@ -370,8 +384,13 @@ bool decodeGPS(unsigned char c)
                             fLong = ((deg*1.0) + (min/60.0))*-1.0;
                         else
                             fLong = ((deg*1.0) + (min/60.0));
-                        fields = splitString(lon[1], 'A');
-                        altitude = atoi(fields[1].c_str());
+                        if (lon[1].c_str()[3] == 'A')
+                        {
+                            fields = splitString(lon[1], 'A');
+                            altitude = atoi(fields[1].c_str());
+                        }
+                        else
+                            altitude = 0;
                     }
                     else
                         if (sGps.find("DSTAR*:!") != std::string::npos)
@@ -391,7 +410,7 @@ bool decodeGPS(unsigned char c)
                                 fLat = ((deg*1.0) + (min/60.0))*-1.0;
 
                             fields = splitString(sGps, '/');
-                            std::vector<std::string> lon = splitString(fields[2], '.');
+                            std::vector<std::string> lon = splitString(fields[1], '.');
                             fract = modff(atoi(lon[0].c_str())/100.0, &deg)*100.0;
                             sTmp[0] = lon[1].c_str()[0];
                             sTmp[1] = lon[1].c_str()[1];
@@ -400,8 +419,13 @@ bool decodeGPS(unsigned char c)
                                 fLong = ((deg*1.0) + (min/60.0))*-1.0;
                             else
                                 fLong = ((deg*1.0) + (min/60.0));
-                            fields = splitString(lon[1], 'A');
-                            altitude = atoi(fields[1].c_str());
+                //            if (lon[1].c_str()[3] == 'A')
+                //            {
+                //                fields = splitString(lon[1], 'A');
+                //                altitude = atoi(fields[1].c_str());
+                //            }
+                //            else
+                                altitude = 0;
                         }
                         else
                             if (sGps.find("DSTAR*:;") != std::string::npos && splitString(sGps, 'z')[1].find("I") != std::string::npos)
@@ -430,8 +454,13 @@ bool decodeGPS(unsigned char c)
                                     fLong = ((deg*1.0) + (min/60.0))*-1.0;
                                 else
                                     fLong = ((deg*1.0) + (min/60.0));
-                                fields = splitString(lon[1], 'A');
-                                altitude = atoi(fields[1].c_str());
+                                if (lon[1].c_str()[3] == 'A')
+                                {
+                                    fields = splitString(lon[1], 'A');
+                                    altitude = atoi(fields[1].c_str());
+                                }
+                                else
+                                    altitude = 0;
                             }
                     gpsidx = 0;
                     return true;
@@ -446,9 +475,9 @@ bool decodeGPS(unsigned char c)
         return false;
     }
     return false;
-} // end decodeGPS
+}
 
-
+// Decode slow-speed data bytes.
 int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
 {
   static bool          bSyncFound;
@@ -468,6 +497,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
   {
     bSyncFound = true;
     bFirstSection = true;
+    bzero(cText, 30);
     memset(cText, 0x20, 29);
   }
 
@@ -513,7 +543,6 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
       default:
         bFirstSection = true;
         break;
-
     }
   }
   else
@@ -559,6 +588,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
   return iRet;
 }
 
+// Start up connection to modem host.
 void* startClient(void *arg)
 {
     struct sockaddr_in serv_addr;
@@ -725,20 +755,27 @@ void* startClient(void *arg)
             bzero(suffix, 5);
             bzero(rpt1Call, 9);
             bzero(rpt2Call, 9);
-            memcpy(rpt1Call, buffer+11, 8);
-            memcpy(rpt2Call, buffer+19, 8);
+            memcpy(rpt2Call, buffer+11, 8);
+            memcpy(rpt1Call, buffer+19, 8);
             memcpy(urCall, buffer+27, 8);
             memcpy(myCall, buffer+35, 8);
-            memcpy(suffix, buffer+33, 4);
-
-            if (urCall[7] == 'E')
-                memcpy(header, buffer, respLen);
+            memcpy(suffix, buffer+43, 4);
+            metaText[0] = 0;
+     //       if (urCall[7] == 'E') // used for test echo function
+     //           memcpy(header, buffer, respLen);
             start_time = time(NULL);
             saveLastCall("DSTAR", "RF", myCall, urCall, metaText, NULL, gps, true);
             fprintf(stderr, "DSTAR Header: %s  %s  %s  %s-%s\n", rpt1Call, rpt2Call, urCall, myCall, suffix);
+            if (validFrame && dstarReflConnected && gwTxBuffer.getSpace() >= respLen)
+            {
+                for (uint8_t x=0;x<respLen;x++)
+                    gwTxBuffer.put(buffer[x]);
+            }
         }
         else if (memcmp(type, TYPE_DATA, typeLen) == 0)
         {
+            if (buffer[17] == 0x55 && buffer[18] == 0x2d && buffer[19] == 0x16 && txOn)
+                validFrame = true;
             txOn = true;
             if (validFrame && modem_duplex)
             {
@@ -749,15 +786,26 @@ void* startClient(void *arg)
                 }
             }
             slowSpeedDataDecode(buffer[17], buffer[18], buffer[19]);
-            if (urCall[7] == 'E')
-                recordEcho((uint8_t*)&buffer[8]);
+            if (statusTimeout)
+            {
+                if (validFrame)
+                    saveLastCall("DSTAR", "NET", myCall, urCall, metaText, NULL, gps, true);
+                statusTimeout = false;
+            }
+      //      if (urCall[7] == 'E') // used for test echo function
+      //          recordEcho((uint8_t*)&buffer[8]);
+            if (validFrame && dstarReflConnected && gwTxBuffer.getSpace() >= respLen)
+            {
+                for (uint8_t x=0;x<respLen;x++)
+                    gwTxBuffer.put(buffer[x]);
+            }
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
-            if (dstarReflConnected && reflTxBuffer.getSpace() >= respLen)
+            if (validFrame && dstarReflConnected && gwTxBuffer.getSpace() >= respLen)
             {
                 for (uint8_t x=0;x<respLen;x++)
-                    reflTxBuffer.put(buffer[x]);
+                    gwTxBuffer.put(buffer[x]);
             }
 
             if (debugM)
@@ -783,12 +831,12 @@ void* startClient(void *arg)
                     break;
                 }
             }
-            if (urCall[7] == 'E')
-            {
-                sleep(2);
-                if (echoBuffer.getData() >= 12)
-                    echoPlayback(sockfd);
-            }
+       //     if (urCall[7] == 'E') // used for test echo function
+       //     {
+       //         sleep(2);
+       //         if (echoBuffer.getData() >= 12)
+       //             echoPlayback(sockfd);
+       //     }
             bzero(header, 49);
             bzero(urCall, 8);
             bzero(metaText, 23);
@@ -805,6 +853,7 @@ void* startClient(void *arg)
     return 0;
 }
 
+// Thread to send out going bytes to gateway.
 void* txThread(void *arg)
 {
     int  sockfd = (intptr_t)arg;
@@ -817,24 +866,24 @@ void* txThread(void *arg)
 
         if (loop > 100)
         {
-            if (reflTxBuffer.getData() >= 5)
+            if (gwTxBuffer.getData() >= 5)
             {
-                if (reflTxBuffer.peek() != 0x61)
+                if (gwTxBuffer.peek() != 0x61)
                 {
                     fprintf(stderr, "TX invalid header.\n");
                     continue;
                 }
                 uint8_t  byte[2];
                 uint16_t len = 0;
-                reflTxBuffer.npeek(byte[0], 1);
-                reflTxBuffer.npeek(byte[1], 2);
+                gwTxBuffer.npeek(byte[0], 1);
+                gwTxBuffer.npeek(byte[1], 2);
                 len = (byte[0] << 8) + byte[1];;
-                if (reflTxBuffer.getData() >= len)
+                if (gwTxBuffer.getData() >= len)
                 {
                     uint8_t buf[len];
                     for (int i=0;i<len;i++)
                     {
-                        reflTxBuffer.get(buf[i]);
+                        gwTxBuffer.get(buf[i]);
                     }
                     if (write(sockfd, buf, len) < 0)
                     {
@@ -847,29 +896,30 @@ void* txThread(void *arg)
             loop = 0;
         }
 
-        if (reflCommand.getData() >= 5)
+        // Send command data to gateway.
+        if (gwCommand.getData() >= 5)
         {
-            if (reflCommand.peek() != 0x61)
+            if (gwCommand.peek() != 0x61)
             {
-                fprintf(stderr, "TX invalid header.\n");
+                fprintf(stderr, "Command invalid header.\n");
             }
             else
             {
                 uint8_t  byte[2];
                 uint16_t len = 0;
-                reflCommand.npeek(byte[0], 1);
-                reflCommand.npeek(byte[1], 2);
+                gwCommand.npeek(byte[0], 1);
+                gwCommand.npeek(byte[1], 2);
                 len = (byte[0] << 8) + byte[1];;
-                if (reflCommand.getData() >= len)
+                if (gwCommand.getData() >= len)
                 {
                     uint8_t buf[len];
                     for (int i=0;i<len;i++)
                     {
-                        reflCommand.get(buf[i]);
+                        gwCommand.get(buf[i]);
                     }
                     if (write(sockfd, buf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        fprintf(stderr, "Command ERROR: remote disconnect\n");
                         break;
                     }
                 }
@@ -878,10 +928,12 @@ void* txThread(void *arg)
     }
     fprintf(stderr, "TX thread exited.\n");
     int iRet = 500;
+    dstarGWConnected = false;
     pthread_exit(&iRet);
     return NULL;
 }
 
+// Process incoming gateway bytes.
 void *processGatewaySocket(void *arg)
 {
     int      childfd = (intptr_t)arg;
@@ -890,11 +942,12 @@ void *processGatewaySocket(void *arg)
     uint16_t respLen = 0;
     uint8_t  typeLen = 0;
     uint8_t  buffer[BUFFER_SIZE];
+    char     gps[50] = "";
 
     dstarGWConnected = true;
     addGateway("main", "DSTAR");
 
-    while (connected)
+    while (dstarGWConnected)
     {
         int len = read(childfd, buffer, 1);
         if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
@@ -995,15 +1048,66 @@ void *processGatewaySocket(void *arg)
             ackDashbCommand("reflLinkDSTAR", "success");
             setReflectorStatus("DSTAR", (const char*)tmp, "Unlinked");
         }
+        else if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
+        {
+            ackDashbCommand("updateConfDSTAR", "success");
+        }
         else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
         {
+        }
+        else if (memcmp(type, TYPE_HEADER, typeLen) == 0)
+        {
+            if (!txOn)
+                write(sockfd, setMode, 5);
+            txOn = true;
+            start_time = time(NULL);
+            write(sockfd, buffer, respLen);
+            bzero(myCall, 9);
+            bzero(urCall, 9);
+            bzero(suffix, 5);
+            bzero(rpt1Call, 9);
+            bzero(rpt2Call, 9);
+            memcpy(rpt2Call, buffer+39, 8);
+            memcpy(rpt1Call, buffer+31, 8);
+            memcpy(urCall, buffer+23, 8);
+            memcpy(myCall, buffer+11, 8);
+            memcpy(suffix, buffer+19, 4);
+            metaText[0] = 0;
+            saveLastCall("DSTAR", "NET", myCall, urCall, metaText, NULL, "", true);
+        }
+        else if (memcmp(type, TYPE_DATA, typeLen) == 0)
+        {
+            txOn = true;
+            write(sockfd, buffer, respLen);
+            slowSpeedDataDecode(buffer[17], buffer[18], buffer[19]);
+            if (statusTimeout)
+            {
+                saveLastCall("DSTAR", "NET", myCall, urCall, metaText, NULL, gps, true);
+                statusTimeout = false;
+            }
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
             write(sockfd, buffer, respLen);
             duration = difftime(time(NULL), start_time);
+            if (txOn)
+                write(sockfd, setMode, 5);
+            txOn = false;
+            gps[0] = 0;
+            if (fLat != 0.0f && fLong != 0.0)
+            {
+                fprintf(stderr, "Lat: %f  Long: %f  Alt: %d\n", fLat, fLong, altitude);
+                sprintf(gps, "%f %f %d 0 0", fLat, fLong, altitude);
+                fLat = 0.0f;
+                fLong = 0.0f;
+                altitude = 0;
+            }
+            float loss_BER = 0.0f; // (float)decoder.bitErr / 3.68F;
+            saveLastCall("DSTAR", "NET", myCall, urCall, metaText, NULL, gps, false);
+            saveHistory("DSTAR", "NET", myCall , urCall, loss_BER, metaText, duration);
+            bzero(urCall, 8);
+            bzero(metaText, 23);
         }
-        delay(5);
     }
     fprintf(stderr, "Gateway disconnected.\n");
     dstarGWConnected = false;
@@ -1015,6 +1119,7 @@ void *processGatewaySocket(void *arg)
     return 0;
 }
 
+// Listen for incoming gateway connection.
 void *startTCPServer(void *arg)
 {
     struct hostent *hostp; /* client host info */
@@ -1187,6 +1292,16 @@ int main(int argc, char **argv)
         umask(0);
     }
 
+    if (readHostConfig("DSTAR", "rpt1Call") == "")
+    {
+        setHostConfig("DSTAR", "rpt1Call", "DIRECT");
+        setHostConfig("DSTAR", "rpt2Call", "DIRECT");
+    }
+
+    strcpy(rpt1Call, readHostConfig("DSTAR", "rpt1Call").c_str());
+    strcpy(rpt2Call, readHostConfig("DSTAR", "rpt2Call").c_str());
+    strcpy(myCall, readHostConfig("main", "callsign").c_str());
+
     clearDashbCommands();
     clearReflLinkStatus("DSTAR");
 
@@ -1229,6 +1344,23 @@ int main(int argc, char **argv)
     {
         if (statusTimeout)
         {
+            std::string parameter = readDashbCommand("updateConfDSTAR");
+            if (!parameter.empty())
+            {
+                strcpy(rpt1Call, readHostConfig("DSTAR", "rpt1Call").c_str());
+                strcpy(rpt2Call, readHostConfig("DSTAR", "rpt2Call").c_str());
+                strcpy(myCall, readHostConfig("main", "callsign").c_str());
+                gwCommand.put(0x61);
+                gwCommand.put(0x00);
+                gwCommand.put(0x09);
+                gwCommand.put(0x04);
+                gwCommand.put(TYPE_COMMAND[0]);
+                gwCommand.put(TYPE_COMMAND[1]);
+                gwCommand.put(TYPE_COMMAND[2]);
+                gwCommand.put(TYPE_COMMAND[3]);
+                gwCommand.put(COMM_UPDATE_CONF);
+            }
+
             if (dstarGWConnected)
             {
                 std::string parameter = readDashbCommand("reflLinkDSTAR");
@@ -1239,14 +1371,14 @@ int main(int argc, char **argv)
                 }
                 if (parameter == "unlink")
                 {
-                    reflCommand.put(0x61);
-                    reflCommand.put(0x00);
-                    reflCommand.put(0x08);
-                    reflCommand.put(0x04);
-                    reflCommand.put(TYPE_DISCONNECT[0]);
-                    reflCommand.put(TYPE_DISCONNECT[1]);
-                    reflCommand.put(TYPE_DISCONNECT[2]);
-                    reflCommand.put(TYPE_DISCONNECT[3]);
+                    gwCommand.put(0x61);
+                    gwCommand.put(0x00);
+                    gwCommand.put(0x08);
+                    gwCommand.put(0x04);
+                    gwCommand.put(TYPE_DISCONNECT[0]);
+                    gwCommand.put(TYPE_DISCONNECT[1]);
+                    gwCommand.put(TYPE_DISCONNECT[2]);
+                    gwCommand.put(TYPE_DISCONNECT[3]);
                     sleep(3);
                     statusTimeout = false;
                     continue;
@@ -1255,7 +1387,6 @@ int main(int argc, char **argv)
                 {
                     char tmp[41];
                     strcpy(tmp, parameter.c_str());
-               //     fprintf(stderr, "%s\n", tmp);
                     char *token = NULL;
                     token = strtok((char*)tmp, ",");
                     if (token != NULL)
@@ -1269,20 +1400,20 @@ int main(int argc, char **argv)
                             token = strtok(NULL, ",");
                             char module[2];
                             strcpy(module, token);
-                            reflCommand.put(0x61);
-                            reflCommand.put(0x00);
-                            reflCommand.put(0x16);
-                            reflCommand.put(0x04);
-                            reflCommand.put(TYPE_CONNECT[0]);
-                            reflCommand.put(TYPE_CONNECT[1]);
-                            reflCommand.put(TYPE_CONNECT[2]);
-                            reflCommand.put(TYPE_CONNECT[3]);
+                            gwCommand.put(0x61);
+                            gwCommand.put(0x00);
+                            gwCommand.put(0x16);
+                            gwCommand.put(0x04);
+                            gwCommand.put(TYPE_CONNECT[0]);
+                            gwCommand.put(TYPE_CONNECT[1]);
+                            gwCommand.put(TYPE_CONNECT[2]);
+                            gwCommand.put(TYPE_CONNECT[3]);
                             std::string callsign = readHostConfig("main", "callsign");
                             for (uint8_t x=0;x<6;x++)
-                                reflCommand.put(callsign.c_str()[x]);
+                                gwCommand.put(callsign.c_str()[x]);
                             for (uint8_t x=0;x<7;x++)
-                                reflCommand.put(name[x]);
-                            reflCommand.put(module[0]);
+                                gwCommand.put(name[x]);
+                            gwCommand.put(module[0]);
                             sleep(3);
                         }
                         else
@@ -1306,6 +1437,7 @@ int main(int argc, char **argv)
         }
         delay(500000);
     }
+    clearReflLinkStatus("DSTAR");
     fprintf(stderr, "DSTAR service terminated.\n");
     logError("main", "DSTAR host terminated.");
 }
