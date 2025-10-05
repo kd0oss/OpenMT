@@ -363,8 +363,8 @@ int8_t setHostConfig(const char* module_name, const char* key, const char* displ
     else
     {
         query = "UPDATE modem_host.config SET value = '";
-        query.append(value).append("' WHERE module = '").append(module_name).append("' ");
-        query.append("AND parameter = '").append(key).append("', display_type = '").append(display_type).append("'");
+        query.append(value).append("', display_type = '").append(display_type).append("' WHERE module = '").append(module_name).append("' ");
+        query.append("AND parameter = '").append(key).append("'");
         mysql_query(mysql_conn, query.c_str());
     }
 
