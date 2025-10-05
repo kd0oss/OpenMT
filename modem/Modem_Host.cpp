@@ -254,7 +254,7 @@ void dump(char *text, unsigned char *data, unsigned int length)
     // Convert to milliseconds
     milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 
-    fprintf(stdout, "%s: %lu\n", text, milliseconds);
+    fprintf(stdout, "%s: %llu\n", text, milliseconds);
 
     while (length > 0U)
     {

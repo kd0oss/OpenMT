@@ -14,7 +14,7 @@
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  *                                                                         *
- *   Some functions based on or inspired by Jonathan Naylor G4KLX          *
+ *   Some functions based on or inspired by MMDVM Jonathan Naylor G4KLX    *
  ***************************************************************************/
 
 #include <stdio.h>
