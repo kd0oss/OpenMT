@@ -43,7 +43,7 @@ CREATE TABLE `auth` (
 
 LOCK TABLES `auth` WRITE;
 /*!40000 ALTER TABLE `auth` DISABLE KEYS */;
-INSERT INTO `auth` VALUES ('admin','*94BDCEBE19083CE2A1F959FD02F964C7AF4CFC29');
+INSERT INTO `auth` VALUES ('admin','*4ACFE3202A5FF5CF467898FC58AAB1D615029441');
 /*!40000 ALTER TABLE `auth` ENABLE KEYS */;
 UNLOCK TABLES;
 
@@ -58,6 +58,7 @@ CREATE TABLE `config` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `module` varchar(30) NOT NULL DEFAULT 'main',
   `parameter` varchar(30) NOT NULL,
+  `display_type` varchar(25) NOT NULL DEFAULT 'none',
   `value` varchar(255) NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `module_params` (`module`,`parameter`) USING BTREE
