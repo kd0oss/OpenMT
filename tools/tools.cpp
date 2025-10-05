@@ -91,6 +91,7 @@ char* readConfig(const char* section, const char* key, char* value)
     return NULL; // Key not found
 }
 
+// Function to return a list of tokens separated by a delimiter from a string.
 std::vector<std::string> splitString(const std::string& input, char delimiter)
 {
     std::vector<std::string> tokens;
@@ -105,6 +106,7 @@ std::vector<std::string> splitString(const std::string& input, char delimiter)
     return tokens;
 }
 
+// Function to add comms history to database.
 int saveHistory(const char* mode, const char* type, const char* src,
                 const char* dst, float loss_BER, const char* message, uint16_t duration)
 {
@@ -152,6 +154,7 @@ int saveHistory(const char* mode, const char* type, const char* src,
     return 0;
 }
 
+// Function to save last call info to database.
 int saveLastCall(const char* mode, const char* type, const char* src,
                  const char* dst, const char* message, const char* sms, const char* gps, bool isTx)
 {
@@ -426,6 +429,7 @@ std::string readHostConfig(const char* module_name, const char* key)
     return ""; // Key not found
 }
 
+// Function to add active mode name to database.
 bool addMode(const char* module_name, const char* mode)
 {
     std::string modes = readHostConfig(module_name, "activeModes");
@@ -445,6 +449,7 @@ bool addMode(const char* module_name, const char* mode)
     return true;
 }
 
+// Function to delete active mode from database.
 bool delMode(const char* module_name, const char* mode)
 {
     std::string modes = readHostConfig(module_name, "activeModes");
@@ -467,6 +472,7 @@ bool delMode(const char* module_name, const char* mode)
     return true;
 }
 
+// Function to add active gateway to database.
 bool addGateway(const char* module_name, const char* mode)
 {
     std::string modes = readHostConfig(module_name, "gateways");
@@ -486,6 +492,7 @@ bool addGateway(const char* module_name, const char* mode)
     return true;
 }
 
+// Function to delete active gatway from database.
 bool delGateway(const char* module_name, const char* mode)
 {
     std::string modes = readHostConfig(module_name, "gateways");
@@ -568,6 +575,7 @@ std::string readDashbCommand(const char* command)
     return ""; // Key not found
 }
 
+// Function to acknowlege current dashboard command.
 bool ackDashbCommand(const char* command, const char* result)
 {
     char dbhost[20] = "localhost";
@@ -607,6 +615,7 @@ bool ackDashbCommand(const char* command, const char* result)
     return true;
 }
 
+// Function to clear current dashboard command.
 bool clearDashbCommands()
 {
     char dbhost[20] = "localhost";
@@ -641,6 +650,7 @@ bool clearDashbCommands()
     return true;
 }
 
+// Function to delete all reflector entries for a given mode.
 bool clearReflectorList(const char* type)
 {
    char dbhost[20] = "localhost";
@@ -679,6 +689,7 @@ bool clearReflectorList(const char* type)
     return true;
 }
 
+// Function to delete a given reflector entry.
 bool delReflector(const char* type, const char* name)
 {
    char dbhost[20] = "localhost";
@@ -717,6 +728,7 @@ bool delReflector(const char* type, const char* name)
     return true;
 }
 
+// Function to add a reflector entry.
 bool addReflector(const char* type, const char* name, const char* ip4Addr, const char* ip6Addr, uint16_t port,
                   const char* dashboardURL, const char* refl_title, const char* country)
 {
@@ -765,6 +777,7 @@ bool addReflector(const char* type, const char* name, const char* ip4Addr, const
     return true;
 }
 
+// Function to clear link status for all reflector entries for given mode.
 bool clearReflLinkStatus(const char* type)
 {
     char dbhost[20] = "localhost";
@@ -804,6 +817,7 @@ bool clearReflLinkStatus(const char* type)
     return true;
 }
 
+// Function to return address and port of give reflector.
 bool findReflector(const char* type, const char* name, char* ip4, uint16_t* port)
 {
     char dbhost[20] = "localhost";
@@ -865,6 +879,7 @@ bool findReflector(const char* type, const char* name, char* ip4, uint16_t* port
     return true;
 }
 
+// Function to set given reflector status.
 bool setReflectorStatus(const char* type, const char* name, const char* module)
 {
     char dbhost[20] = "localhost";
@@ -905,6 +920,7 @@ bool setReflectorStatus(const char* type, const char* name, const char* module)
     return true;
 }
 
+// Function to log errors to database.
 bool logError(const char* module, const char* message)
 {
     char dbhost[20] = "localhost";
@@ -944,6 +960,7 @@ bool logError(const char* module, const char* message)
     return true;
 }
 
+// Function to add status to database.
 bool addStatus(const char* property, const char* value)
 {
     char dbhost[20] = "localhost";
@@ -982,6 +999,7 @@ bool addStatus(const char* property, const char* value)
     return true;
 }
 
+// Function to update given status.
 bool updateStatus(const char* property, const char* value)
 {
     char dbhost[20] = "localhost";
@@ -1020,6 +1038,7 @@ bool updateStatus(const char* property, const char* value)
     return true;
 }
 
+// Function to delete given status.
 bool delStatus(const char* property)
 {
     char dbhost[20] = "localhost";
@@ -1058,6 +1077,7 @@ bool delStatus(const char* property)
     return true;
 }
 
+// Function to add GPS location to database.
 bool addGPS(const int id, const float latitude, const float longitude,
             const uint16_t altitude, const uint16_t bearing, const uint16_t speed)
 {
