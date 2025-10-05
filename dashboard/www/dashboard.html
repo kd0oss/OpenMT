@@ -32,7 +32,7 @@
       background-color: #000000;
       overflow: hidden;
    }
-   
+
    #wrap
    {
       padding: 10px;
@@ -40,19 +40,19 @@
       min-height: -moz-calc(100% - 100px);     /* Firefox */
       min-height:  calc(100% - 100px);         /* native  */
    }
-   
+
    header, section, footer, aside, nav, article, figure
    {
       display: block;
       background-color: #000000;
    }
-   
+
    .dashb
    {
       background-color: #000000;
       overflow: hidden;
    }
-   
+
    /* Set a style for all buttons */
    .login
    {
@@ -272,10 +272,28 @@
       font-family: "Lucida Console", "Courier New", monospace;
    }
 
+   .settingsauth
+   {
+      position: absolute;
+      top:  200px;
+      left: 1px;
+      width: 500px;
+      display: inline-block;
+   }
+
    .settingsauth input
    {
       position: absolute;
       left: 210px;
+   }
+
+   .authSaveButton
+   {
+      position: relative;
+      top: 40px;
+      left: -205px;
+      font-size: 20px;
+      background-color: lightgreen;
    }
 
    #generaltab
@@ -293,6 +311,22 @@
      background-color: lightblue;
    }
 
+   .settingsLocation
+   {
+      position: absolute;
+      top: 50px;
+      left: 1px;
+      width: 300px;
+      display: inline-block;
+   }
+
+   .settingsLocation input
+   {
+      position: absolute;
+      left: 150px;
+      width: 170px;
+   }
+
    .genSettings
    {
       position: relative;
@@ -300,6 +334,14 @@
       left: 10px;
       height: 400px;
       display: inline-block;
+   }
+
+   .genSaveButton
+   {
+      position: absolute;
+      top: 130px;
+      font-size: 20px;
+      background-color: lightgreen;
    }
 
    .modemSettings
@@ -565,14 +607,6 @@
       z-index: 3;
    }
 
-   .genSaveButton
-   {
-      position: absolute;
-      bottom: 160px;
-      font-size: 20px;
-      background-color: lightgreen;
-   }
-
    .modemSaveButton
    {
       position: absolute;
@@ -624,6 +658,36 @@
       overflow-y: auto;
       scrollbar-color: red yellow;
    }
+
+   .refl_dropdown
+   {
+      position: relative;
+   }
+
+   .mode_options
+   {
+      position: relative;
+   }
+
+   .mode_options input
+   {
+      width: 150px;
+   }
+
+   .mode_options button
+   {
+      font-size: 18px;
+      background-color: lightyellow;
+   }
+
+   .mode_section
+   {
+      position: relative;
+      background-color: #a9ec9799;
+      border-style: solid;
+      border-color: yellow;
+      border-width: 3px;
+   }
    </style>
 </head>
 
@@ -635,6 +699,8 @@
 var mode = "";
 var type = "";
 var duplex = false;
+var station_latitude = 0.0;
+var station_longitude = 0.0;
 var username = "admin";
 var rptrCallsign = "N0CALL";
 var dashboardTitle = "Modem Dashboard";
@@ -646,16 +712,18 @@ var srcCall = "";
 var dstCall = "";
 var metaText = "";
 var smsText = "";
-var activeModes = "";
-var activeGateways = "";
-var gwActive = [];
+var activeModes = "none";
+var modeOptions = [];
 var mdActive = [];
+var activeGateways = "none";
 var authenticated = false;
 var rid = "";
 var last_rid = "x";
 var modemFields = "";
 var map;
+var marker;
 
+/* Initialize page structure */
 function openPage(tabln,tab,pageName,elmnt,color)
 {
   if (pageName == "settingstab" && !authenticated)
@@ -675,6 +743,111 @@ function openPage(tabln,tab,pageName,elmnt,color)
   elmnt.style.backgroundColor = color;
 }
 
+/* Load configuration and start refresh processes */
+function initDashBd()
+{
+  getConfig();
+  setTimeout(fetchStatus, 2000);
+  setTimeout(buildHistoryTable, 3000);
+  setTimeout(updateClock, 1000);
+}
+
+/* Save mode options to database */
+async function saveModeOption(mode, id)
+{
+  var value = document.getElementById(mode+"_"+id).value;
+  if (value == "")
+  {
+    alert("Value cannot be blank.");
+    return;
+  }
+  var url = "data_query.php?command=saveModeOption&mode="+mode+"&parameter="+id+"&value="+encodeURIComponent(value);
+  var resp = await fetch(url);
+  if (resp.ok)
+  {
+    var tmp = await resp.text();
+    if (tmp == "failed")
+      alert("Save failed.");
+    else
+    {
+      document.body.style.cursor = 'wait';
+      url = "data_query.php?command=dashbCom&action=updateConf"+mode+"&parameter=readConfig";
+      resp = await fetch(url);
+      if (resp.ok)
+      {
+        var tmp = await resp.text();
+        if (tmp != "success")
+        {
+          alert("Set new config failed!");
+        }
+        else
+          alert("Update successful.");
+      }
+      document.body.style.cursor = 'default';
+    }
+  }
+  else
+    alert("Save failed.");
+}
+
+/* Display mode options in Mode tab */
+function displayModeOptions(mode, dtype, id, value)
+{
+  if (document.getElementById('span_'+mode+'_'+id) || mode == "none")
+    return;
+
+  if (!document.getElementById(mode+'_section'))
+  {
+    var section = "<div class='mode_section' id='"+mode+"_section'>";
+    section += "<label style='font-weight: bold;'>"+mode+" Section</label><br>";
+    section += "</div>";
+    var tmp = document.getElementById("modetab").innerHTML;
+    document.getElementById("modetab").innerHTML = tmp+section;
+  }
+
+  if (value != "none")
+  {
+    var content = document.getElementById(mode+"_section").innerHTML;
+    var html = "<span class='mode_options' id='span_"+mode+"_"+id+"'>";
+    html += "<label>"+id+"</label>";
+    if (dtype == "input")
+    {
+      html += "&nbsp;<input id='"+mode+"_"+id+"' type='text' value='"+value+"'>";
+      html += "&nbsp;<button onclick='saveModeOption(\""+mode+"\", \""+id+"\")'>Save</button>";
+    }
+    html += "<br></span>";
+    document.getElementById(mode+"_section").innerHTML = content+html;
+  }
+}
+
+/* Step through mode options array and call display function */
+function addMode()
+{
+  if (modeOptions.length > 0)
+  {
+    for (var i=0;i<modeOptions.length;i++)
+    {
+      if (modeOptions[i] != "none")
+      {
+        for (var j=0;j<modeOptions[i].length;j++)
+        {
+          var secs = modeOptions[i][j].split('\x1C');
+          var fields = secs[0].split('\x1D');
+          var param = fields[1];
+          fields = secs[1].split('\x1D');
+          var dtype = fields[1];
+          fields = secs[2].split('\x1D');
+          var value = fields[1];
+          displayModeOptions(mdActive[i], dtype, param, value);
+        }
+      }
+      else
+        displayModeOptions(mdActive[i], "", "", "none");
+    }
+  }
+}
+
+/* Update mode status. IE. Idle, RX or TX */
 function updateModeStatus()
 {
   var table = "<table class='activeModes'><tr><th>Modes</th><th>Status</th></tr>";
@@ -693,53 +866,84 @@ function updateModeStatus()
   document.getElementById('activeModes').innerHTML = table;
 }
 
-function updateGatewayStatus()
+/* Load mode options from database and call display functions */
+async function configModes(prevModes)
 {
-  var table = "";
+  let myPromise = new Promise(async function(resolve, reject)
+  {
+    if (mdActive.length > 0)
+    {
+      modeOptions.length = 0;
+      var url = "";
+      for (var i=0;i<mdActive.length;i++)
+      {
+        if (mdActive[i] == "none")
+          continue;
+        url = "data_query.php?command=getModeOptions&mode="+mdActive[i];
+        var resp = await fetch(url);
+        if (resp.ok)
+        {
+          var tmp = await resp.text();
+          if (tmp != "none")
+          {
+            modeOptions[i] = tmp.split('\x1E');
+          }
+          else
+            modeOptions[i] = "none";
+        }
+      }
+    }
+    addMode();
+    resolve("ok");
+  });
+  await myPromise;
+}
+
+/* Load current reflector link status from database and update display */
+async function updateGatewayStatus()
+{
   if (activeGateways != "")
   {
+    var url = "data_query.php?command=getLinkedReflectors";
+    var resp = await fetch(url);
+    if (resp.ok)
+    {
+      var tmp = await resp.text();
+      if (tmp != "none")
+      {
+        var lines = tmp.split('\x1E');
+        for (var i=0;i<lines.length;i++)
+        {
+          fields = lines[i].split('\x1C');
+          values = fields[0].split('\x1D');
+          type = values[1];
+          values = fields[1].split('\x1D');
+          name = values[1];
+          values = fields[2].split('\x1D');
+          module = values[1];
+          if (document.getElementById(type+'link'))
+          {
+            document.getElementById(type+'net').value = name;
+            document.getElementById(type+'netmod').value = module;
+            if (document.getElementById(type+'_linkstat'))
+              document.getElementById(type+'_linkstat').innerHTML = "Linked to "+name+" "+module;
+            document.getElementById(type+'link').textContent = "Unlink";
+          }
+        }
+      }
+    }
+
     tmp = activeGateways.split(',');
     for (var i=0;i<tmp.length;i++)
     {
       stat = "Not Linked";
-      if (i > 0) table += "<br>";
-      table += "<table class='activeGW'><tr><th>"+tmp[i]+" Gateway</th></tr>";
       if (document.getElementById(tmp[i]+'_linkstat'))
         stat = document.getElementById(tmp[i]+'_linkstat').innerHTML;
-      table += "<tr><td id='"+tmp[i]+"_linkstat'>"+stat+"</td></tr>";
-      if (gwActive.length != 0)
-      {
-        var found = false;
-        for (var x=0;x<gwActive.length;x++)
-        {
-          fields = gwActive[x].split(',');
-          if (fields[0] == tmp[i] && fields[1] == "notset")
-          {
-            found = true;
-            gwActive[x] = tmp[i]+",set";
-          }
-        }
-        if (found)
-        {
-          createReflDropDown(tmp[i]);
-        }
-      }
-      table += "</table>";
     }
   }
-  document.getElementById('activeGW').innerHTML = table;
 }
 
-function initDashBd()
-{
-  getConfig();
-  updateModeStatus();
-  updateGatewayStatus();
-  setTimeout(fetchStatus, 1000);
-  setTimeout(buildHistoryTable, 3000);
-  setTimeout(updateClock, 1000);
-}
-
+/* Display and update clocks */
 function updateClock()
 {
     const date = new Date();
@@ -753,6 +957,7 @@ function updateClock()
     setTimeout(updateClock, 1000);
 }
 
+/* Load general configuraion from database */
 async function getConfig()
 {
   activeGateways = "";
@@ -837,44 +1042,63 @@ async function getConfig()
       document.getElementById('callsign').value = rptrCallsign;
     }
 
-    if (fields[0] == 'gateways')
+    if (fields[0] == 'latitude')
     {
-      if (fields[1] == "none")
-        activeGateways = "";
-      else
-        activeGateways = fields[1];
-      gwActive.length = 0;
-      if (activeGateways != "")
-      {
-        gw = activeGateways.split(',');
-        for (var x=0;x<gw.length;x++)
-        {
-          gwActive[x] = gw[x];
-        }
-      }
+      station_latitude = fields[1];
+      document.getElementById('station_latitude').value = Number(station_latitude);
     }
 
-    if (fields[0] == 'activeModes')
+    if (fields[0] == 'longitude')
     {
-      if (fields[1] == "none")
-        activeModes = "";
-      else
-        activeModes = fields[1];
-      mdActive.length = 0;
-      if (activeModes != "")
-      {
-        md = activeModes.split(',');
-        for (var x=0;x<md.length;x++)
-        {
-          mdActive[x] = md[x];
-        }
-      }
+      station_longitude = fields[1];
+      document.getElementById('station_longitude').value = Number(station_longitude);
     }
   }
-  updateModeStatus();
+  map.setView([Number(station_latitude), Number(station_longitude)], 10);
+  marker.remove();
+  marker = new L.Marker([Number(station_latitude), Number(station_longitude)]);
+  marker.addTo(map);
+}
+
+/* Setup and initialize gateway display */
+function configGateways(prevGateways)
+{
+  if (prevGateways != "none")
+  {
+    var modes = prevGateways.split(',');
+    for (var i=0;i<modes.length;i++)
+    {
+       var ele = document.getElementById(modes[i]+'_refl');
+       if (ele)
+         ele.remove();
+       ele = document.getElementById(modes[i]+'_gateway');
+       if (ele)
+         ele.remove();
+    }
+  }
+  if (activeGateways == "none")
+    return;
+  var modes = activeGateways.split(',');
+
+  var table = "";
+  for (var i=0;i<modes.length;i++)
+  {
+    html = document.getElementById(modes[i]+"_section").innerHTML;
+    html += createReflDropDown(modes[i]);
+    document.getElementById(modes[i]+"_section").innerHTML = html;
+    getReflList(modes[i]);
+
+    if (i > 0) table += "<br>";
+    table += "<table id='"+modes[i]+"_gateway' class='activeGW'><tr><th>"+modes[i]+" Gateway</th></tr>";
+    table += "<tr><td id='"+modes[i]+"_linkstat'>Not Linked</td></tr>";
+    table += "</table>";
+  }
+  document.getElementById('activeGW').innerHTML = table;
+
   updateGatewayStatus();
 }
 
+/* Load current host status from database */
 async function fetchStatus()
 {
   var txEnabled = false;
@@ -912,44 +1136,46 @@ async function fetchStatus()
       else
         txEnabled = false;
     }
-//    if (rid != last_rid)
+    if (fields[0] == 'srcCall')
     {
-      if (fields[0] == 'srcCall')
-      {
-        srcCall = fields[1];
-        if (srcCall == "")
-          break;
-      }
-      if (fields[0] == 'mode')
-        mode = fields[1];
-      if (fields[0] == 'type')
-        type = fields[1];
-      if (fields[0] == 'dstCall')
-        dstCall = fields[1];
-      if (fields[0] == 'metaText')
-        metaText = decodeURIComponent(fields[1]);
-      if (metaText.trim() == "")
-        metaText = "none";
-      if (fields[0] == 'latitude')
-        latitude = fields[1];
-      if (fields[0] == 'longitude')
-        longitude = fields[1];
-      if (fields[0] == 'altitude')
-        altitude = fields[1];
-      if (fields[0] == 'bearing')
-        bearing = fields[1];
-      if (fields[0] == 'speed')
-        speed = fields[1];
-      if (fields[0] == 'smsText')
-        smsText = fields[1];
+      srcCall = fields[1];
+      if (srcCall == "")
+        break;
     }
+    if (fields[0] == 'mode')
+      mode = fields[1];
+    if (fields[0] == 'type')
+      type = fields[1];
+    if (fields[0] == 'dstCall')
+      dstCall = fields[1];
+    if (fields[0] == 'metaText')
+      metaText = decodeURIComponent(fields[1]);
+    if (metaText.trim() == "")
+      metaText = "none";
+    if (fields[0] == 'latitude')
+      latitude = fields[1];
+    if (fields[0] == 'longitude')
+      longitude = fields[1];
+    if (fields[0] == 'altitude')
+      altitude = fields[1];
+    if (fields[0] == 'bearing')
+      bearing = fields[1];
+    if (fields[0] == 'speed')
+      speed = fields[1];
+    if (fields[0] == 'smsText')
+      smsText = fields[1];
   }
   if (rid != last_rid)
   {
     if (smsText != "")
       addMessage(srcCall, decodeURIComponent(smsText));
     if (latitude != "" && longitude != "")
-      createMap(Number(latitude), Number(longitude));
+    {
+      map.setView([Number(latitude), Number(longitude)], 10);
+      marker.remove();
+      marker = new L.Marker([Number(station_latitude), Number(station_longitude)]);
+      marker.addTo(map);
+    }
     last_rid = rid;
   }
   document.getElementById('cmode').innerHTML = mode;
@@ -978,6 +1204,9 @@ async function fetchStatus()
       document.getElementById(mode+'_stat').innerHTML = "RX";
   }
 
+  var prevModes = activeModes;
+  var prevGateways = activeGateways;
+
   url = "data_query.php?command=getDashConfig";
   resp = await fetch(url);
   if (!resp.ok)
@@ -991,116 +1220,51 @@ async function fetchStatus()
     setTimeout(fetchStatus, 1000);
     return;
   }
+  var modeChanged = false;
   tmp = tmp.split('\x1E');
   for (var i=0;i<tmp.length;i++)
   {
     var fields = tmp[i].split('\x1D');
-    if (fields[0] == 'gateways')
-    {
-      if (fields[1] == "none")
-        activeGateways = "";
-      else
-        activeGateways = fields[1];
-      gwActive.length = 0;
-      if (activeGateways != "")
-      {
-        gw = activeGateways.split(',');
-        for (var x=0;x<gw.length;x++)
-        {
-          gwActive[x] = gw[x]+",notset";
-        }
-      }
-
-      var slist = document.getElementById('modetab').querySelectorAll("span");
-      for (var x=0;x<slist.length;x++)
-      {
-        var found = false;
-        for (var j=0;j<gwActive.length;j++)
-        {
-          gw = gwActive[j].split(',');
-          if (gw[0] == slist[x].id)
-          {
-            gwActive[j] = gw[0]+",set";
-            found = true;
-          }
-        }
-        if (!found)
-        {
-          slist[x].remove();
-        }
-      }
-    }
-
     if (fields[0] == 'activeModes')
     {
-      if (fields[1] == "none")
-        activeModes = "";
-      else
+      if (fields[1] != activeModes)
+      {
+        modeChanged = true;
+        document.getElementById('modetab').innerHTML = "";
         activeModes = fields[1];
-      mdActive.length = 0;
-      if (activeModes != "")
-      {
-        md = activeModes.split(',');
-        for (var x=0;x<md.length;x++)
+        mdActive.length = 0;
+        if (activeModes != "")
         {
-          mdActive[x] = md[x];
+          md = activeModes.split(',');
+          for (var x=0;x<md.length;x++)
+          {
+            mdActive[x] = md[x];
+          }
         }
+        configModes(prevModes);
       }
     }
-  }
 
-  var url = "data_query.php?command=getLinkedReflectors";
-  var resp = await fetch(url);
-  if (!resp.ok)
-  {
-    setTimeout(fetchStatus, 1000);
-    return;
-  }
-
-  var tmp = await resp.text();
-  if (tmp == "none")
-  {
-    if (activeGateways != "")
+    if (fields[0] == 'gateways' &&  activeModes != "none")
     {
-      tmp = activeGateways.split(',');
-      for (var x=0;x<tmp.length;x++)
+      if (fields[1] != activeGateways)
       {
-        if (document.getElementById(tmp[x]+'link'))
-        {
-          document.getElementById(tmp[x]+'_linkstat').innerHTML = "Not Linked";
-          document.getElementById(tmp[x]+'link').textContent = "Link";
-        }
+        activeGateways = fields[1];
       }
     }
   }
+
+  if ((prevGateways != activeGateways) || modeChanged)
+    setTimeout(configGateways, 700, prevGateways);
   else
-  {
-    lines = tmp.split('\x1E');
-    for (var i=0;i<lines.length;i++)
-    {
-      fields = lines[i].split('\x1C');
-      values = fields[0].split('\x1D');
-      type = values[1];
-      values = fields[1].split('\x1D');
-      name = values[1];
-      values = fields[2].split('\x1D');
-      module = values[1];
-      if (document.getElementById(type+'link'))
-      {
-        document.getElementById(type+'net').value = name;
-        document.getElementById(type+'netmod').value = module;
-        document.getElementById(type+'_linkstat').innerHTML = "Linked to "+name+" "+module;
-        document.getElementById(type+'link').textContent = "Unlink";
-      }
-    }
-  }
+    updateGatewayStatus();
 
   updateModeStatus();
-  updateGatewayStatus();
 
   setTimeout(fetchStatus, 1000);
 }
 
+/* Load communcations history from database and update display table */
 async function buildHistoryTable()
 {
   var fields;
@@ -1167,6 +1331,7 @@ async function buildHistoryTable()
   setTimeout(buildHistoryTable, 5000);
 }
 
+/* Check if user authenticated for admin functions */
 function checkAuth()
 {
   if (!authenticated)
@@ -1178,6 +1343,7 @@ function checkAuth()
     openPage('tablink', 'tabcontent', 'settingstab', document.getElementById('Settings'), 'green');
 }
 
+/* Login process for administrative functions */
 async function doAuthentication()
 {
   username = document.getElementById('fusername').value;
@@ -1196,24 +1362,7 @@ async function doAuthentication()
   }
 }
 
-async function saveMode(mode, enabled, net)
-{
-  var enable = "false";
-  if (enabled)
-    enable = "true";
-  var url = "data_query.php?command=saveMode&mode="+mode+"&net="+net+"&enabled="+enable;
-  var resp = await fetch(url);
-  if (!resp.ok) return;
-  var tmp = await resp.text();
-  if (tmp != "success")
-    alert("Save failed!");
-  else
-  {
-    getConfig();
-    alert("Saved successfully.");
-  }
-}
-
+/* Save modem configuraion */
 async function saveModem()
 {
   document.body.style.cursor = 'wait';
@@ -1263,10 +1412,31 @@ async function saveModem()
   }
 }
 
+/* Save general configuraion */
 async function saveGeneral()
 {
   var newTitle = document.getElementById('title').value;
   var newCall = document.getElementById('callsign').value;
+  var newLatitude = document.getElementById('station_latitude').value;
+  var newLongitude = document.getElementById('station_longitude').value;
+  var moduleName = "main"; // this may change if multiple modems are used.
+
+  var url = "data_query.php?command=saveGeneral&moduleName="+moduleName+"&title="+newTitle+"&callsign="+newCall;
+  url += "&latitude="+newLatitude+"&longitude="+newLongitude;
+  var resp = await fetch(url);
+  if (!resp.ok) return;
+  var tmp = await resp.text();
+  if (tmp != "success")
+    alert(tmp);
+  else
+  {
+    getConfig();
+    alert("Saved successfully.");
+  }
+}
+
+async function saveAuth()
+{
   var newUsername = document.getElementById('username').value;
   var newPassword = document.getElementById('password').value;
   var newRPassword = document.getElementById('rpassword').value;
@@ -1282,7 +1452,7 @@ async function saveGeneral()
     alert("Password cannot be blank.");
     return;
   }
-  var url = "data_query.php?command=saveGeneral&moduleName="+moduleName+"&title="+newTitle+"&callsign="+newCall+"&username="+newUsername+"&passwd="+newPassword;
+  var url = "data_query.php?command=saveGeneral&moduleName="+moduleName+"&username="+newUsername+"&passwd="+newPassword;
   var resp = await fetch(url);
   if (!resp.ok) return;
   var tmp = await resp.text();
@@ -1295,6 +1465,7 @@ async function saveGeneral()
   }
 }
 
+/* Load reflector list for give mode type and add to drop down */
 async function getReflList(reflType)
 {
   var list = document.getElementById(reflType+'net');
@@ -1316,6 +1487,7 @@ async function getReflList(reflType)
   }
 }
 
+/* Use database to send command to link/unlink reflector */
 async function reflConnect(reflType)
 {
   var url;
@@ -1343,7 +1515,6 @@ async function reflConnect(reflType)
   }
   else
   {
- //   getConfig();
     if (document.getElementById(reflType+'link').textContent == "Link")
     {
         document.getElementById(reflType+'link').textContent = "Unlink";
@@ -1353,16 +1524,15 @@ async function reflConnect(reflType)
     {
         document.getElementById(reflType+'link').textContent = "Link";
         document.getElementById(reflType+'_linkstat').innerHTML = "Not Linked";
- //   alert(action + " successful.");
     }
   }
   document.body.style.cursor = 'default';
 }
 
+/* Create and setup empty reflector drop down lists */
 function createReflDropDown(reflType)
 {
-  html = document.getElementById('modetab').innerHTML;
-  html += "<span id='"+reflType+"'>";
+  html = "<span class='refl_dropdown' id='"+reflType+"_refl'><br>";
   html += "<label for='"+reflType+"net'>Reflector:</label>";
   html += "<select id='"+reflType+"net' name='"+reflType+"net'></select>";
   html += "&nbsp;<select id='"+reflType+"netmod'>";
@@ -1370,12 +1540,11 @@ function createReflDropDown(reflType)
     html += "<option value='"+String.fromCharCode(x)+"'>"+String.fromCharCode(x)+"</option>";
   html += "</select>";
   html += "&nbsp;<button id='"+reflType+"link' class='linkto' onclick='reflConnect(\""+reflType+"\")'>Link</button>";
-//        <button class='saveButton' onclick='saveMode("M17", document.getElementById("m17enabled").checked, document.getElementById("m17net").value)'>Save</button>
   html += "</span>";
-  document.getElementById('modetab').innerHTML = html;
-  setTimeout(getReflList, 1000, reflType);
+  return html;
 }
 
+/* Create and display map centered on current GSP coordinates */
 function createMap(lat, long)
 {
   var mapOptions = {
@@ -1398,10 +1567,11 @@ function createMap(lat, long)
   // Adding layer to the map
   map.addLayer(layer);
 
-  var marker = new L.Marker([lat, long]);
+  marker = new L.Marker([lat, long]);
   marker.addTo(map);
 }
 
+/* Add incoming message to message display list */
 function addMessage(source, message)
 {
   var table = document.getElementById('messageTable');
@@ -1493,7 +1663,14 @@ function addMessage(source, message)
         <label for='title'>Title:</label>
         <input id='title' type='text' value='Modem Dashboard' size='40' maxlength='40' autofocus>
         <label for='callsign'>Callsign:</label>
-        <input id='callsign' type='text' size='8' maxlength='8'><br><br>
+        <input id='callsign' type='text' size='8' maxlength='8'>
+        <span class='settingsLocation'>
+          <label for='station_latitude'>Latitude:</label>
+          <input id='station_latitude' type='float' value='0.0'><br><br>
+          <label for='station_longitude'>Longitude:</label>
+          <input id='station_longitude' type='float' value='0.0'>
+        </span>
+        <button class='genSaveButton' onclick='saveGeneral()'>Save</button>
         <span class='settingsauth'>
           <label for='username'>User:</label>
           <input id='username' type='text' value='admin' size='20' minlength='4' maxlength='20'>
@@ -1503,8 +1680,8 @@ function addMessage(source, message)
           <br><br>
           <label for='rpassword'>Retype Password:</label>
           <input id='rpassword' type='password' size='20' minlength='8' maxlength='40'>
+          <button class='authSaveButton' onclick='saveAuth()'>Save</button>
         </span>
-        <br><button class='genSaveButton' onclick='saveGeneral()'>Save</button>
       </span>
     </div>
     <div id='modemtab' class='genset'>
@@ -1564,9 +1741,10 @@ function addMessage(source, message)
 </div>
 
 <script type='text/javascript' charset='utf-8'>
+/* Select default tabs on startup */
 document.getElementById("Dashboard").click();
 document.getElementById("General").click();
-createMap(40.970221, -91.343585);
+createMap(Number(station_latitude), Number(station_longitude));
 </script>
 
 </body>

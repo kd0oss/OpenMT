@@ -117,11 +117,11 @@ if ($command == "getDashConfig")
     global $mysql;
 
     $params = "";
-    $result = mysqli_query($mysql, "SELECT * FROM modem_host.config WHERE module = 'main' ORDER BY id");
+    $result = mysqli_query($mysql, "SELECT parameter, value FROM modem_host.config WHERE module = 'main' ORDER BY id");
     while ($row = mysqli_fetch_row($result))
     {
         if ($params != "") $params .= "\x1E";
-        $params .= $row[2]."\x1D".$row[3];
+        $params .= $row[0]."\x1D".$row[1];
     }
     if ($params != "")
         echo htmlentities($params);
@@ -167,6 +167,30 @@ if ($command == "saveGeneral")
         {
             mysqli_close($mysql);
             exit("failed username");
+        }
+    }
+
+    if (isset($_GET['latitude']))
+    {
+        $value = htmlspecialchars($_GET['latitude']);
+        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE module = '".$module_name."' ";
+        $query .= "AND parameter = 'latitude'";
+        if (mysqli_query($mysql, $query) == false)
+        {
+            mysqli_close($mysql);
+            exit("failed latitude");
+        }
+    }
+
+    if (isset($_GET['longitude']))
+    {
+        $value = htmlspecialchars($_GET['longitude']);
+        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE module = '".$module_name."' ";
+        $query .= "AND parameter = 'longitude'";
+        if (mysqli_query($mysql, $query) == false)
+        {
+            mysqli_close($mysql);
+            exit("failed longitude");
         }
     }
 
@@ -544,6 +568,53 @@ if ($command == "dashbCom")
             mysqli_query($mysql, "DELETE FROM modem_host.dashb_commands WHERE id = $id");
             if ($timeout == 0)
                 echo "failed";
+        }
+    }
+    else
+    {
+        echo "failed";
+    }
+}
+
+if ($command == "getModeOptions")
+{
+    global $mysql;
+
+    if (isset($_GET['mode']))
+    {
+        $mode = htmlspecialchars($_GET['mode']);
+        $query = "SELECT parameter, display_type, value FROM modem_host.config WHERE module = '".$mode."'";
+        $result = mysqli_query($mysql, $query);
+        while ($row = mysqli_fetch_row($result))
+        {
+            if ($data != "") $data .= "\x1E";
+            $data .= "parameter\x1D".$row[0]."\x1Cdtype\x1D".$row[1]."\x1Cvalue\x1D".$row[2];
+        }
+        if ($data != "")
+            echo htmlentities($data);
+        else
+            echo "none";
+    }
+    else
+    {
+        echo "failed";
+    }
+}
+
+if ($command == "saveModeOption")
+{
+    global $mysql;
+
+    if (isset($_GET['mode']) && isset($_GET['parameter']) && isset($_GET['value']))
+    {
+        $mode = htmlspecialchars($_GET['mode']);
+        $parameter = htmlspecialchars($_GET['parameter']);
+        $value = htmlspecialchars($_GET['value']);
+        $query = "UPDATE modem_host.config SET value = '$value' WHERE module = '$mode' AND parameter = '$parameter'";
+        if (mysqli_query($mysql, $query) == false)
+        {
+            mysqli_close($mysql);
+            exit("failed");
         }
     }
     else
