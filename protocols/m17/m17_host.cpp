@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2025 by Rick KD0OSS             *
+ *   Copyright (C) 2025 by Rick KD0OSS                                     *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -14,6 +14,8 @@
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  *                                                                         *
+ *   This software makes use of M17 functions from OpenRTX (C).            *
+ *   http://openrtx.org                                                    *
  ***************************************************************************/
 
 #include <stdio.h>
@@ -72,6 +74,8 @@ using namespace M17;
 #define VERSION     "2025-08-15"
 #define BUFFER_SIZE 1024
 
+// Mode specific data sent to configure modem. Data from MMDVM project by Jonathan Naylor G4KLX
+//================================================================================================================================
 static int16_t TX_RRC_0_5_FILTER[] = {0, 0, 0, 0, -290, -174, 142, 432, 438, 90, -387, -561, -155, 658, 1225, 767,
 				  -980, -3326, -4648, -3062, 2527, 11552, 21705, 29724, 32767, 29724, 21705,
 				  11552, 2527, -3062, -4648, -3326, -980, 767, 1225, 658, -155, -561, -387, 90,
@@ -79,16 +83,17 @@ static int16_t TX_RRC_0_5_FILTER[] = {0, 0, 0, 0, -290, -174, 142, 432, 438, 90,
 static int16_t RX_RRC_0_5_FILTER[] = {-147, -88, 72, 220, 223, 46, -197, -285, -79, 334, 623, 390, -498, -1691, -2363, -1556, 1284, 5872, 11033,
 				  15109, 16656, 15109, 11033, 5872, 1284, -1556, -2363, -1691, -498, 390, 623, 334, -79, -285, -197, 46, 223,
 				  220, 72, -88, -147, 0};
-const uint8_t  RX_RRC_0_5_FILTER_LEN   = 42;
-const uint8_t  TX_RRC_0_5_FILTER_LEN   = 45;
+const uint8_t  RX_RRC_0_5_FILTER_LEN       = 42;
+const uint8_t  TX_RRC_0_5_FILTER_LEN       = 45;
 uint8_t        TX_RRC_0_5_FILTER_PHASE_LEN = 9;
-uint8_t        RX_RRC_FILTER_STATE_LEN = 70;
-uint8_t        TX_RRC_FILTER_STATE_LEN = 16;
-uint8_t        TX_SYMBOL_LENGTH = 5;
-char           MODE_NAME[11]           = "M17";
-char           MODEM_TYPE[6]           = "4FSK";
-bool           USE_DC_FILTER           = true;
-bool           USE_LP_FILTER           = false;
+uint8_t        RX_RRC_FILTER_STATE_LEN     = 70;
+uint8_t        TX_RRC_FILTER_STATE_LEN     = 16;
+uint8_t        TX_SYMBOL_LENGTH            = 5;
+char           MODE_NAME[11]               = "M17";
+char           MODEM_TYPE[6]               = "4FSK";
+bool           USE_DC_FILTER               = true;
+bool           USE_LP_FILTER               = false;
+//================================================================================================================================
 
 const char *TYPE_LSF            = "M17L";
 const char *TYPE_STREAM         = "M17S";
@@ -150,16 +155,16 @@ M17::M17LinkSetupFrame pkt_lsf;  //< M17 packet link setup frame
 M17::M17FrameDecoder   decoder;  //< M17 frame decoder
 M17::M17FrameEncoder   encoder;  //< M17 frame encoder
 
-unsigned int       clientlen;  //< byte size of client's address
-char              *hostaddrp;  //< dotted decimal host addr string
-int                optval;     //< flag value for setsockopt
-struct sockaddr_in serveraddr; //< server's addr
-struct sockaddr_in clientaddr; //< client addr
+unsigned int       clientlen;    //< byte size of client's address
+char              *hostaddrp;    //< dotted decimal host addr string
+int                optval;       //< flag value for setsockopt
+struct sockaddr_in serveraddr;   //< server's addr
+struct sockaddr_in clientaddr;   //< client addr
 
 CRingBuffer<uint8_t> txBuffer(3600);
 CRingBuffer<uint8_t> rxBuffer(3600);
-CRingBuffer<uint8_t> reflTxBuffer(3600);
-CRingBuffer<uint8_t> reflCommand(200);
+CRingBuffer<uint8_t> gwTxBuffer(3600);
+CRingBuffer<uint8_t> gwCommand(200);
 
 pthread_t modemHostid;
 pthread_t gwHostid;
@@ -184,6 +189,8 @@ void delay(uint32_t delay)
     nanosleep(&req, &rem);
 };
 
+// Print debug data.
+// From MMDVM project by Jonathan Naylor G4KLX.
 void dump(char *text, unsigned char *data, unsigned int length)
 {
     unsigned int offset = 0U;
@@ -227,6 +234,8 @@ void dump(char *text, unsigned char *data, unsigned int length)
     }
 }
 
+// Simple timer thread.
+// Each loop through the while statement takes 1 millisecond.
 void* timerThread(void *arg)
 {
     uint32_t loop[3] = {0, 0, 0};
@@ -280,6 +289,7 @@ void* timerThread(void *arg)
     return NULL;
 }
 
+// Start up communication with modem host.
 void* startClient(void *arg)
 {
     struct sockaddr_in serv_addr;
@@ -300,11 +310,6 @@ void* startClient(void *arg)
         exit(EXIT_FAILURE);
     }
 
-//    if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) == -1)
-//    { // Set O_NONBLOCK flag
-//        perror("fcntl F_SETFL");
-//        exit(EXIT_FAILURE);
-//    }
 
     int on = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
@@ -376,7 +381,6 @@ void* startClient(void *arg)
         if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             delay(5);
-   //         continue;
         }
 
         if (len != 1)
@@ -432,7 +436,8 @@ void* startClient(void *arg)
                 modem_duplex = true;
             else if (buffer[8] == COMM_SET_SIMPLEX)
                 modem_duplex = false;
-        } else if (memcmp(type, TYPE_LSF, typeLen) == 0 || memcmp(type, TYPE_STREAM, typeLen) == 0 || memcmp(type, TYPE_PACKET, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_LSF, typeLen) == 0 || memcmp(type, TYPE_STREAM, typeLen) == 0 || memcmp(type, TYPE_PACKET, typeLen) == 0)
         {
             frame_t frame;
             for (int x=0;x<48;x++)
@@ -453,12 +458,11 @@ void* startClient(void *arg)
             }
             if (lsfOk)
             {
-                if (m17ReflConnected && reflTxBuffer.getSpace() >= respLen)
+                if (m17ReflConnected && gwTxBuffer.getSpace() >= respLen)
                 {
                     for (uint8_t x=0;x<respLen;x++)
-                        reflTxBuffer.put(buffer[x]);
+                        gwTxBuffer.put(buffer[x]);
                 }
-      //          fprintf(stderr, "Type: %d  [%s]  [%s]\n", (int)ftype, rx_lsf.getSource().c_str(), rx_lsf.getDestination().c_str());
                 if (!txOn)
                 {
                     if (write(sockfd, setMode, 5) < 0)
@@ -480,13 +484,10 @@ void* startClient(void *arg)
                 if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
                     (streamType.fields.encSubType == M17_META_EXTD_CALLSIGN))
                 {
-                    //            extendedCall = true;
-
                     meta_t& meta = rx_lsf.metadata();
                     strcpy(exCall1, decode_callsign(meta.extended_call_sign.call1).c_str());
                     strcpy(exCall2, decode_callsign(meta.extended_call_sign.call2).c_str());
 
-                    //            extendedCall = true;
                     if (frameCnt == 6)
                         frameCnt = 0;
                 }
@@ -543,7 +544,8 @@ void* startClient(void *arg)
                         fprintf(stderr, "ERROR: host disconnect\n");
                         break;
                     }
-                } else if (ftype == M17FrameType::STREAM && validFrame)
+                }
+                else if (ftype == M17FrameType::STREAM && validFrame)
                 {
                     if (!txOn)
                     {
@@ -557,7 +559,6 @@ void* startClient(void *arg)
                     uint16_t diff = (sf.getFrameNumber() & 0x7fff) - (lastFrameNum & 0x7fff);
                     if ((sf.getFrameNumber() && 0x8000) != 0x8000)
                     {
-                        //    if ((sf.getFrameNumber() - 1) != lastFrameNum || sf.getFrameNumber() == 0)
                         if (diff > 2 || sf.getFrameNumber() == 0)
                         {
                             fprintf(stderr, "Frame number invalid.\n");
@@ -570,13 +571,11 @@ void* startClient(void *arg)
                         fprintf(stderr, "Last frame detected.\n");
                     }
                     lastFrameNum = sf.getFrameNumber();
-                    //            fprintf(stderr, "Last Frame: %d\n", lastFrameNum);
                     frameCnt++;
                     if (!txOn)
                         voiceFrameCnt = 0;
                     txOn = true;
                     meta_t& meta = rx_lsf.metadata();
-                 //   dump("META:", meta.raw_data, 14);
                     if (!gpsFound && streamType.fields.encSubType == M17_META_TEXT)
                     {
                         uint8_t blk_len = (meta.raw_data[0] & 0xf0) >> 4;
@@ -684,7 +683,6 @@ void* startClient(void *arg)
                                 memcpy(tmp, &packetData[1], totalSMSLength-3);
                                 strcpy((char*)packetData, tmp);
                                 totalSMSMessages++;
-  //                                  reflPacketRdy = true;
                             }
                             else
                             {   // if message memory allocation fails, crc does not match
@@ -709,12 +707,13 @@ void* startClient(void *arg)
                     }
                 }
             }
-        } else if (memcmp(type, TYPE_EOT, typeLen) == 0 && validFrame)
+        }
+        else if (memcmp(type, TYPE_EOT, typeLen) == 0 && validFrame)
         {
-            if (m17ReflConnected && reflTxBuffer.getSpace() >= respLen)
+            if (m17ReflConnected && gwTxBuffer.getSpace() >= respLen)
             {
                 for (uint8_t x=0;x<respLen;x++)
-                    reflTxBuffer.put(buffer[x]);
+                    gwTxBuffer.put(buffer[x]);
             }
 
             frameCnt = 0;
@@ -758,6 +757,7 @@ void* startClient(void *arg)
     return 0;
 }
 
+// Send bytes to gateway.
 void* txThread(void *arg)
 {
     int  sockfd = (intptr_t)arg;
@@ -770,25 +770,24 @@ void* txThread(void *arg)
 
         if (loop > 100)
         {
-            if (reflTxBuffer.getData() >= 5)
+            if (gwTxBuffer.getData() >= 5)
             {
-                if (reflTxBuffer.peek() != 0x61)
+                if (gwTxBuffer.peek() != 0x61)
                 {
-           //         reflTxBuffer.reset();
                     fprintf(stderr, "TX invalid header.\n");
                     continue;
                 }
                 uint8_t  byte[2];
                 uint16_t len = 0;
-                reflTxBuffer.npeek(byte[0], 1);
-                reflTxBuffer.npeek(byte[1], 2);
+                gwTxBuffer.npeek(byte[0], 1);
+                gwTxBuffer.npeek(byte[1], 2);
                 len = (byte[0] << 8) + byte[1];;
-                if (reflTxBuffer.getData() >= len)
+                if (gwTxBuffer.getData() >= len)
                 {
                     uint8_t buf[len];
                     for (int i=0;i<len;i++)
                     {
-                        reflTxBuffer.get(buf[i]);
+                        gwTxBuffer.get(buf[i]);
                     }
                     if (write(sockfd, buf, len) < 0)
                     {
@@ -801,26 +800,25 @@ void* txThread(void *arg)
             loop = 0;
         }
 
-        if (reflCommand.getData() >= 5)
+        if (gwCommand.getData() >= 5)
         {
-            if (reflCommand.peek() != 0x61)
+            if (gwCommand.peek() != 0x61)
             {
-         //       reflCommand.reset();
                 fprintf(stderr, "TX invalid header.\n");
             }
             else
             {
                 uint8_t  byte[2];
                 uint16_t len = 0;
-                reflCommand.npeek(byte[0], 1);
-                reflCommand.npeek(byte[1], 2);
+                gwCommand.npeek(byte[0], 1);
+                gwCommand.npeek(byte[1], 2);
                 len = (byte[0] << 8) + byte[1];;
-                if (reflCommand.getData() >= len)
+                if (gwCommand.getData() >= len)
                 {
                     uint8_t buf[len];
                     for (int i=0;i<len;i++)
                     {
-                        reflCommand.get(buf[i]);
+                        gwCommand.get(buf[i]);
                     }
                     if (write(sockfd, buf, len) < 0)
                     {
@@ -837,6 +835,7 @@ void* txThread(void *arg)
     return NULL;
 }
 
+// Process bytes from gateway.
 void *processGatewaySocket(void *arg)
 {
     int      childfd = (intptr_t)arg;
@@ -863,7 +862,6 @@ void *processGatewaySocket(void *arg)
         if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             delay(5);
-  //          continue;
         }
 
         if (len != 1)
@@ -919,7 +917,7 @@ void *processGatewaySocket(void *arg)
         uint8_t type[typeLen];
         memcpy(type, buffer+4, typeLen);
 
-     //   if (debugM)
+        if (debugM)
             dump((char*)"M17 Gateway data:", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_NACK, typeLen) == 0)
@@ -930,7 +928,8 @@ void *processGatewaySocket(void *arg)
             memcpy(tmp, buffer+4+typeLen, 7);
             ackDashbCommand("reflLinkM17", "failed");
             setReflectorStatus("M17", (const char*)tmp, "Unlinked");
-        } else if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
         {
             m17ReflConnected = true;
             ackDashbCommand("reflLinkM17", "success");
@@ -941,7 +940,8 @@ void *processGatewaySocket(void *arg)
             bzero(module, 2);
             module[0] = buffer[15];
             setReflectorStatus("M17", (const char*)tmp, module);
-        } else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
         {
             m17ReflConnected = false;
             char tmp[8];
@@ -949,9 +949,11 @@ void *processGatewaySocket(void *arg)
             memcpy(tmp, buffer+4+typeLen, 7);
             ackDashbCommand("reflLinkM17", "success");
             setReflectorStatus("M17", (const char*)tmp, "Unlinked");
-        } else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
         {
-        } else if (memcmp(type, TYPE_LSF, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_LSF, typeLen) == 0)
         {
             reflBusy = true;
             start_time = time(NULL);
@@ -1004,11 +1006,13 @@ void *processGatewaySocket(void *arg)
             }
             write(sockfd, buffer, respLen);
             saveLastCall("M17", "NET", srcCallsign, dstCallsign, metaText, NULL, "", true);
-        } else if (memcmp(type, TYPE_STREAM, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_STREAM, typeLen) == 0)
         {
             txOn = true;
             write(sockfd, buffer, respLen);
-        } else if (memcmp(type, TYPE_PACKET, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_PACKET, typeLen) == 0)
         {
             txOn = true;
             frame_t frame;
@@ -1073,7 +1077,8 @@ void *processGatewaySocket(void *arg)
             }
 
             write(sockfd, buffer, respLen);
-        } else if (memcmp(type, TYPE_EOT, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
             write(sockfd, buffer, respLen);
             duration = difftime(time(NULL), start_time);
@@ -1098,6 +1103,7 @@ void *processGatewaySocket(void *arg)
     return 0;
 }
 
+// Listem for incoming gateway connection.
 void *startTCPServer(void *arg)
 {
     struct hostent *hostp; /* client host info */
@@ -1138,13 +1144,6 @@ void *startTCPServer(void *arg)
         fprintf(stderr, "M17_Service: error when binding the socket to port %u: %s\n", serverPort, strerror(errno));
         exit(1);
     }
-
-    // Set the server socket to non-blocking mode
-//    if (fcntl(sockFd, F_SETFL, O_NONBLOCK) < 0) {
-//        perror("fcntl failed");
-//        close(sockFd);
-//        exit(EXIT_FAILURE);
-//    }
 
     if (debugM)
         fprintf(stdout, "Opened the TCP socket on port %u\n", serverPort);
@@ -1328,22 +1327,22 @@ int main(int argc, char **argv)
                 }
                 if (parameter == "unlink")
                 {
-                    reflCommand.put(0x61);
-                    reflCommand.put(0x00);
-                    reflCommand.put(0x08);
-                    reflCommand.put(0x04);
-                    reflCommand.put(TYPE_DISCONNECT[0]);
-                    reflCommand.put(TYPE_DISCONNECT[1]);
-                    reflCommand.put(TYPE_DISCONNECT[2]);
-                    reflCommand.put(TYPE_DISCONNECT[3]);
+                    gwCommand.put(0x61);
+                    gwCommand.put(0x00);
+                    gwCommand.put(0x08);
+                    gwCommand.put(0x04);
+                    gwCommand.put(TYPE_DISCONNECT[0]);
+                    gwCommand.put(TYPE_DISCONNECT[1]);
+                    gwCommand.put(TYPE_DISCONNECT[2]);
+                    gwCommand.put(TYPE_DISCONNECT[3]);
                     sleep(3);
                     statusTimeout = false;
                     continue;
-                } else if (!m17ReflConnected)
+                }
+                else if (!m17ReflConnected)
                 {
                     char tmp[41];
                     strcpy(tmp, parameter.c_str());
-               //     fprintf(stderr, "%s\n", tmp);
                     char *token = NULL;
                     token = strtok((char*)tmp, ",");
                     if (token != NULL)
@@ -1357,20 +1356,20 @@ int main(int argc, char **argv)
                             token = strtok(NULL, ",");
                             char module[2];
                             strcpy(module, token);
-                            reflCommand.put(0x61);
-                            reflCommand.put(0x00);
-                            reflCommand.put(0x16);
-                            reflCommand.put(0x04);
-                            reflCommand.put(TYPE_CONNECT[0]);
-                            reflCommand.put(TYPE_CONNECT[1]);
-                            reflCommand.put(TYPE_CONNECT[2]);
-                            reflCommand.put(TYPE_CONNECT[3]);
+                            gwCommand.put(0x61);
+                            gwCommand.put(0x00);
+                            gwCommand.put(0x16);
+                            gwCommand.put(0x04);
+                            gwCommand.put(TYPE_CONNECT[0]);
+                            gwCommand.put(TYPE_CONNECT[1]);
+                            gwCommand.put(TYPE_CONNECT[2]);
+                            gwCommand.put(TYPE_CONNECT[3]);
                             std::string callsign = readHostConfig("main", "callsign");
                             for (uint8_t x=0;x<6;x++)
-                                reflCommand.put(callsign.c_str()[x]);
+                                gwCommand.put(callsign.c_str()[x]);
                             for (uint8_t x=0;x<7;x++)
-                                reflCommand.put(name[x]);
-                            reflCommand.put(module[0]);
+                                gwCommand.put(name[x]);
+                            gwCommand.put(module[0]);
                             sleep(3);
                         }
                         else

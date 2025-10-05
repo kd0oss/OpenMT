@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2025 by Rick KD0OSS             *
+ *   Copyright (C) 2025 by Rick KD0OSS                                     *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -14,6 +14,8 @@
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  *                                                                         *
+ *   This software makes use of M17 functions from OpenRTX (C).            *
+ *   http://openrtx.org                                                    *
  ***************************************************************************/
 
 #include <stdio.h>
@@ -157,19 +159,6 @@ using SM17Packet = struct __attribute__((__packed__)) pkt_tag {
 };
 
 
-std::vector<std::string> split(const std::string str, char delimiter)
-{
-    std::vector<std::string> tokens;
-    std::string token;
-    std::istringstream tokenStream("");
-    tokenStream.str(str.c_str());
-    while (std::getline(tokenStream, token, delimiter))
-    {
-        tokens.push_back(token);
-    }
-    return tokens;
-}
-
 // error - wrapper for perror
 void error(char *msg)
 {
@@ -186,6 +175,8 @@ void delay(uint32_t delay)
     nanosleep(&req, &rem);
 };
 
+// Print debug data.
+// From MMDVM project by Jonathan Naylor G4KLX.
 void dump(char *text, unsigned char *data, unsigned int length)
 {
     unsigned int offset = 0U;
@@ -229,78 +220,7 @@ void dump(char *text, unsigned char *data, unsigned int length)
     }
 }
 
-char *escape_string(const char *str, size_t str_len)
-{
-    if (str == NULL)
-    {
-        return NULL;
-    }
-
-    // Each character may be replaced by up to 3 characters (%xx)
-    char *escaped_str = (char *)malloc(3 * str_len + 1);
-    if (escaped_str == NULL)
-    {
-        return NULL;
-    }
-
-    size_t escaped_index = 0;
-    for (size_t i = 0; i < str_len; ++i)
-    {
-        if (isalnum(str[i]) || str[i] == '-' || str[i] == '_' || str[i] == '.' || str[i] == '~')
-        {
-            escaped_str[escaped_index++] = str[i];
-        }
-        else
-        {
-            sprintf(&escaped_str[escaped_index], "%%%02X", (unsigned char)str[i]);
-            escaped_index += 3;
-        }
-    }
-    escaped_str[escaped_index] = '\0';
-    return escaped_str;
-}
-
-// Decode escaped string for HTTP requests
-char* decode_string(const char* input)
-{
-    if (input == NULL)
-    {
-        return NULL;
-    }
-
-    size_t input_len = strlen(input);
-    char* output = (char*)malloc(input_len + 1);
-    if (output == NULL)
-    {
-        return NULL;
-    }
-
-    size_t output_index = 0;
-    for (size_t i = 0; i < input_len; ++i)
-    {
-        if (input[i] == '%' && i + 2 < input_len)
-        {
-            if (isxdigit(input[i + 1]) && isxdigit(input[i + 2]))
-            {
-                char hex_str[3] = {input[i + 1], input[i + 2], '\0'};
-                output[output_index++] = (char)strtol(hex_str, NULL, 16);
-                i += 2;
-            }
-            else
-            {
-
-                output[output_index++] = input[i];
-            }
-        }
-        else
-        {
-            output[output_index++] = input[i];
-        }
-    }
-    output[output_index] = '\0';
-    return output;
-}
-
+// Encode to M17 callsign bytes.
 bool encode_refl_callsign(const std::string& callsign, call_t& encodedCall)
 {
     encodedCall.fill(0x00);
@@ -339,75 +259,7 @@ bool encode_refl_callsign(const std::string& callsign, call_t& encodedCall)
     return true;
 }
 
-int searchM17HostFile(const char *refl, char *url, char *ipaddr, int *port)
-{
-    FILE *file = NULL;
-    char name[10] = "";
-    char line[201] = "";
-    uint8_t ret = 0;
-    char *token = NULL;
-    char *str_copy = NULL;
-
-    file = fopen("../M17Hosts-full.csv", "r");
-    if (file != NULL)
-    {
-        while (!feof(file))
-        {
-            fgets(line, 200, file);
-            if (line[0] == '#')
-                continue;
-
-    //        fprintf(stderr, "%s\n", line);
-            str_copy = strdup(line);
-
-            if (str_copy == NULL)
-            {
-                perror("strdup failed");
-                break;
-            }
-            token = strtok(str_copy, ",");
-            if (token != NULL)
-            {
-                strcpy(name, token);
-                token = strtok(NULL, ",");
-            }
-            if (token != NULL)
-            {
-                strcpy(url, token);
-                token = strtok(NULL, ",");
-            }
-            if (token != NULL)
-            {
-                strcpy(ipaddr, token);
-                token = strtok(NULL, ",");
-            }
-            if (token != NULL)
-            {
-                token = strtok(NULL, ",");
-            }
-            if (token != NULL)
-            {
-                char tmp[10] = "";
-                strcpy(tmp, token);
-                *port = atoi(tmp);
-            }
-
-            free(str_copy); // Free the allocated memory
-            if (strcasecmp(name, refl) == 0)
-            {
-                ret = 1;
-                break;
-            }
-        }
-        fclose(file);
-    }
-    else
-    {
-        fprintf(stderr, "Cannot open relector list.\n");
-    }
-    return ret;
-}
-
+// Send out going bytes to M17 service.
 void* txThread(void *arg)
 {
     int  sockfd = (intptr_t)arg;
@@ -458,6 +310,7 @@ void* txThread(void *arg)
     return NULL;
 }
 
+// Connect and process bytes from M17 reflector.
 void *connectM17Refl(void *argv)
 {
     int sockfd, portno, n;
@@ -569,7 +422,6 @@ void *connectM17Refl(void *argv)
     M17::M17LinkSetupFrame lsf;
     M17::M17FrameEncoder   encoder;      ///< M17 frame encoder
     lsf.clear();
- //   strcpy(tx_state, "off");
     m17ReflDisconnect = false;
 
     while (m17ReflConnected)
@@ -841,8 +693,6 @@ void *connectM17Refl(void *argv)
                 reflTxBuffer.get(sf.payload[i]);
             if (debugM)
                 fprintf(stderr, "FN: %d\n", (tmp[0] << 8) | tmp[1]);
-        //    sf.framenumber = (fn >> 8) | ((fn & 0xff) << 8);
-        //    fn++;
             sf.crc = rx_lsf.m17Crc((uint8_t*)&sf, sizeof(sf) - 2);
             n = sendto(sockfd, (uint8_t*)&sf, sizeof(sf), 0, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
             if (n < 0)
@@ -892,6 +742,7 @@ void *connectM17Refl(void *argv)
     return 0;
 }
 
+// Start up reflector threads.
 void connectToRefl(int sockfd, char *source, char *reflector, char *module, uint16_t port)
 {
     static char server[80] = "";
@@ -920,6 +771,7 @@ void connectToRefl(int sockfd, char *source, char *reflector, char *module, uint
     }
 }
 
+// Start up connection to M17 service.
 void* startClient(void *arg)
 {
     int sockfd = 0;
@@ -940,12 +792,6 @@ void* startClient(void *arg)
         perror("fcntl F_GETFL");
         exit(EXIT_FAILURE);
     }
-
-//    if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) == -1)
-//    { // Set O_NONBLOCK flag
-//        perror("fcntl F_SETFL");
-//        exit(EXIT_FAILURE);
-//    }
 
     int on = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
@@ -993,7 +839,6 @@ void* startClient(void *arg)
         if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             delay(5);
-   //         continue;
         }
 
         if (len != 1)
@@ -1065,12 +910,15 @@ void* startClient(void *arg)
                     connectToRefl(sockfd, source, ipaddr, M17Module, port);
                 }
             }
-        } else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
         {
             m17ReflDisconnect = true;
-        } else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
         {
-        } else if (memcmp(type, TYPE_LSF, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_LSF, typeLen) == 0)
         {
             if (!txOn)
             {
@@ -1084,7 +932,8 @@ void* startClient(void *arg)
             ftype   = decoder.decodeFrame(frame);
             rx_lsf  = decoder.getLsf();
             lsfOk   = rx_lsf.valid();
-        } else if (memcmp(type, TYPE_STREAM, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_STREAM, typeLen) == 0)
         {
             frame_t frame;
             for (uint8_t x=0;x<48;x++)
@@ -1102,7 +951,8 @@ void* startClient(void *arg)
                         reflTxBuffer.put(sf.getData()[x]);
                 }
             }
-        } else if (memcmp(type, TYPE_PACKET, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_PACKET, typeLen) == 0)
         {
             frame_t frame;
             for (uint8_t x=0;x<48;x++)
@@ -1163,7 +1013,8 @@ void* startClient(void *arg)
                     }
                 }
             }
-        } else if (memcmp(type, TYPE_EOT, typeLen) == 0)
+        }
+        else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
             txOn = false;
             lsfOk = false;
