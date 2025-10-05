@@ -100,13 +100,15 @@ void enableM17()
 {
     char buffer[4];
 
-    modem_m17Enabled = true;
-    if (modem == "mmdvmhs")
-        set_ConfigHS();
-    else
-        set_Config();
-    sleep(1);
-
+    if (!modem_m17Enabled)
+    {
+        modem_m17Enabled = true;
+        if (modem == "mmdvmhs")
+            set_ConfigHS();
+        else
+            set_Config();
+        sleep(1);
+    }
     buffer[0] = 0xE0;
     buffer[1] = 0x04;
     buffer[2] = MODEM_MODE;
@@ -125,19 +127,28 @@ void disableM17()
     else
         set_Config();
     sleep(1);
+
+    buffer[0] = 0xE0;
+    buffer[1] = 0x04;
+    buffer[2] = MODEM_MODE;
+    buffer[3] = 0x00; // IDLE_MODE
+    for (uint8_t i=0;i<4;i++)
+        modemCommandBuffer.put(buffer[i]);
 }
 
 void enableDSTAR()
 {
     char buffer[4];
 
-    modem_dstarEnabled = true;
-    if (modem == "mmdvmhs")
-        set_ConfigHS();
-    else
-        set_Config();
-    sleep(1);
-
+    if (!modem_dstarEnabled)
+    {
+        modem_dstarEnabled = true;
+        if (modem == "mmdvmhs")
+            set_ConfigHS();
+        else
+            set_Config();
+        sleep(1);
+    }
     buffer[0] = 0xE0;
     buffer[1] = 0x04;
     buffer[2] = MODEM_MODE;
@@ -156,6 +167,13 @@ void disableDSTAR()
     else
         set_Config();
     sleep(1);
+
+    buffer[0] = 0xE0;
+    buffer[1] = 0x04;
+    buffer[2] = MODEM_MODE;
+    buffer[3] = 0x00; // IDLE_MODE
+    for (uint8_t i=0;i<4;i++)
+        modemCommandBuffer.put(buffer[i]);
 }
 
 bool openMTtoMMDVM(uint8_t mmdvm_in, char* openmt_out)

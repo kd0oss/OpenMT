@@ -74,7 +74,7 @@ const char      *TYPE_HEADER_DSTAR      = "DSTH";
 const char      *TYPE_DATA_DSTAR        = "DSTD";
 const char      *TYPE_EOT_DSTAR         = "DSTE";
 
-const uint8_t  DSTAR_END_SYNC_BYTES[] = {0x55, 0x55, 0x55, 0x55, 0xC8, 0x7A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+const uint8_t    DSTAR_END_SYNC_BYTES[] = {0x55, 0x55, 0x55, 0x55, 0xC8, 0x7A, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
 const uint8_t    NET_ACK                = 0xF0;
 const uint8_t    NET_NACK               = 0xF1;
@@ -108,6 +108,7 @@ pthread_t timerid;
 pthread_t commandid;
 
 sem_t txBufSem;
+sem_t shutDownSem;
 
 // Protocol service client descriptor
 struct Client
@@ -150,23 +151,25 @@ struct Protocol
 
 Protocol mode[MAX_CLIENT_CONNECTIONS];
 
-int      serialModemFd = 0;     //< File descriptor for modem serial port
-char     modemtty[50]  = "";    //< Modem serial port
-uint8_t  connections   = 0;     //< Number of clients currently connected
-uint16_t host_port     = 18000;
-uint32_t txTimeout     = TX_TIMEOUT;
-bool     statusTimeout = false;
-bool     chkComTimeout = false;
-bool     frameTimeout  = false;
-bool     duplex        = false;
-bool     debugM        = false;
-bool     txOn          = false;
+int      serialModemFd = 0;          //< File descriptor for modem serial port.
+char     modemtty[50]  = "";         //< Modem serial port.
+uint8_t  connections   = 0;          //< Number of clients currently connected.
+uint16_t host_port     = 18000;      //< All protocol services connect on this TCP port.
+uint32_t txTimeout     = TX_TIMEOUT; //< Station TX timeout. FIX-ME: Should be user configurable.
+bool     statusTimeout = false;      //< On timeout modem is queried for status.
+bool     chkComTimeout = false;      //< On timeout interprocess commands are sent, if any.
+bool     frameTimeout  = false;      //< On timeout symbolframes are sent to modem.
+bool     duplex        = false;      //< Indicates station TX operation mode.
+bool     debugM        = false;      //< If true print debug info.
+bool     txOn          = false;      //< If true we are processing frame data.
+bool     running       = true;       //< Set false to kill all processes and exit program.
+bool     exitRequested = false;      //< Set to true with ctrl + c keyboard input.
 
-unsigned int       clientlen;   /* byte size of client's address */
-char              *hostaddrp;   /* dotted decimal host addr string */
-int                optval;      /* flag value for setsockopt */
-struct sockaddr_in serveraddr;  /* server's addr */
-struct sockaddr_in clientaddr;  /* client addr */
+unsigned int       clientlen;        //< byte size of client's address
+char              *hostaddrp;        //< dotted decimal host addr string
+int                optval;           //< flag value for setsockopt
+struct sockaddr_in serveraddr;       //< server's addr
+struct sockaddr_in clientaddr;       //< client addr
 
 CRingBuffer<uint8_t>  modemCommandBuffer(300);  //< Modem command buffer
 CRingBuffer<uint8_t>  txBuffer(1300);           //< Modem TX buffer
@@ -182,6 +185,13 @@ std::string modem("");
 std::string currentMode("idle");
 std::string callsign("N0CALL");
 
+
+//  SIGINT handler, so we can gracefully exit when the user hits ctrl+c.
+static void sigintHandler(int signum)
+{
+    exitRequested = true;
+    signal(SIGINT, SIG_DFL);
+}
 
 uint8_t getModemSpace(const char* protocol)
 {
@@ -226,6 +236,8 @@ void delay(uint32_t delay)
     nanosleep(&req, &rem);
 };
 
+// Print debug data.
+// From MMDVM project by Jonathan Naylor G4KLX.
 void dump(char *text, unsigned char *data, unsigned int length)
 {
     struct timespec ts;
@@ -242,9 +254,7 @@ void dump(char *text, unsigned char *data, unsigned int length)
     // Convert to milliseconds
     milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 
-    fprintf(stdout, "%s: %llu\n", text, milliseconds);
-//    fputs(text, stdout);
-//    fputc('\n', stdout);
+    fprintf(stdout, "%s: %lu\n", text, milliseconds);
 
     while (length > 0U)
     {
@@ -281,6 +291,7 @@ void dump(char *text, unsigned char *data, unsigned int length)
     }
 }
 
+// Setup seial port
 int openSerial(char *serial)
 {
     struct termios tty;
@@ -348,15 +359,16 @@ int openSerial(char *serial)
     return fd;
 }
 
-
+// Simple timer thread.
+// Each loop through the while statement takes 1 millisecond.
 void* timerThread(void *arg)
 {
     uint32_t loop[4] = {10000, 0, 0, 0};
-    while (1)
+    while (running)
     {
-        delay(1000);
+        delay(1000); // 1ms
 
-        if (loop[0] >= 10000)
+        if (loop[0] >= 250)
         {
             statusTimeout = true;
             loop[0] = 0;
@@ -372,10 +384,20 @@ void* timerThread(void *arg)
         {
             txOn = false;
             currentMode = "idle";
+            uint8_t buffer[4];
+            buffer[0] = 0xE0;
+            buffer[1] = 0x04;
+            buffer[2] = MODEM_MODE;
+            buffer[3] = 0x00; // IDLE_MODE
+            for (uint8_t i=0;i<4;i++)
+                modemCommandBuffer.put(buffer[i]);
             loop[2] = 0;
-     //       if (debugM)
+            if (debugM)
                 fprintf(stderr, "TX timeout. Setting mode to idle.\n");
         }
+
+        if (loop[2] > 0 && !txOn)
+            loop[2] = 0;
 
         if (loop[3] >= 2000)
         {
@@ -389,11 +411,17 @@ void* timerThread(void *arg)
         if (!frameTimeout)
             loop[1]++;
 
-        if (currentMode != "idle")
+        if (currentMode != "idle" && txOn)
             loop[2]++;
 
         if (!chkComTimeout)
             loop[3]++;
+
+        if (exitRequested)
+        {
+            fprintf(stderr, "Program shutdown requested.\n");
+            running = false;
+        }
     }
     fprintf(stderr, "Timer thread exited.\n");
     int iRet = 600;
@@ -401,13 +429,15 @@ void* timerThread(void *arg)
     return NULL;
 }
 
+// Send data to protocol service.
+// One thread per service connection.
 void* modeRxThread(void *arg)
 {
     uint8_t conn_id = (intptr_t)arg;
     int  sockfd = hostClient[conn_id].sockfd;
     bool found = false;
 
-    while (hostClient[conn_id].active)
+    while (hostClient[conn_id].active && running)
     {
         delay(100);
 
@@ -452,6 +482,7 @@ void* modeRxThread(void *arg)
         }
         sem_post(&txBufSem);
 
+        // check for out going commands.
         if (hostClient[conn_id].command.getData() >= 5)
         {
             if (hostClient[conn_id].command.peek() != 0x61)
@@ -488,16 +519,17 @@ void* modeRxThread(void *arg)
     return NULL;
 }
 
-// Modem specific function
+// MMDVM modem specific function.
+// Queue up out going bytes for modem.
 void* modeTxThread(void *arg)
 {
-    while (1)
+    while (running)
     {
         delay(100);
 
         if (statusTimeout)
         {
-            if (txBuffer.getSpace() >= 3 && !frameTimeout)
+            if (txBuffer.getSpace() >= 3 && rxModeBuffer.getData() < 3)
             {
                 txBuffer.put(0xE0);
                 txBuffer.put(0x03);
@@ -566,9 +598,10 @@ void* modeTxThread(void *arg)
     return NULL;
 }
 
+// Send queued up bytes to modem.
 void* modemTxThread(void *arg)
 {
-    while (1)
+    while (running)
     {
         delay(50);
 
@@ -588,8 +621,6 @@ void* modemTxThread(void *arg)
             {
                 uint8_t tmp[2];
                 txBuffer.npeek(tmp[0], 1);
-        //        txBuffer.get(tmp[1]);
-        //        txBuffer.get(tmp[1]);
                 fprintf(stderr, "modem length invalid. [%02X]  [%02X]\n", tmp[0], tmp[1]);
                 continue;
             }
@@ -614,9 +645,10 @@ void* modemTxThread(void *arg)
     return NULL;
 }
 
+// Read commands queued up in database from dashboard.
 void* commandThread(void *arg)
 {
-    while (1)
+    while (running)
     {
         delay(500000);
 
@@ -659,6 +691,8 @@ void* commandThread(void *arg)
     return NULL;
 }
 
+// Handle incoming bytes from protocol service.
+// One thread per service.
 void *processClientSocket(void *arg)
 {
     char          buffer[BUFFER_LENGTH];
@@ -677,12 +711,7 @@ void *processClientSocket(void *arg)
         perror("fcntl F_GETFL");
     }
 
-  //  if (fcntl(sockFd, F_SETFL, flags | O_NONBLOCK) == -1)
-  //  { // Set O_NONBLOCK flag
-  //      perror("fcntl F_SETFL");
-  //  }
-
-    while (hostClient[conn_id].active)
+    while (hostClient[conn_id].active && running)
     {
         len = read(sockFd, buffer, 1);
         if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
@@ -783,6 +812,13 @@ void *processClientSocket(void *arg)
             fprintf(stderr, "Received mode data for [%s].\n", mode[conn_id].name);
             // MMDVM specific command
             setProtocol(mode[conn_id].name, true);
+
+            buffer[0] = 0xE0;
+            buffer[1] = 0x04;
+            buffer[2] = MODEM_MODE;
+            buffer[3] = 0x00; // IDLE_MODE
+            for (uint8_t i=0;i<4;i++)
+                modemCommandBuffer.put(buffer[i]);
         }
 
 // *********** Convert from OpenMT type to modem specific type ***********
@@ -832,8 +868,10 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
                 if (currentMode == "idle")
                 {
                     currentMode = hostClient[conn_id].mode;
-                    //           if (debugM)
+                    setProtocol(currentMode.c_str(), true);
+        //           if (debugM)
                     fprintf(stderr, "Current mode set to %s.\n", currentMode.c_str());
+
                 }
                 break;
 
@@ -841,7 +879,13 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
                 if (currentMode != "idle")
                 {
                     currentMode = "idle";
-        //           if (debugM)
+                    buffer[0] = 0xE0;
+                    buffer[1] = 0x04;
+                    buffer[2] = MODEM_MODE;
+                    buffer[3] = 0x00; // IDLE_MODE
+                    for (uint8_t i=0;i<4;i++)
+                        modemCommandBuffer.put(buffer[i]);
+                    //           if (debugM)
                         fprintf(stderr, "Current mode set to IDLE.\n");
                 }
                 break;
@@ -918,6 +962,7 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
         connections--;
     hostClient[conn_id].active = false;
     setProtocol(mode[conn_id].name, false);
+
     if (mode[conn_id].use_lp_filter)
     {
         free(mode[conn_id].tx_lp_filter_pCoeffs);
@@ -927,19 +972,36 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
     free(mode[conn_id].rx_filter_pState);
     free(mode[conn_id].tx_filter_pCoeffs);
     free(mode[conn_id].tx_filter_pState);
+
+    sem_wait(&shutDownSem);
+    if (currentMode != "idle")
+    {
+        currentMode = "idle";
+        buffer[0] = 0xE0;
+        buffer[1] = 0x04;
+        buffer[2] = MODEM_MODE;
+        buffer[3] = 0x00; // IDLE_MODE
+        for (uint8_t i=0;i<4;i++)
+            modemCommandBuffer.put(buffer[i]);
+        //           if (debugM)
+        fprintf(stderr, "Current mode set to IDLE.\n");
+    }
     delMode("main", mode[conn_id].name);
     if (modem == "mmdvmhs")
         set_ConfigHS();
     else
         set_Config();
+
     delay(50000);
     close(sockFd);
     fprintf(stderr, "Client thread exited. Connection Id: %d\n", conn_id);
     int iRet = 200;
+    sem_post(&shutDownSem);
     pthread_exit(&iRet);
     return NULL;
 }
 
+// This thread listens for incoming TCP connections from protocol services.
 void *startTCPServer(void *arg)
 {
     struct hostent *hostp; /* client host info */
@@ -1002,7 +1064,7 @@ void *startTCPServer(void *arg)
         exit(1);
     }
 
-    while (1)
+    while (running)
     {
         /*
          * accept: wait for a connection request
@@ -1085,14 +1147,19 @@ void *startTCPServer(void *arg)
 
         delay(1000);
     }
+    sem_wait(&shutDownSem);
     fprintf(stderr, "TCP server exited.\n");
     int iRet = 100;
+    delay(500000);
+    sem_post(&shutDownSem);
     pthread_exit(&iRet);
+    running = false;
     return NULL;
 }
 
-// Modem specific function
-int processSerialmod17(void)
+// Mmdvm modem specific function
+// Process incoming modem bytes.
+int processSerial(void)
 {
     unsigned char buffer[BUFFER_LENGTH];
     unsigned int  respLen;
@@ -1311,7 +1378,7 @@ int processSerialmod17(void)
     }
     else
     {
-      //  if (debugM)
+        if (debugM)
             dump((char*)"Modem rec data:", buffer, respLen);
     }
 
@@ -1363,7 +1430,10 @@ int main(int argc, char **argv)
         umask(0);
     }
 
+    signal(SIGINT, sigintHandler);
+
     sem_init(&txBufSem, 0, 1);
+    sem_init(&shutDownSem, 0, 1);
 
     for (uint8_t i=0;i<MAX_CLIENT_CONNECTIONS;i++)
     {
@@ -1453,15 +1523,17 @@ int main(int argc, char **argv)
     delay(10000);
     setFrequency(modem_rxFrequency, modem_txFrequency, modem_txFrequency, 255);
 
-    while (1)
+    while (running)
     {
-  //      delay(100);
-
-        ret = processSerialmod17();
+        ret = processSerial();
         if (!ret)
-            return 1;
+            break;
     }
+    sem_wait(&shutDownSem);
+    setHostConfig("main", "gateways", "none");
+    setHostConfig("main", "activeModes", "none");
     fprintf(stderr, "Modem host terminated.\n");
     logError("main", "Modem host terminated.");
+    sem_post(&shutDownSem);
     return 0;
 }
