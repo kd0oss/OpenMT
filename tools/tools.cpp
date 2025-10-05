@@ -309,7 +309,7 @@ std::string readModemConfig(const char* modem_name, const char* key)
 }
 
 // Function to set or add a record to the modem_host config database
-int8_t setHostConfig(const char* module_name, const char* key, const char* value)
+int8_t setHostConfig(const char* module_name, const char* key, const char* display_type, const char* value)
 {
     char dbhost[20] = "localhost";
     char passwd[30] = "";
@@ -357,14 +357,14 @@ int8_t setHostConfig(const char* module_name, const char* key, const char* value
     {
         query = "INSERT INTO modem_host.config SET module = '";
         query.append(module_name).append("', parameter = '").append(key).append("', ");
-        query.append("value = '").append(value).append("'");
+        query.append("value = '").append(value).append("', display_type = '").append(display_type).append("'");
         mysql_query(mysql_conn,query.c_str());
     }
     else
     {
         query = "UPDATE modem_host.config SET value = '";
         query.append(value).append("' WHERE module = '").append(module_name).append("' ");
-        query.append("AND parameter = '").append(key).append("'");
+        query.append("AND parameter = '").append(key).append("', display_type = '").append(display_type).append("'");
         mysql_query(mysql_conn, query.c_str());
     }
 
@@ -434,7 +434,7 @@ bool addMode(const char* module_name, const char* mode)
 {
     std::string modes = readHostConfig(module_name, "activeModes");
     if (modes == "none" || modes.empty()) // no modes active
-        setHostConfig(module_name, "activeModes", mode);
+        setHostConfig(module_name, "activeModes", "none", mode);
     else
     {
         std::vector<std::string> modeList = splitString(modes, ',');
@@ -444,7 +444,7 @@ bool addMode(const char* module_name, const char* mode)
                 return true;
         }
         modes.append(",").append(mode);
-        setHostConfig(module_name, "activeModes", modes.c_str());
+        setHostConfig(module_name, "activeModes", "none", modes.c_str());
     }
     return true;
 }
@@ -468,7 +468,7 @@ bool delMode(const char* module_name, const char* mode)
     }
     if (modes.empty())
         modes = "none";
-    setHostConfig(module_name, "activeModes", modes.c_str());
+    setHostConfig(module_name, "activeModes", "none", modes.c_str());
     return true;
 }
 
@@ -477,7 +477,7 @@ bool addGateway(const char* module_name, const char* mode)
 {
     std::string modes = readHostConfig(module_name, "gateways");
     if (modes == "none" || modes.empty()) // no modes active
-        setHostConfig(module_name, "gateways", mode);
+        setHostConfig(module_name, "gateways", "none", mode);
     else
     {
         std::vector<std::string> modeList = splitString(modes, ',');
@@ -487,7 +487,7 @@ bool addGateway(const char* module_name, const char* mode)
                 return true;
         }
         modes.append(",").append(mode);
-        setHostConfig(module_name, "gateways", modes.c_str());
+        setHostConfig(module_name, "gateways", "none", modes.c_str());
     }
     return true;
 }
@@ -511,7 +511,7 @@ bool delGateway(const char* module_name, const char* mode)
     }
     if (modes.empty())
         modes = "none";
-    setHostConfig(module_name, "gateways", modes.c_str());
+    setHostConfig(module_name, "gateways", "none", modes.c_str());
     return true;
 }
 

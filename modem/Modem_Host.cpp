@@ -1518,8 +1518,8 @@ int main(int argc, char **argv)
     else
         set_Config();
 
-    setHostConfig("main", "gateways", "none");
-    setHostConfig("main", "activeModes", "none");
+    setHostConfig("main", "gateways", "none", "none");
+    setHostConfig("main", "activeModes", "none", "none");
     delay(10000);
     setFrequency(modem_rxFrequency, modem_txFrequency, modem_txFrequency, 255);
 
@@ -1530,8 +1530,8 @@ int main(int argc, char **argv)
             break;
     }
     sem_wait(&shutDownSem);
-    setHostConfig("main", "gateways", "none");
-    setHostConfig("main", "activeModes", "none");
+    setHostConfig("main", "gateways", "none", "none");
+    setHostConfig("main", "activeModes", "none", "none");
     fprintf(stderr, "Modem host terminated.\n");
     logError("main", "Modem host terminated.");
     sem_post(&shutDownSem);

@@ -40,7 +40,7 @@ bool addMode(const char* module_name, const char* mode);
 bool delMode(const char* module_name, const char* mode);
 bool addGateway(const char* module_name, const char* mode);
 bool delGateway(const char* module_name, const char* mode);
-int8_t setHostConfig(const char* module_name, const char* key, const char* value);
+int8_t setHostConfig(const char* module_name, const char* key, const char* display_type, const char* value);
 bool ackDashbCommand(const char* command, const char* result);
 bool clearDashbCommands();
 bool findReflector(const char* type, const char* name, char* ip4, uint16_t* port);

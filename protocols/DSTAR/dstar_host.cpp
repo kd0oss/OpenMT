@@ -1294,8 +1294,8 @@ int main(int argc, char **argv)
 
     if (readHostConfig("DSTAR", "rpt1Call") == "")
     {
-        setHostConfig("DSTAR", "rpt1Call", "DIRECT");
-        setHostConfig("DSTAR", "rpt2Call", "DIRECT");
+        setHostConfig("DSTAR", "rpt1Call", "input", "DIRECT");
+        setHostConfig("DSTAR", "rpt2Call", "input", "DIRECT");
     }
 
     strcpy(rpt1Call, readHostConfig("DSTAR", "rpt1Call").c_str());
