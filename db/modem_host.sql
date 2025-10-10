@@ -164,6 +164,7 @@ DROP TABLE IF EXISTS `host_status`;
 /*!40101 SET character_set_client = utf8mb4 */;
 CREATE TABLE `host_status` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
+  `module` varchar(30) NOT NULL,
   `property` varchar(20) NOT NULL,
   `value` varchar(50) NOT NULL,
   PRIMARY KEY (`id`)
