@@ -1032,7 +1032,7 @@ int main(int argc, char **argv)
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, "vx")) != -1)
+    while ((c = getopt(argc, argv, "dvx")) != -1)
     {
         switch (c)
         {
@@ -1046,7 +1046,7 @@ int main(int argc, char **argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: M17_Gateway [-v] [-x]\n");
+                fprintf(stderr, "Usage: M17_Gateway [-d] [-v] [-x]\n");
                 return 1;
         }
     }

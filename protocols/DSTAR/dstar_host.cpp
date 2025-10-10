@@ -1372,7 +1372,7 @@ int main(int argc, char **argv)
     int  ret;
     int  c;
 
-    while ((c = getopt(argc, argv, "vx")) != -1)
+    while ((c = getopt(argc, argv, "dvx")) != -1)
     {
         switch (c)
         {
@@ -1386,7 +1386,7 @@ int main(int argc, char **argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: DSTAR_Service [-v] [-x]\n");
+                fprintf(stderr, "Usage: DSTAR_Service [-d] [-v] [-x]\n");
                 return 1;
         }
     }

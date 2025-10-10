@@ -713,8 +713,8 @@ void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
         memcpy(ucBuffer+5, "linux_pirptr-20250926", 21);
         ucBuffer[26] = 0x00;
         n = sendto(sockoutfd, ucBuffer, 27, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
-    if (n < 0)
-      error((char*)"ERROR in sendto");
+        if (n < 0)
+            error((char*)"ERROR in sendto");
         ucBuffer[4] = 0x20;
         iStreamId = (rand() % 0xffff) + 1;
         ucBuffer[5] = (iStreamId & 0xff00) >> 8;
@@ -727,8 +727,8 @@ void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
         ccr.update(ucBuffer + 8, 39); // 4 * 8 + 4 + 3
         ccr.result(ucBuffer + 47);
         n = sendto(sockoutfd, ucBuffer, 49, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
-    if (n < 0)
-      error((char*)"ERROR in sendto");
+        if (n < 0)
+            error((char*)"ERROR in sendto");
         ucBuffer[4] = 0x21;
         bSentHeader = true;
     }
@@ -767,16 +767,16 @@ void sendToGw(char *cHeader, uint8_t *ucData, bool bSsEncode, bool bEnd)
         ucBuffer[19] = 0x55;
         ucBuffer[20] = 0x55;
         n = sendto(sockoutfd, ucBuffer, 21, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
-    if (n < 0)
-      error((char*)"ERROR in sendto");
+        if (n < 0)
+            error((char*)"ERROR in sendto");
         ucBuffer[7] = iPktCount;
         ucBuffer[7] |= 0x40;			// End of data marker
         ucBuffer[21] = 0x55;
         ucBuffer[22] = 0xc8;
         ucBuffer[23] = 0x7a;
         n = sendto(sockoutfd, ucBuffer, 24, 0, (struct sockaddr *)&servaddrout, sizeof(servaddrout));
-    if (n < 0)
-      error((char*)"ERROR in sendto");
+        if (n < 0)
+            error((char*)"ERROR in sendto");
         iPktCount = -1;
         iFrameCount = 0;
         bSentHeader = false;
@@ -1229,7 +1229,7 @@ int main(int argc, char **argv)
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, "vx")) != -1)
+    while ((c = getopt(argc, argv, "dvx")) != -1)
     {
         switch (c)
         {
@@ -1243,7 +1243,7 @@ int main(int argc, char **argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: DSTAR_Gateway [-v] [-x]\n");
+                fprintf(stderr, "Usage: DSTAR_Gateway [-d] [-v] [-x]\n");
                 return 1;
         }
     }

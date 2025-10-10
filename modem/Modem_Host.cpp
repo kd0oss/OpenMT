@@ -1419,7 +1419,7 @@ int main(int argc, char **argv)
     int  ret;
     int  c;
 
-    while ((c = getopt(argc, argv, "d:vx")) != -1)
+    while ((c = getopt(argc, argv, "dvx")) != -1)
     {
         switch (c)
         {
