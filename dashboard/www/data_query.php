@@ -431,10 +431,9 @@ if ($command == "getStatus")
 
     $data = "";
     $id = 0;
-    $result = mysqli_query($mysql, "SELECT * FROM modem_host.last_call");
+    $result = mysqli_query($mysql, "SELECT * FROM modem_host.last_call LIMIT 1");
     while ($row = mysqli_fetch_row($result))
     {
-        if ($data != "") $data .= "\x1E";
         if ($row[6] == 1)
             $tx = "on";
         else
@@ -457,6 +456,13 @@ if ($command == "getStatus")
         $data .= "\x1Caltitude\x1D".$row[3];
         $data .= "\x1Cbearing\x1D".$row[4];
         $data .= "\x1Cspeed\x1D".$row[5];
+    }
+
+    $result = mysqli_query($mysql, "SELECT property, value FROM modem_host.host_status WHERE module = 'main'");
+    while ($row = mysqli_fetch_row($result))
+    {
+        $data .= "\x1Cproperty\x1D".$row[0];
+        $data .= "\x1Cvalue\x1D".$row[1];
     }
 
     if ($data != "")

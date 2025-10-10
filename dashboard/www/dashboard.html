@@ -713,6 +713,7 @@ var dstCall = "";
 var metaText = "";
 var smsText = "";
 var activeModes = "none";
+var currentMode = "idle";
 var modeOptions = [];
 var mdActive = [];
 var activeGateways = "none";
@@ -859,6 +860,8 @@ function updateModeStatus()
       stat = "Idle";
       if (document.getElementById(tmp[i]+'_stat'))
         stat = document.getElementById(tmp[i]+'_stat').innerHTML;
+      if (stat == "RX" && currentMode != tmp[i])
+        stat = "Idle";
       table += "<tr><td>"+tmp[i]+"</td><td id='"+tmp[i]+"_stat'>"+stat+"</td></tr>";
     }
   }
@@ -1164,6 +1167,15 @@ async function fetchStatus()
       speed = fields[1];
     if (fields[0] == 'smsText')
       smsText = fields[1];
+    if (fields[0] == 'property')
+    {
+      if (fields[1] == 'active_mode')
+      {
+        i++;
+        value = tmp[i].split('\x1D');
+        currentMode = value[1];
+      }
+    }
   }
   if (rid != last_rid)
   {
@@ -1187,20 +1199,21 @@ async function fetchStatus()
   document.getElementById('dstCall').innerHTML = dstCall;
   document.getElementById('metaText').innerHTML = metaText.trim();
 
-  if (txEnabled)
+  if (txEnabled && mode == currentMode)
   {
     var rtx = document.getElementById('rtx');
     rtx.style.background = 'red';
     rtx.style.color = 'white';
     if (document.getElementById(mode+'_stat'))
       document.getElementById(mode+'_stat').innerHTML = "TX";
+    //currentMode = mode;
   }
   else
   {
     var rtx = document.getElementById('rtx');
     rtx.style.background = '#D6EEEE';
     rtx.style.color = '#528dea';
-    if (document.getElementById(mode+'_stat'))
+    if (document.getElementById(mode+'_stat') && mode == currentMode)
       document.getElementById(mode+'_stat').innerHTML = "RX";
   }
 
