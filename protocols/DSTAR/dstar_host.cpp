@@ -49,7 +49,7 @@
 #include <netdb.h>
 
 #include "../../tools/tools.h"
-#include "../../tools/RingBuffer.h"
+#include "../../tools/CRingBuffer.h"
 #include "../../tools/CCITTChecksumReverse.h"
 
 using namespace std;
@@ -90,6 +90,10 @@ const uint8_t COMM_SET_MODE     = 0x02;
 const uint8_t COMM_SET_IDLE     = 0x03;
 const uint8_t COMM_UPDATE_CONF  = 0x04;
 
+const uint8_t  AMBE_SILENCE[]   = {0x9e, 0x8d, 0x32, 0x32, 0x26, 0x1a, 0x3f, 0x61, 0xe8};
+const uint8_t  DSTAR_SYNC[]     = {0x55, 0x2d, 0x16};
+const uint8_t  DSTAR_EOT[]     = {0x55, 0x55, 0x55};
+
 int      sockfd             = 0;
 char     modemHost[80]      = "127.0.0.1";
 char     myCall[9]          = "";
@@ -128,11 +132,11 @@ int                optval;     //< flag value for setsockopt
 struct sockaddr_in serveraddr; //< server's addr
 struct sockaddr_in clientaddr; //< client addr
 
-CRingBuffer<uint8_t> txBuffer(3600);
-CRingBuffer<uint8_t> rxBuffer(3600);
-CRingBuffer<uint8_t> gwTxBuffer(3600);
-CRingBuffer<uint8_t> gwCommand(200);
-CRingBuffer<uint8_t> echoBuffer(20000);
+RingBuffer<uint8_t> txBuffer(3600);
+RingBuffer<uint8_t> rxBuffer(3600);
+RingBuffer<uint8_t> gwTxBuffer(3600);
+RingBuffer<uint8_t> gwCommand(200);
+RingBuffer<uint8_t> echoBuffer(20000);
 uint8_t header[49];           //< store header for echo function
 
 pthread_t modemHostid;
@@ -279,8 +283,7 @@ void* timerThread(void *arg)
 // Record received packets for re-transmit.
 void recordEcho(const uint8_t* data)
 {
-    for (uint8_t x=0;x<12;x++)
-        echoBuffer.put(data[x]);
+    echoBuffer.addData(data, 12);
 }
 
 // Playbach recorded packets.
@@ -293,10 +296,9 @@ void echoPlayback(int sockfd)
         fprintf(stderr, "ERROR: host disconnect\n");
     }
     delay(20000);
-    while (echoBuffer.getData() >= 12)
+    while (echoBuffer.dataSize() >= 12)
     {
-        for (uint8_t i=0;i<12;i++)
-            echoBuffer.get(buf[8+i]);
+        echoBuffer.getData(&buf[8], 12);
         if (write(sockfd, buf, 20) < 0)
         {
             fprintf(stderr, "ERROR: host disconnect\n");
@@ -588,11 +590,98 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
   return iRet;
 }
 
+// Encode message to slow-speed bytes.
+void slowSpeedDataEncode(char *cMessage, unsigned char *ucBytes, unsigned char ucMode)
+{
+    static int           iIndex;
+    static unsigned char ucFrameCount;
+
+    if (ucMode == 10)
+    {
+        ucFrameCount = 0;
+        return;
+    }
+
+    int iSyncfrm = ucFrameCount % 21;
+
+    if (ucFrameCount > 251)
+        ucFrameCount = 0;
+    else
+        ucFrameCount++;
+
+    if (iSyncfrm == 0)
+    {
+        ucBytes[0] = 0x25 ^ 0x70;
+        ucBytes[1] = 0x62 ^ 0x4f;
+        ucBytes[2] = 0x85 ^ 0x93;
+        iIndex = 0;
+        return;
+    }
+
+    if (ucMode == 0)
+    {
+        char slowMessage[40];
+        memset(slowMessage, 0x20, 39);
+
+        if (iIndex <= 36)
+        {
+            int iSection = iIndex % 5;
+            if (iSection == 0)
+            {
+                if (iIndex == 36)
+                    ucBytes[0] = 0x51;
+                else
+                    ucBytes[0] = 0x55;
+                ucBytes[1] = (unsigned char)slowMessage[iIndex++];
+                ucBytes[2] = (unsigned char)slowMessage[iIndex++];
+            }
+            else
+            {
+                ucBytes[0] = (unsigned char)slowMessage[iIndex++];
+                ucBytes[1] = (unsigned char)slowMessage[iIndex++];
+                ucBytes[2] = (unsigned char)slowMessage[iIndex++];
+            }
+        }
+        else
+        {
+            ucBytes[0] = 0x66;
+            ucBytes[1] = 0x66;
+            ucBytes[2] = 0x66;
+        }
+    }
+
+    if (ucMode == 1)
+    {
+        if (iIndex <= 17)
+        {
+            int iSection = iIndex % 5;
+            if (iSection == 0)
+            {
+                ucBytes[0] = (unsigned char)((0x40 + iIndex/5) ^ 0x70);
+                ucBytes[1] = (unsigned char)cMessage[iIndex++] ^ 0x4f;
+                ucBytes[2] = (unsigned char)cMessage[iIndex++] ^ 0x93;
+            }
+            else
+            {
+                ucBytes[0] = (unsigned char)cMessage[iIndex++] ^ 0x70;
+                ucBytes[1] = (unsigned char)cMessage[iIndex++] ^ 0x4f;
+                ucBytes[2] = (unsigned char)cMessage[iIndex++] ^ 0x93;
+            }
+        }
+        else
+        {
+            ucBytes[0] = 0x66 ^ 0x70;
+            ucBytes[1] = 0x66 ^ 0x4f;
+            ucBytes[2] = 0x66 ^ 0x93;
+        }
+    }
+}
+
 // Start up connection to modem host.
 void* startClient(void *arg)
 {
     struct sockaddr_in serv_addr;
-    char buffer[BUFFER_SIZE] = {0};
+    uint8_t buffer[BUFFER_SIZE] = {0};
     char hostAddress[80];
     strcpy(hostAddress, (char*)arg);
     // Create socket file descriptor
@@ -762,14 +851,13 @@ void* startClient(void *arg)
             memcpy(suffix, buffer+43, 4);
             metaText[0] = 0;
      //       if (urCall[7] == 'E') // used for test echo function
-     //           memcpy(header, buffer, respLen);
+            memcpy(header, buffer, respLen);
             start_time = time(NULL);
             saveLastCall("DSTAR", "RF", myCall, urCall, metaText, NULL, gps, true);
-            fprintf(stderr, "DSTAR Header: %s  %s  %s  %s-%s\n", rpt1Call, rpt2Call, urCall, myCall, suffix);
-            if (validFrame && dstarReflConnected && gwTxBuffer.getSpace() >= respLen)
+            fprintf(stderr, "DSTAR Header: %s  %s  %s  %s  %s\n", rpt1Call, rpt2Call, urCall, myCall, suffix);
+            if (validFrame && dstarGWConnected && gwTxBuffer.freeSpace() >= respLen)
             {
-                for (uint8_t x=0;x<respLen;x++)
-                    gwTxBuffer.put(buffer[x]);
+                gwTxBuffer.addData(buffer, respLen);
             }
         }
         else if (memcmp(type, TYPE_DATA, typeLen) == 0)
@@ -794,22 +882,22 @@ void* startClient(void *arg)
             }
       //      if (urCall[7] == 'E') // used for test echo function
       //          recordEcho((uint8_t*)&buffer[8]);
-            if (validFrame && dstarReflConnected && gwTxBuffer.getSpace() >= respLen)
+            if (validFrame && dstarGWConnected && gwTxBuffer.freeSpace() >= respLen)
             {
-                for (uint8_t x=0;x<respLen;x++)
-                    gwTxBuffer.put(buffer[x]);
+                gwTxBuffer.addData(buffer, respLen);
             }
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
-            if (validFrame && dstarReflConnected && gwTxBuffer.getSpace() >= respLen)
+            memcpy(buffer+17, DSTAR_EOT, 3);
+            if (validFrame && dstarGWConnected && gwTxBuffer.freeSpace() >= respLen)
             {
-                for (uint8_t x=0;x<respLen;x++)
-                    gwTxBuffer.put(buffer[x]);
+                gwTxBuffer.addData(buffer, respLen);
             }
 
             if (debugM)
                 fprintf(stderr, "Found DSTAR EOT\n");
+
             if (validFrame)
             {
                 gps[0] = 0;
@@ -818,11 +906,12 @@ void* startClient(void *arg)
                     fprintf(stderr, "Lat: %f  Long: %f  Alt: %d\n", fLat, fLong, altitude);
                     sprintf(gps, "%f %f %d 0 0", fLat, fLong, altitude);
                 }
-                float loss_BER = 0.0f; // (float)decoder.bitErr / 3.68F;
+                float loss_BER = 0.0f;
                 duration = difftime(time(NULL), start_time);
                 saveLastCall("DSTAR", "RF", myCall, urCall, metaText, NULL, gps, false);
                 saveHistory("DSTAR", "RF", myCall , urCall, loss_BER, metaText, duration);
             }
+
             if (validFrame && modem_duplex)
             {
                 if (write(sockfd, buffer, respLen) < 0)
@@ -830,6 +919,40 @@ void* startClient(void *arg)
                     fprintf(stderr, "ERROR: host disconnect\n");
                     break;
                 }
+
+                // EOT acknowlege message
+                //=================================================================
+                delay(18000);
+                if (write(sockfd, header, 49) < 0)
+                {
+                    fprintf(stderr, "ERROR: host disconnect\n");
+                    break;
+                }
+                delay(18000);
+
+                uint8_t buf[20] = {0x61, 0x00, 0x14, 0x04, 'D', 'S', 'T', 'D'};
+                memcpy(buf+8, AMBE_SILENCE, 9);
+
+                strcpy(metaText, "Have a nice day.   ");
+                for (uint8_t i=0;i<19;i++)
+                {
+	                slowSpeedDataEncode(metaText, buf+17, 1);
+                    if (write(sockfd, buf, 20) < 0)
+                    {
+                        fprintf(stderr, "ERROR: host disconnect\n");
+                        break;
+                    }
+                    delay(18000);
+                 }
+
+                memcpy(buf+4, TYPE_EOT, 4);
+                memcpy(buf+17, DSTAR_EOT, 3);
+                if (write(sockfd, buf, 20) < 0)
+                {
+                    fprintf(stderr, "ERROR: host disconnect\n");
+                    break;
+                }
+                //===================================================================
             }
        //     if (urCall[7] == 'E') // used for test echo function
        //     {
@@ -866,25 +989,23 @@ void* txThread(void *arg)
 
         if (loop > 100)
         {
-            if (gwTxBuffer.getData() >= 5)
+            if (gwTxBuffer.dataSize() >= 5)
             {
-                if (gwTxBuffer.peek() != 0x61)
+                uint8_t buf[1];
+                gwTxBuffer.peek(buf, 1);
+                if (buf[0] != 0x61)
                 {
                     fprintf(stderr, "TX invalid header.\n");
                     continue;
                 }
-                uint8_t  byte[2];
+                uint8_t  byte[3];
                 uint16_t len = 0;
-                gwTxBuffer.npeek(byte[0], 1);
-                gwTxBuffer.npeek(byte[1], 2);
-                len = (byte[0] << 8) + byte[1];;
-                if (gwTxBuffer.getData() >= len)
+                gwTxBuffer.peek(byte, 3);
+                len = (byte[1] << 8) + byte[2];;
+                if (gwTxBuffer.dataSize() >= len)
                 {
                     uint8_t buf[len];
-                    for (int i=0;i<len;i++)
-                    {
-                        gwTxBuffer.get(buf[i]);
-                    }
+                    gwTxBuffer.getData(buf, len);
                     if (write(sockfd, buf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
@@ -897,26 +1018,24 @@ void* txThread(void *arg)
         }
 
         // Send command data to gateway.
-        if (gwCommand.getData() >= 5)
+        if (gwCommand.dataSize() >= 5)
         {
-            if (gwCommand.peek() != 0x61)
+            uint8_t buf[1];
+            gwCommand.peek(buf, 1);
+            if (buf[0] != 0x61)
             {
                 fprintf(stderr, "Command invalid header.\n");
             }
             else
             {
-                uint8_t  byte[2];
+                uint8_t  byte[3];
                 uint16_t len = 0;
-                gwCommand.npeek(byte[0], 1);
-                gwCommand.npeek(byte[1], 2);
-                len = (byte[0] << 8) + byte[1];;
-                if (gwCommand.getData() >= len)
+                gwCommand.peek(byte, 3);
+                len = (byte[1] << 8) + byte[2];;
+                if (gwCommand.dataSize() >= len)
                 {
                     uint8_t buf[len];
-                    for (int i=0;i<len;i++)
-                    {
-                        gwCommand.get(buf[i]);
-                    }
+                    gwCommand.getData(buf, len);
                     if (write(sockfd, buf, len) < 0)
                     {
                         fprintf(stderr, "Command ERROR: remote disconnect\n");
@@ -1102,7 +1221,7 @@ void *processGatewaySocket(void *arg)
                 fLong = 0.0f;
                 altitude = 0;
             }
-            float loss_BER = 0.0f; // (float)decoder.bitErr / 3.68F;
+            float loss_BER = 0.0f;
             saveLastCall("DSTAR", "NET", myCall, urCall, metaText, NULL, gps, false);
             saveHistory("DSTAR", "NET", myCall , urCall, loss_BER, metaText, duration);
             bzero(urCall, 8);
@@ -1350,15 +1469,17 @@ int main(int argc, char **argv)
                 strcpy(rpt1Call, readHostConfig("DSTAR", "rpt1Call").c_str());
                 strcpy(rpt2Call, readHostConfig("DSTAR", "rpt2Call").c_str());
                 strcpy(myCall, readHostConfig("main", "callsign").c_str());
-                gwCommand.put(0x61);
-                gwCommand.put(0x00);
-                gwCommand.put(0x09);
-                gwCommand.put(0x04);
-                gwCommand.put(TYPE_COMMAND[0]);
-                gwCommand.put(TYPE_COMMAND[1]);
-                gwCommand.put(TYPE_COMMAND[2]);
-                gwCommand.put(TYPE_COMMAND[3]);
-                gwCommand.put(COMM_UPDATE_CONF);
+                    uint8_t buf[9];
+                    buf[0] = 0x61;
+                    buf[1] = 0x00;
+                    buf[2] = 0x09;
+                    buf[3] = 0x04;
+                    buf[4] = TYPE_COMMAND[0];
+                    buf[5] = TYPE_COMMAND[1];
+                    buf[6] = TYPE_COMMAND[2];
+                    buf[7] = TYPE_COMMAND[3];
+                    buf[8] = COMM_UPDATE_CONF;
+                    gwCommand.addData(buf, 9);
             }
 
             if (dstarGWConnected)
@@ -1371,14 +1492,16 @@ int main(int argc, char **argv)
                 }
                 if (parameter == "unlink")
                 {
-                    gwCommand.put(0x61);
-                    gwCommand.put(0x00);
-                    gwCommand.put(0x08);
-                    gwCommand.put(0x04);
-                    gwCommand.put(TYPE_DISCONNECT[0]);
-                    gwCommand.put(TYPE_DISCONNECT[1]);
-                    gwCommand.put(TYPE_DISCONNECT[2]);
-                    gwCommand.put(TYPE_DISCONNECT[3]);
+                    uint8_t buf[8];
+                    buf[0] = 0x61;
+                    buf[1] = 0x00;
+                    buf[2] = 0x08;
+                    buf[3] = 0x04;
+                    buf[4] = TYPE_DISCONNECT[0];
+                    buf[5] = TYPE_DISCONNECT[1];
+                    buf[6] = TYPE_DISCONNECT[2];
+                    buf[7] = TYPE_DISCONNECT[3];
+                    gwCommand.addData(buf, 8);
                     sleep(3);
                     statusTimeout = false;
                     continue;
@@ -1400,20 +1523,20 @@ int main(int argc, char **argv)
                             token = strtok(NULL, ",");
                             char module[2];
                             strcpy(module, token);
-                            gwCommand.put(0x61);
-                            gwCommand.put(0x00);
-                            gwCommand.put(0x16);
-                            gwCommand.put(0x04);
-                            gwCommand.put(TYPE_CONNECT[0]);
-                            gwCommand.put(TYPE_CONNECT[1]);
-                            gwCommand.put(TYPE_CONNECT[2]);
-                            gwCommand.put(TYPE_CONNECT[3]);
+                            uint8_t buf[8];
+                            buf[0] = 0x61;
+                            buf[1] = 0x00;
+                            buf[2] = 0x16;
+                            buf[3] = 0x04;
+                            buf[4] = TYPE_CONNECT[0];
+                            buf[5] = TYPE_CONNECT[1];
+                            buf[6] = TYPE_CONNECT[2];
+                            buf[7] = TYPE_CONNECT[3];
+                            gwCommand.addData(buf, 8);
                             std::string callsign = readHostConfig("main", "callsign");
-                            for (uint8_t x=0;x<6;x++)
-                                gwCommand.put(callsign.c_str()[x]);
-                            for (uint8_t x=0;x<7;x++)
-                                gwCommand.put(name[x]);
-                            gwCommand.put(module[0]);
+                            gwCommand.addData((uint8_t*)callsign.c_str(), 6);
+                            gwCommand.addData((uint8_t*)name, 7);
+                            gwCommand.addData((uint8_t*)module, 1);
                             sleep(3);
                         }
                         else

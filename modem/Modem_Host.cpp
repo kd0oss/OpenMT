@@ -50,7 +50,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#include "../tools/RingBuffer.h"
+#include "../tools/CRingBuffer.h"
 #include "../tools/tools.h"
 #include "mmdvm.h"
 
@@ -107,6 +107,8 @@ pthread_t tcpid;
 pthread_t timerid;
 pthread_t commandid;
 
+sem_t modemTx;
+sem_t rxBufSem;
 sem_t txBufSem;
 sem_t shutDownSem;
 
@@ -119,7 +121,7 @@ struct Client
     char      mode[11];
     bool      active;
     bool      isTx;
-    CRingBuffer<uint8_t> command;
+    RingBuffer<uint8_t> command;
 };
 
 Client hostClient[MAX_CLIENT_CONNECTIONS];
@@ -171,10 +173,10 @@ int                optval;           //< flag value for setsockopt
 struct sockaddr_in serveraddr;       //< server's addr
 struct sockaddr_in clientaddr;       //< client addr
 
-CRingBuffer<uint8_t>  modemCommandBuffer(300);  //< Modem command buffer
-CRingBuffer<uint8_t>  txBuffer(1300);           //< Modem TX buffer
-CRingBuffer<uint8_t>  rxModeBuffer(3600);       //< Client RX buffer
-CRingBuffer<uint8_t>  txModeBuffer(3600);       //< Client TX buffer
+RingBuffer<uint8_t>  modemCommandBuffer(300);  //< Modem command buffer
+RingBuffer<uint8_t>  txBuffer(2600);           //< Modem TX buffer
+RingBuffer<uint8_t>  rxModeBuffer(3600);       //< Client RX buffer
+RingBuffer<uint8_t>  txModeBuffer(3600);       //< Client TX buffer
 
 // ******** General settings
 std::string username("");
@@ -185,12 +187,19 @@ std::string modem("");
 std::string currentMode("idle");
 std::string callsign("N0CALL");
 
+void setProtocol(const char* protocol, bool enabled);
 
 //  SIGINT handler, so we can gracefully exit when the user hits ctrl+c.
 static void sigintHandler(int signum)
 {
-    exitRequested = true;
     signal(SIGINT, SIG_DFL);
+    for (uint8_t x=0;x<MAX_CLIENT_CONNECTIONS;x++)
+    {
+        if (hostClient[x].active)
+            setProtocol(mode[x].name, false);
+    }
+    sleep(1);
+    exitRequested = true;
 }
 
 uint8_t getModemSpace(const char* protocol)
@@ -368,7 +377,7 @@ void* timerThread(void *arg)
     {
         delay(1000); // 1ms
 
-        if (loop[0] >= 250)
+        if (loop[0] >= 500)
         {
             statusTimeout = true;
             loop[0] = 0;
@@ -389,8 +398,7 @@ void* timerThread(void *arg)
             buffer[1] = 0x04;
             buffer[2] = MODEM_MODE;
             buffer[3] = 0x00; // IDLE_MODE
-            for (uint8_t i=0;i<4;i++)
-                modemCommandBuffer.put(buffer[i]);
+            modemCommandBuffer.addData(buffer, 4);
             loop[2] = 0;
             if (debugM)
                 fprintf(stderr, "TX timeout. Setting mode to idle.\n");
@@ -442,67 +450,53 @@ void* modeRxThread(void *arg)
         delay(100);
 
         sem_wait(&txBufSem);
-        if (txModeBuffer.getData() >= 5)
+        if (txModeBuffer.dataSize() >= 5)
         {
-            if (txModeBuffer.peek() != 0x61)
+            uint8_t buf[1];
+            txModeBuffer.peek(buf, 1);
+            if (buf[0] != 0x61)
             {
                 uint8_t tmp[1];
-                txModeBuffer.get(tmp[0]);
-                fprintf(stderr, "txModeBuffer: invalid header. [%02X]\n", tmp[0]);
-                if (tmp[0] != 0x61)
-                {
-                    sem_post(&txBufSem);
-                    continue;
-                }
-                found = true;
+                txModeBuffer.getData(tmp, 1);
+                fprintf(stderr, "txModeBuffer: invalid header [%02X]  [%02X]\n", buf[0], tmp[0]);
+                sem_post(&txBufSem);
+                continue;
             }
-            uint8_t  byte[3];
+            uint8_t  byte[5];
             uint16_t len = 0;
-            txModeBuffer.npeek(byte[0], 1);
-            txModeBuffer.npeek(byte[1], 2);
-            txModeBuffer.npeek(byte[2], 4);
-            len = (byte[0] << 8) + byte[1];;
-            if (txModeBuffer.getData() >= len && hostClient[conn_id].mode[0] == byte[2])
+            txModeBuffer.peek(byte, 5);
+            len = (byte[1] << 8) + byte[2];;
+            if (txModeBuffer.dataSize() >= len && hostClient[conn_id].mode[0] == byte[4])
             {
                 uint8_t buf[len];
-                for (int i=0;i<len;i++)
-                {
-                    if (found && i == 0)
-                        buf[0] = 0x61;
-                    else
-                        txModeBuffer.get(buf[i]);
-                }
+                txModeBuffer.getData(buf, len);
                 if (write(sockfd, buf, len) < 0)
                 {
                     fprintf(stderr, "ERROR: remote disconnect\n");
                     break;
                 }
-                found = false;
             }
         }
         sem_post(&txBufSem);
 
         // check for out going commands.
-        if (hostClient[conn_id].command.getData() >= 5)
+        if (hostClient[conn_id].command.dataSize() >= 5)
         {
-            if (hostClient[conn_id].command.peek() != 0x61)
+            uint8_t buf[1];
+            hostClient[conn_id].command.peek(buf, 1);
+            if (buf[0] != 0x61)
             {
-         //       modeCommandBuffer.reset();
                 fprintf(stderr, "modeTx invalid header.\n");
                 continue;
             }
-            uint8_t  byte[2];
+            uint8_t  byte[3];
             uint16_t len = 0;
-            hostClient[conn_id].command.npeek(byte[0], 1);
-            hostClient[conn_id].command.npeek(byte[1], 2);
-            len = (byte[0] << 8) + byte[1];;
-            if (hostClient[conn_id].command.getData() >= len)
+            hostClient[conn_id].command.peek(byte, 3);
+            len = (byte[1] << 8) + byte[2];;
+            if (hostClient[conn_id].command.dataSize() >= len)
             {
                 uint8_t buf[len];
-                for (int i=0;i<len;i++)
-                {
-                    hostClient[conn_id].command.get(buf[i]);
-                }
+                hostClient[conn_id].command.getData(buf, len);
                 if (write(sockfd, buf, len) < 0)
                 {
                     fprintf(stderr, "ERROR: remote disconnect\n");
@@ -529,65 +523,83 @@ void* modeTxThread(void *arg)
 
         if (statusTimeout)
         {
-            if (txBuffer.getSpace() >= 3 && rxModeBuffer.getData() < 3)
+            if (txBuffer.freeSpace() >= 3 && rxModeBuffer.dataSize() < 3)
             {
-                txBuffer.put(0xE0);
-                txBuffer.put(0x03);
-                txBuffer.put(MODEM_STATUS);
+                uint8_t buf[3];
+                buf[0] = 0xE0;
+                buf[1] = 0x03;
+                buf[2] = MODEM_STATUS;
+                sem_wait(&modemTx);
+                txBuffer.addData(buf, 3);
+                sem_post(&modemTx);
             }
+            getModemSpace(currentMode.c_str());
             statusTimeout = false;
         }
 
-        if (rxModeBuffer.getData() >= 3 && frameTimeout)
+        if (rxModeBuffer.dataSize() >= 3 && frameTimeout)
         {
-            if (rxModeBuffer.peek() != 0xE0)
+            uint8_t buf[2];
+            sem_wait(&rxBufSem);
+            rxModeBuffer.peek(buf, 1);
+            if (buf[0] != 0xE0)
             {
-                fprintf(stderr, "modemTx invalid header.\n");
+                uint8_t tmp[1];
+                rxModeBuffer.getData(tmp, 1);
+                sem_post(&rxBufSem);
+                fprintf(stderr, "modemTx invalid header [%02X]\n", tmp[0]);
                 frameTimeout = false;
                 continue;
             }
-            uint8_t len = 0;
-            rxModeBuffer.npeek(len, 1);
-            if (rxModeBuffer.getData() >= len)
+            rxModeBuffer.peek(buf, 2);
+            sem_post(&rxBufSem);
+            uint8_t len = buf[1];
+            if (rxModeBuffer.dataSize() >= len)
             {
-                if (getModemSpace(currentMode.c_str()) > 1 && txBuffer.getSpace() >= len + 3)
+                if (getModemSpace(currentMode.c_str()) > 1 && txBuffer.freeSpace() >= len + 3)
                 {
-                    uint8_t buf[1];
-                    for (int i=0;i<len;i++)
-                    {
-                        rxModeBuffer.get(buf[0]);
-                        txBuffer.put(buf[0]);
-                    }
+                    uint8_t buf[len];
+                    sem_wait(&rxBufSem);
+                    rxModeBuffer.getData(buf, len);
+                    sem_post(&rxBufSem);
+                    sem_wait(&modemTx);
+                    txBuffer.addData(buf, len);
+                    sem_post(&modemTx);
                 }
-                if (txBuffer.getSpace() >= 3)
+                if (txBuffer.freeSpace() >= 3)
                 {
-                    txBuffer.put(0xE0);
-                    txBuffer.put(0x03);
-                    txBuffer.put(MODEM_STATUS);
+                    uint8_t buf[3];
+                    buf[0] = 0xE0;
+                    buf[1] = 0x03;
+                    buf[2] = MODEM_STATUS;
+                    sem_wait(&modemTx);
+                    txBuffer.addData(buf, 3);
+                    sem_post(&modemTx);
                 }
             }
             frameTimeout = false;
         }
 
-        if (modemCommandBuffer.getData() >= 3)
+        if (modemCommandBuffer.dataSize() >= 3)
         {
-            if (modemCommandBuffer.peek() != 0xE0)
+            uint8_t buf[2];
+            modemCommandBuffer.peek(buf, 1);
+            if (buf[0] != 0xE0)
             {
-                fprintf(stderr, "modem command: invalid header [%02X].\n", modemCommandBuffer.peek());
+                fprintf(stderr, "modem command: invalid header [%02X]\n", buf[0]);
                 continue;
             }
-            uint8_t len = 0;
-            modemCommandBuffer.npeek(len, 1);
-            if (modemCommandBuffer.getData() >= len)
+            modemCommandBuffer.peek(buf, 2);
+            uint8_t len = buf[1];
+            if (modemCommandBuffer.dataSize() >= len)
             {
-                if (txBuffer.getSpace() >= len)
+                if (txBuffer.freeSpace() >= len)
                 {
-                    uint8_t buf[1];
-                    for (int i=0;i<len;i++)
-                    {
-                        modemCommandBuffer.get(buf[0]);
-                        txBuffer.put(buf[0]);
-                    }
+                    uint8_t buf[len];
+                    modemCommandBuffer.getData(buf, len);
+                    sem_wait(&modemTx);
+                    txBuffer.addData(buf, len);
+                    sem_post(&modemTx);
                 }
             }
         }
@@ -605,31 +617,39 @@ void* modemTxThread(void *arg)
     {
         delay(50);
 
-        if (txBuffer.getData() >= 3)
+        if (txBuffer.dataSize() >= 3)
         {
-            if (txBuffer.peek() != 0xE0)
+            sem_wait(&modemTx);
+            uint8_t buf[2];
+            txBuffer.peek(buf, 1);
+            if (buf[0] != 0xE0)
             {
                 uint8_t tmp[1];
-                txBuffer.get(tmp[0]);
-                fprintf(stderr, "modem TX invalid header. [%02X]\n", tmp[0]);
+                txBuffer.getData(tmp, 1);
+                fprintf(stderr, "modem TX invalid header [%02X]  [%02X]\n", buf[0], tmp[0]);
+                sem_post(&modemTx);
                 continue;
             }
-            uint8_t len = 0;
-            if (!txBuffer.npeek(len, 1))
+            if (!txBuffer.peek(buf, 2))
                 fprintf(stderr, "npeek failed\n");
+            sem_post(&modemTx);
+            uint8_t len = buf[1];
             if (len < 1)
             {
                 uint8_t tmp[2];
-                txBuffer.npeek(tmp[0], 1);
-                fprintf(stderr, "modem length invalid. [%02X]  [%02X]\n", tmp[0], tmp[1]);
+                sem_wait(&modemTx);
+                txBuffer.peek(tmp, 2);
+                fprintf(stderr, "modem length invalid. [%02X]  [%02X]\n", len, tmp[1]);
+                sem_post(&modemTx);
                 continue;
             }
 
-            if (txBuffer.getData() >= len)
+            if (txBuffer.dataSize() >= len)
             {
                 uint8_t buf[len];
-                for (uint8_t i=0;i<len;i++)
-                    txBuffer.get(buf[i]);
+                sem_wait(&modemTx);
+                txBuffer.getData(buf, len);
+                sem_post(&modemTx);
                 int ret = write(serialModemFd, buf, len);
                 if (ret != len)
                 {
@@ -671,13 +691,10 @@ void* commandThread(void *arg)
                     buffer[8] = COMM_SET_DUPLEX;
                 else
                     buffer[8] = COMM_SET_SIMPLEX;
-                for (uint8_t x=0;x<9;x++)
+                for (uint8_t i=0;i<MAX_CLIENT_CONNECTIONS;i++)
                 {
-                    for (uint8_t i=0;i<MAX_CLIENT_CONNECTIONS;i++)
-                    {
                         if (hostClient[i].active)
-                            hostClient[i].command .put(buffer[x]);
-                    }
+                            hostClient[i].command .addData(buffer, 9);
                 }
 
                 ackDashbCommand("modemHost", "success");
@@ -695,7 +712,7 @@ void* commandThread(void *arg)
 // One thread per service.
 void *processClientSocket(void *arg)
 {
-    char          buffer[BUFFER_LENGTH];
+    uint8_t       buffer[BUFFER_LENGTH];
     uint8_t       conn_id = (intptr_t)arg;
     int           sockFd  = hostClient[conn_id].sockfd;
     uint16_t      respLen = 0;
@@ -817,8 +834,7 @@ void *processClientSocket(void *arg)
             buffer[1] = 0x04;
             buffer[2] = MODEM_MODE;
             buffer[3] = 0x00; // IDLE_MODE
-            for (uint8_t i=0;i<4;i++)
-                modemCommandBuffer.put(buffer[i]);
+            modemCommandBuffer.addData(buffer, 4);
         }
 
 // *********** Convert from OpenMT type to modem specific type ***********
@@ -841,17 +857,20 @@ void *processClientSocket(void *arg)
         else if (memcmp(buffer+4, TYPE_NACK, typeLen) == 0)
             type = NET_NACK;
 
-        if (debugM)
+    //    if (debugM)
            dump((char*)"Protocol service data:", (unsigned char*)buffer, respLen);
 
-        if (rxModeBuffer.getSpace() < respLen)
+        if (rxModeBuffer.freeSpace() < respLen)
         {
-            fprintf(stderr, "rxModeBuffer out of space. [%02X]\n", rxModeBuffer.peek());
-            rxModeBuffer.reset();
+            uint8_t tmp[1];
+            rxModeBuffer.peek(tmp, 1);
+            fprintf(stderr, "rxModeBuffer out of space. [%02X]\n", tmp[0]);
+            rxModeBuffer.clear();
         }
-// This line to be removed after debugging
-if (debugM)
-fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", type, currentMode.c_str(), conn_id, hostClient[conn_id].active, getModemSpace(currentMode.c_str()));
+        // This debug statement to be removed after debugging
+   //     if (debugM)
+            fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", type, currentMode.c_str(), conn_id, hostClient[conn_id].active, getModemSpace(currentMode.c_str()));
+
         switch (type)
         {
             case NET_NACK:
@@ -869,9 +888,9 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
                 {
                     currentMode = hostClient[conn_id].mode;
                     setProtocol(currentMode.c_str(), true);
-        //           if (debugM)
+         //           if (debugM)
                     fprintf(stderr, "Current mode set to %s.\n", currentMode.c_str());
-
+                    setStatus("main", "active_mode", currentMode.c_str());
                 }
                 break;
 
@@ -883,10 +902,10 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
                     buffer[1] = 0x04;
                     buffer[2] = MODEM_MODE;
                     buffer[3] = 0x00; // IDLE_MODE
-                    for (uint8_t i=0;i<4;i++)
-                        modemCommandBuffer.put(buffer[i]);
-                    //           if (debugM)
+                    modemCommandBuffer.addData(buffer, 4);
+         //           if (debugM)
                         fprintf(stderr, "Current mode set to IDLE.\n");
+                    setStatus("main", "active_mode", currentMode.c_str());
                 }
                 break;
 
@@ -898,14 +917,15 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
                 if (hostClient[conn_id].active && currentMode == hostClient[conn_id].mode)
                 {
                     txOn = true;
-                    rxModeBuffer.put(0xE0);
-                    rxModeBuffer.put(0x34);
-                    rxModeBuffer.put(type);
-                    rxModeBuffer.put(0x00);
-                    for (int x=0;x<48;x++)
-                    {
-                        rxModeBuffer.put(buffer[x+4+typeLen]);
-                    }
+                    uint8_t buf[4];
+                    buf[0] = 0xE0;
+                    buf[1] = 0x34;
+                    buf[2] = type;
+                    buf[3] = 0x00;
+                    sem_wait(&rxBufSem);
+                    rxModeBuffer.addData(buf, 4);
+                    rxModeBuffer.addData(&buffer[4+typeLen], 48);
+                    sem_post(&rxBufSem);
                 }
                 if (type == TYPE_M17_EOT)
                     txOn = false;
@@ -917,13 +937,14 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
                 if (hostClient[conn_id].active && currentMode == hostClient[conn_id].mode)
                 {
                     txOn = true;
-                    rxModeBuffer.put(0xE0);
-                    rxModeBuffer.put(0x2C);
-                    rxModeBuffer.put(type);
-                    for (int x=0;x<41;x++)
-                    {
-                        rxModeBuffer.put(buffer[x+4+typeLen]);
-                    }
+                    uint8_t buf[3];
+                    buf[0] = 0xE0;
+                    buf[1] = 0x2C;
+                    buf[2] = type;
+                    sem_wait(&rxBufSem);
+                    rxModeBuffer.addData(buf, 3);
+                    rxModeBuffer.addData(&buffer[4+typeLen], 41);
+                    sem_post(&rxBufSem);
                 }
             }
             break;
@@ -933,13 +954,14 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
                 if (hostClient[conn_id].active && currentMode == hostClient[conn_id].mode)
                 {
                     txOn = true;
-                    rxModeBuffer.put(0xE0);
-                    rxModeBuffer.put(0x0F);
-                    rxModeBuffer.put(type);
-                    for (int x=0;x<12;x++)
-                    {
-                        rxModeBuffer.put(buffer[x+4+typeLen]);
-                    }
+                    uint8_t buf[3];
+                    buf[0] = 0xE0;
+                    buf[1] = 0x0F;
+                    buf[2] = type;
+                    sem_wait(&rxBufSem);
+                    rxModeBuffer.addData(buf, 3);
+                    rxModeBuffer.addData(&buffer[4+typeLen], 12);
+                    sem_post(&rxBufSem);
                 }
             }
             break;
@@ -948,10 +970,14 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
             {
                 if (hostClient[conn_id].active && currentMode == hostClient[conn_id].mode)
                 {
+                    uint8_t buf[3];
+                    buf[0] = 0xE0;
+                    buf[1] = 0x03;
+                    buf[2] = type;
+                    sem_wait(&rxBufSem);
+                    rxModeBuffer.addData(buf, 3);
+                    sem_post(&rxBufSem);
                     txOn = false;
-                    rxModeBuffer.put(0xE0);
-                    rxModeBuffer.put(0x03);
-                    rxModeBuffer.put(type);
                 }
             }
             break;
@@ -974,18 +1000,7 @@ fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", 
     free(mode[conn_id].tx_filter_pState);
 
     sem_wait(&shutDownSem);
-    if (currentMode != "idle")
-    {
-        currentMode = "idle";
-        buffer[0] = 0xE0;
-        buffer[1] = 0x04;
-        buffer[2] = MODEM_MODE;
-        buffer[3] = 0x00; // IDLE_MODE
-        for (uint8_t i=0;i<4;i++)
-            modemCommandBuffer.put(buffer[i]);
-        //           if (debugM)
-        fprintf(stderr, "Current mode set to IDLE.\n");
-    }
+    delGateway("main", mode[conn_id].name);
     delMode("main", mode[conn_id].name);
     if (modem == "mmdvmhs")
         set_ConfigHS();
@@ -1161,7 +1176,7 @@ void *startTCPServer(void *arg)
 // Process incoming modem bytes.
 int processSerial(void)
 {
-    unsigned char buffer[BUFFER_LENGTH];
+    uint8_t       buffer[BUFFER_LENGTH];
     unsigned int  respLen;
     unsigned int  offset;
     unsigned int  type;
@@ -1206,10 +1221,10 @@ int processSerial(void)
             offset += len;
     }
 
-    if (txModeBuffer.getSpace() == 0)
+    if (txModeBuffer.freeSpace() == 0)
     {
         fprintf(stderr, "txModeBuffer out of space.\n");
-        txModeBuffer.reset();
+        txModeBuffer.clear();
     }
 
     if (debugM)
@@ -1262,118 +1277,131 @@ int processSerial(void)
     {
         if (connections > 0 && (currentMode == "idle" || currentMode == "M17"))
         {
-            txModeBuffer.put(0x61);
-            txModeBuffer.put(0x00);
-            txModeBuffer.put(0x38);
-            txModeBuffer.put(0x04);
-            txModeBuffer.put(TYPE_LSF_M17[0]);
-            txModeBuffer.put(TYPE_LSF_M17[1]);
-            txModeBuffer.put(TYPE_LSF_M17[2]);
-            txModeBuffer.put(TYPE_LSF_M17[3]);
-            for (int x=0;x<48;x++)
-            {
-                txModeBuffer.put(buffer[x+4]);
-            }
+            uint8_t buf[8];
+            buf[0] = 0x61;
+            buf[1] = 0x00;
+            buf[2] = 0x38;
+            buf[3] = 0x04;
+            buf[4] = TYPE_LSF_M17[0];
+            buf[5] = TYPE_LSF_M17[1];
+            buf[6] = TYPE_LSF_M17[2];
+            buf[7] = TYPE_LSF_M17[3];
+            sem_wait(&txBufSem);
+            txModeBuffer.addData(buf, 8);
+            txModeBuffer.addData(&buffer[4], 48);
+            sem_post(&txBufSem);
         }
     }
     else if (type == TYPE_M17_STREAM && respLen == 54)
     {
         if (connections > 0 && (currentMode == "idle" || currentMode == "M17"))
         {
-            txModeBuffer.put(0x61);
-            txModeBuffer.put(0x00);
-            txModeBuffer.put(0x38);
-            txModeBuffer.put(0x04);
-            txModeBuffer.put(TYPE_STREAM_M17[0]);
-            txModeBuffer.put(TYPE_STREAM_M17[1]);
-            txModeBuffer.put(TYPE_STREAM_M17[2]);
-            txModeBuffer.put(TYPE_STREAM_M17[3]);
-            for (int x=0;x<48;x++)
-            {
-                txModeBuffer.put(buffer[x+4]);
-            }
+            uint8_t buf[8];
+            buf[0] = 0x61;
+            buf[1] = 0x00;
+            buf[2] = 0x38;
+            buf[3] = 0x04;
+            buf[4] = TYPE_STREAM_M17[0];
+            buf[5] = TYPE_STREAM_M17[1];
+            buf[6] = TYPE_STREAM_M17[2];
+            buf[7] = TYPE_STREAM_M17[3];
+            sem_wait(&txBufSem);
+            txModeBuffer.addData(buf, 8);
+            txModeBuffer.addData(&buffer[4], 48);
+            sem_post(&txBufSem);
         }
     }
     else if (type == TYPE_M17_PACKET && respLen == 54)
     {
         if (connections > 0 && (currentMode == "idle" || currentMode == "M17"))
         {
-            txModeBuffer.put(0x61);
-            txModeBuffer.put(0x00);
-            txModeBuffer.put(0x38);
-            txModeBuffer.put(0x04);
-            txModeBuffer.put(TYPE_PACKET_M17[0]);
-            txModeBuffer.put(TYPE_PACKET_M17[1]);
-            txModeBuffer.put(TYPE_PACKET_M17[2]);
-            txModeBuffer.put(TYPE_PACKET_M17[3]);
-            for (int x=0;x<48;x++)
-            {
-                txModeBuffer.put(buffer[x+4]);
-            }
+            uint8_t buf[8];
+            buf[0] = 0x61;
+            buf[1] = 0x00;
+            buf[2] = 0x38;
+            buf[3] = 0x04;
+            buf[4] = TYPE_PACKET_M17[0];
+            buf[5] = TYPE_PACKET_M17[1];
+            buf[6] = TYPE_PACKET_M17[2];
+            buf[7] = TYPE_PACKET_M17[3];
+            sem_wait(&txBufSem);
+            txModeBuffer.addData(buf, 8);
+            txModeBuffer.addData(&buffer[4], 48);
+            sem_post(&txBufSem);
         }
     }
     else if ((type == TYPE_M17_EOT || type == TYPE_M17_LOST) && respLen == 3)
     {
         if (connections > 0 && (currentMode == "idle" || currentMode == "M17"))
         {
-            txModeBuffer.put(0x61);
-            txModeBuffer.put(0x00);
-            txModeBuffer.put(0x08);
-            txModeBuffer.put(0x04);
-            txModeBuffer.put(TYPE_EOT_M17[0]);
-            txModeBuffer.put(TYPE_EOT_M17[1]);
-            txModeBuffer.put(TYPE_EOT_M17[2]);
-            txModeBuffer.put(TYPE_EOT_M17[3]);
+            uint8_t buf[8];
+            buf[0] = 0x61;
+            buf[1] = 0x00;
+            buf[2] = 0x08;
+            buf[3] = 0x04;
+            buf[4] = TYPE_EOT_M17[0];
+            buf[5] = TYPE_EOT_M17[1];
+            buf[6] = TYPE_EOT_M17[2];
+            buf[7] = TYPE_EOT_M17[3];
+            sem_wait(&txBufSem);
+            txModeBuffer.addData(buf, 8);
+            sem_post(&txBufSem);
         }
     }
     else if (type == TYPE_DSTAR_HEADER && respLen == 46)
     {
         if (connections > 0 && (currentMode == "idle" || currentMode == "DSTAR"))
         {
-            txModeBuffer.put(0x61);
-            txModeBuffer.put(0x00);
-            txModeBuffer.put(0x31);
-            txModeBuffer.put(0x04);
-            txModeBuffer.put(TYPE_HEADER_DSTAR[0]);
-            txModeBuffer.put(TYPE_HEADER_DSTAR[1]);
-            txModeBuffer.put(TYPE_HEADER_DSTAR[2]);
-            txModeBuffer.put(TYPE_HEADER_DSTAR[3]);
-            for (int x=0;x<41;x++)
-            {
-                txModeBuffer.put(buffer[x+3]);
-            }
+            uint8_t buf[8];
+            buf[0] = 0x61;
+            buf[1] = 0x00;
+            buf[2] = 0x31;
+            buf[3] = 0x04;
+            buf[4] = TYPE_HEADER_DSTAR[0];
+            buf[5] = TYPE_HEADER_DSTAR[1];
+            buf[6] = TYPE_HEADER_DSTAR[2];
+            buf[7] = TYPE_HEADER_DSTAR[3];
+            sem_wait(&txBufSem);
+            txModeBuffer.addData(buf, 8);
+            txModeBuffer.addData(&buffer[3], 41);
+            sem_post(&txBufSem);
         }
     }
     else if (type == TYPE_DSTAR_DATA && (respLen == 15 || respLen == 17))
     {
         if (connections > 0 && (currentMode == "idle" || currentMode == "DSTAR"))
         {
-            txModeBuffer.put(0x61);
-            txModeBuffer.put(0x00);
-            txModeBuffer.put(0x14);
-            txModeBuffer.put(0x04);
-            txModeBuffer.put(TYPE_DATA_DSTAR[0]);
-            txModeBuffer.put(TYPE_DATA_DSTAR[1]);
-            txModeBuffer.put(TYPE_DATA_DSTAR[2]);
-            txModeBuffer.put(TYPE_DATA_DSTAR[3]);
-            for (int x=0;x<12;x++)
-            {
-                txModeBuffer.put(buffer[x+3]);
-            }
+            uint8_t buf[8];
+            buf[0] = 0x61;
+            buf[1] = 0x00;
+            buf[2] = 0x14;
+            buf[3] = 0x04;
+            buf[4] = TYPE_DATA_DSTAR[0];
+            buf[5] = TYPE_DATA_DSTAR[1];
+            buf[6] = TYPE_DATA_DSTAR[2];
+            buf[7] = TYPE_DATA_DSTAR[3];
+            sem_wait(&txBufSem);
+            txModeBuffer.addData(buf, 8);
+            txModeBuffer.addData(&buffer[3], 12);
+            sem_post(&txBufSem);
         }
     }
     else if ((type == TYPE_DSTAR_EOT || type == TYPE_DSTAR_LOST) && respLen == 3 )
     {
         if (connections > 0 && (currentMode == "idle" || currentMode == "DSTAR"))
         {
-            txModeBuffer.put(0x61);
-            txModeBuffer.put(0x00);
-            txModeBuffer.put(0x08);
-            txModeBuffer.put(0x04);
-            txModeBuffer.put(TYPE_EOT_DSTAR[0]);
-            txModeBuffer.put(TYPE_EOT_DSTAR[1]);
-            txModeBuffer.put(TYPE_EOT_DSTAR[2]);
-            txModeBuffer.put(TYPE_EOT_DSTAR[3]);
+            uint8_t buf[8];
+            buf[0] = 0x61;
+            buf[1] = 0x00;
+            buf[2] = 0x08;
+            buf[3] = 0x04;
+            buf[4] = TYPE_EOT_DSTAR[0];
+            buf[5] = TYPE_EOT_DSTAR[1];
+            buf[6] = TYPE_EOT_DSTAR[2];
+            buf[7] = TYPE_EOT_DSTAR[3];
+            sem_wait(&txBufSem);
+            txModeBuffer.addData(buf, 8);
+            sem_post(&txBufSem);
         }
     }
     else
@@ -1432,6 +1460,8 @@ int main(int argc, char **argv)
 
     signal(SIGINT, sigintHandler);
 
+    sem_init(&modemTx, 0, 1);
+    sem_init(&rxBufSem, 0, 1);
     sem_init(&txBufSem, 0, 1);
     sem_init(&shutDownSem, 0, 1);
 
@@ -1440,7 +1470,7 @@ int main(int argc, char **argv)
         hostClient[i].active = false;
         hostClient[i].isTx = false;
         strcpy(hostClient[i].mode, "");
-        hostClient[i].command.reset();
+        hostClient[i].command.clear();
     }
 
     modem = readModemConfig("modem1", "modem");

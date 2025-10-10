@@ -960,8 +960,8 @@ bool logError(const char* module, const char* message)
     return true;
 }
 
-// Function to add status to database.
-bool addStatus(const char* property, const char* value)
+// Function to set a given status.
+bool setStatus(const char* module, const char* property, const char* value)
 {
     char dbhost[20] = "localhost";
     char passwd[30] = "";
@@ -972,7 +972,7 @@ bool addStatus(const char* property, const char* value)
     MYSQL *mysql_conn = mysql_init(NULL); // Initialize a MySQL connection handle
     if (mysql_conn == NULL)
     {
-        fprintf(stderr, "addStatus: mysql_init() failed\n");
+        fprintf(stderr, "setStatus: mysql_init() failed\n");
         exit(1);
     }
 
@@ -985,61 +985,54 @@ bool addStatus(const char* property, const char* value)
     }
 
     std::string query;
-    query = "INSERT INTO modem_host.host_status SET property = '";
-    query.append(property).append("', value = '").append(value).append("'");
-
+    query = "SELECT * FROM modem_host.host_status WHERE module = '";
+    query.append(module).append("' AND property = '").append(property).append("'");
     if (mysql_query(mysql_conn, query.c_str()))
     { // Execute a query
-        fprintf(stderr, "addStatus: mysql_query failed: %s\n", mysql_error(mysql_conn));
+        fprintf(stderr, "setStatus: mysql_query failed: %s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
-        return false;
+        return -1;
     }
 
-    mysql_close(mysql_conn);
-    return true;
-}
-
-// Function to update given status.
-bool updateStatus(const char* property, const char* value)
-{
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
-
-    readConfig("database", "host", dbhost);
-    readConfig("database", "passwd", passwd);
-
-    MYSQL *mysql_conn = mysql_init(NULL); // Initialize a MySQL connection handle
-    if (mysql_conn == NULL)
+    MYSQL_RES *result; // Result set
+    result = mysql_store_result(mysql_conn); // Store the result set
+    if (result == NULL)
     {
-        fprintf(stderr, "updateStatus: mysql_init() failed\n");
-        exit(1);
+        fprintf(stderr, "setStatus: failed: %s\n", mysql_error(mysql_conn));
+        mysql_close(mysql_conn);
+        return -2;
     }
 
-    // Establish a connection to the MariaDB server
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_num_rows(result) == 0)
     {
-        fprintf(stderr, "%s\n", mysql_error(mysql_conn));
-        mysql_close(mysql_conn);
-        return false;
+        query = "INSERT INTO modem_host.host_status SET module = '";
+        query.append(module).append("', property = '").append(property).append("', value = '").append(value).append("'");
+
+        if (mysql_query(mysql_conn, query.c_str()))
+        { // Execute a query
+            fprintf(stderr, "setStatus: mysql_query failed: %s\n", mysql_error(mysql_conn));
+            mysql_close(mysql_conn);
+            return false;
+        }
     }
-
-    std::string query;
-    query = "UPDATE modem_host.host_status SET value = '";
-    query.append(value).append("' WHERE property = '").append(property).append("'");
-
-    if (mysql_query(mysql_conn, query.c_str()))
-    { // Execute a query
-        fprintf(stderr, "updateStatus: mysql_query failed: %s\n", mysql_error(mysql_conn));
-        mysql_close(mysql_conn);
-        return false;
+    else
+    {
+        query = "UPDATE modem_host.host_status SET value = '";
+        query.append(value).append("' WHERE property = '").append(property).append("' AND module = '");
+        query.append(module).append("'");
+        if (mysql_query(mysql_conn, query.c_str()))
+        { // Execute a query
+            fprintf(stderr, "setStatus: mysql_query failed: %s\n", mysql_error(mysql_conn));
+            mysql_close(mysql_conn);
+            return false;
+        }
     }
-
     mysql_close(mysql_conn);
     return true;
 }
 
 // Function to delete given status.
-bool delStatus(const char* property)
+bool delStatus(const char* module, const char* property)
 {
     char dbhost[20] = "localhost";
     char passwd[30] = "";
@@ -1063,8 +1056,8 @@ bool delStatus(const char* property)
     }
 
     std::string query;
-    query = "DELETE FROM modem_host.host_status WHERE property = '";
-    query.append(property).append("'");
+    query = "DELETE FROM modem_host.host_status WHERE module = '";
+    query.append(module).append("' AND property = '").append(property).append("'");
 
     if (mysql_query(mysql_conn, query.c_str()))
     { // Execute a query

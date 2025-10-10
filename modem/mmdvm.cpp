@@ -14,6 +14,7 @@
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  *                                                                         *
+ *   Some functions based on or inspired by MMDVM Jonathan Naylor G4KLX    *
  ***************************************************************************/
 
 #include <stdio.h>
@@ -27,78 +28,83 @@
 #include "../tools/tools.h"
 #include "mmdvm.h"
 #include "../tools/RingBuffer.h"
+#include "../tools/CRingBuffer.h"
 
-// ******* MMDVM specific parameters (for test only) ****
-bool             modem_dmrEnabled       = false;
-unsigned int     modem_dmrColorCode     = 2U;
-unsigned int     modem_dmrDelay         = 0U;
-float            modem_dmrTXLevel       = 50U;
+// ******* MMDVM specific default parameters  ****
+bool             modem_dmrEnabled          = false;
+unsigned int     modem_dmrColorCode        = 2U;
+unsigned int     modem_dmrDelay            = 0U;
+float            modem_dmrTXLevel          = 50U;
 
-bool             modem_pocsagEnabled    = false;
-float            modem_pocsagTXLevel    = 50U;
+bool             modem_pocsagEnabled       = false;
+float            modem_pocsagTXLevel       = 50U;
 char             modem_pocsagFrequency[11] = "0";
 
-bool             modem_nxdnEnabled      = false;
-float            modem_nxdnTXLevel      = 50U;
-unsigned int     modem_nxdnTXHang       = 5U;
+bool             modem_nxdnEnabled         = false;
+float            modem_nxdnTXLevel         = 50U;
+unsigned int     modem_nxdnTXHang          = 5U;
 
-bool             modem_fmEnabled        = false;
-float            modem_fmTXLevel        = 50U;
-float            modem_cwIdTXLevel      = 50U;
+bool             modem_fmEnabled           = false;
+float            modem_fmTXLevel           = 50U;
+float            modem_cwIdTXLevel         = 50U;
 
-bool             modem_p25Enabled       = false;
-unsigned int     modem_p25TXHang        = 5U;
-float            modem_p25TXLevel       = 50U;
+bool             modem_p25Enabled          = false;
+unsigned int     modem_p25TXHang           = 5U;
+float            modem_p25TXLevel          = 50U;
 
-bool             modem_dstarEnabled     = false;
-float            modem_dstarTXLevel     = 50U;
-uint8_t          dstar_space            = 0U;
+bool             modem_dstarEnabled        = false;
+float            modem_dstarTXLevel        = 50U;
+uint8_t          dstar_space               = 0U;
 
-bool             modem_m17Enabled       = false;
-float            modem_m17TXLevel       = 50U;
-unsigned int     modem_m17TXHang        = 5U;
-uint8_t          m17_space              = 0U;
+bool             modem_m17Enabled          = false;
+float            modem_m17TXLevel          = 50U;
+unsigned int     modem_m17TXHang           = 5U;
+uint8_t          m17_space                 = 0U;
 
-bool             modem_ysfEnabled       = false;
-bool             modem_ysfLoDev         = false;
-float            modem_ysfTXLevel       = 50U;
-unsigned int     modem_ysfTXHang        = 4U;
+bool             modem_ysfEnabled          = false;
+bool             modem_ysfLoDev            = false;
+float            modem_ysfTXLevel          = 50U;
+unsigned int     modem_ysfTXHang           = 4U;
 
-bool             modem_ax25Enabled      = false;
-int              modem_ax25RXTwist      = 6U;
-unsigned int     modem_ax25TXDelay      = 300U;
-unsigned int     modem_ax25SlotTime     = 50U;
-unsigned int     modem_ax25PPersist     = 128U;
-float            modem_ax25TXLevel      = 50U;
+bool             modem_ax25Enabled         = false;
+int              modem_ax25RXTwist         = 6U;
+unsigned int     modem_ax25TXDelay         = 300U;
+unsigned int     modem_ax25SlotTime        = 50U;
+unsigned int     modem_ax25PPersist        = 128U;
+float            modem_ax25TXLevel         = 50U;
 // ******************************************************
 
-extern CRingBuffer<uint8_t> txBuffer;
-extern CRingBuffer<uint8_t> modemCommandBuffer;
-extern std::string modem;
+extern RingBuffer<uint8_t> modemCommandBuffer; //< Host out going command queue.
+extern std::string modem;                       //< modem type
 
+// function to return M17 queue free space in modem.
 uint8_t getM17Space()
 {
     return m17_space;
 }
 
+// function to record M17 queue free space.
 void setM17Space(uint8_t space)
 {
     m17_space = space;
 }
 
+// function to return DSTAR queue free space in modem.
 uint8_t getDSTARSpace()
 {
     return dstar_space;
 }
 
+// function to record DSTAR queue free space.
 void setDSTARSpace(uint8_t space)
 {
     dstar_space = space;
 }
 
+// function to enable M17 mode in modem.
 void enableM17()
 {
-    char buffer[4];
+    uint8_t buffer[4];
 
     if (!modem_m17Enabled)
     {
@@ -113,13 +119,13 @@ void enableM17()
     buffer[1] = 0x04;
     buffer[2] = MODEM_MODE;
     buffer[3] = 0x07; // M17_MODE
-    for (uint8_t i=0;i<4;i++)
-        modemCommandBuffer.put(buffer[i]);
+    modemCommandBuffer.addData(buffer, 4);
 }
 
+// function to disable M17 mode in modem.
 void disableM17()
 {
-    char buffer[4];
+    uint8_t buffer[4];
 
     modem_m17Enabled = false;
     if (modem == "mmdvmhs")
@@ -132,13 +138,13 @@ void disableM17()
     buffer[1] = 0x04;
     buffer[2] = MODEM_MODE;
     buffer[3] = 0x00; // IDLE_MODE
-    for (uint8_t i=0;i<4;i++)
-        modemCommandBuffer.put(buffer[i]);
+    modemCommandBuffer.addData(buffer, 4);
 }
 
+// function to enable DSTAR mode in modem.
 void enableDSTAR()
 {
-    char buffer[4];
+    uint8_t buffer[4];
 
     if (!modem_dstarEnabled)
     {
@@ -153,13 +159,13 @@ void enableDSTAR()
     buffer[1] = 0x04;
     buffer[2] = MODEM_MODE;
     buffer[3] = 0x01; // DSTAR_MODE
-    for (uint8_t i=0;i<4;i++)
-        modemCommandBuffer.put(buffer[i]);
+    modemCommandBuffer.addData(buffer, 4);
 }
 
+// function to disable DSTAR mode in modem.
 void disableDSTAR()
 {
-    char buffer[4];
+    uint8_t buffer[4];
 
     modem_dstarEnabled = false;
     if (modem == "mmdvmhs")
@@ -172,10 +178,10 @@ void disableDSTAR()
     buffer[1] = 0x04;
     buffer[2] = MODEM_MODE;
     buffer[3] = 0x00; // IDLE_MODE
-    for (uint8_t i=0;i<4;i++)
-        modemCommandBuffer.put(buffer[i]);
+    modemCommandBuffer.addData(buffer, 4);
 }
 
+// function to comvert OpemMT type to MMDVM type.
 bool openMTtoMMDVM(uint8_t mmdvm_in, char* openmt_out)
 {
     bool ret = false;
@@ -205,6 +211,7 @@ bool openMTtoMMDVM(uint8_t mmdvm_in, char* openmt_out)
     return ret;
 }
 
+// function to comvert MMDVM type to OpenMT type.
 bool mmdvmToOpenMT(const char* openmt_in, uint8_t mmdvm_out)
 {
     bool ret = false;
@@ -232,6 +239,7 @@ bool mmdvmToOpenMT(const char* openmt_in, uint8_t mmdvm_out)
     return ret;
 }
 
+// function to setup frequencies in MMDVM Hotspot.
 void setFrequency(const char* rxFreq, const char* txFreq, const char* pocsagFreq, uint8_t rfPower)
 {
     uint8_t buffer[17];
@@ -260,13 +268,13 @@ void setFrequency(const char* rxFreq, const char* txFreq, const char* pocsagFreq
     buffer[15] = (freq & 0x00ff0000) >> 16;
     buffer[16] = (freq & 0xff000000) >> 24;
 
-    for (uint8_t i=0;i<17;i++)
-        modemCommandBuffer.put(buffer[i]);
+    modemCommandBuffer.addData(buffer, 17);
 }
 
+// function to set config in MMDVM modem.
 bool set_Config()
 {
-    unsigned char buffer[50U];
+    uint8_t buffer[50U];
 
     buffer[0U] = MODEM_FRAME_START;
     buffer[1U] = 40U;
@@ -404,15 +412,15 @@ bool set_Config()
     buffer[38U] = 0x00U;
     buffer[39U] = 0x00U;
 
-    for (int x=0;x<40;x++)
-        modemCommandBuffer.put(buffer[x]);
+    modemCommandBuffer.addData(buffer, 40);
 
     return true;
 }
 
+// function to set config in MMDVM Hotspot.
 bool set_ConfigHS()
 {
-    unsigned char buffer[30U];
+    uint8_t buffer[30U];
 
     buffer[0U] = MODEM_FRAME_START;
     buffer[1U] = 26U;
@@ -518,8 +526,7 @@ bool set_ConfigHS()
 
 	buffer[25U] = (unsigned char)modem_m17TXHang;
 
-    for (int x=0;x<26;x++)
-        modemCommandBuffer.put(buffer[x]);
+    modemCommandBuffer.addData(buffer, 26);
 
     return true;
 }

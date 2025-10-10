@@ -46,7 +46,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#include "../../tools/RingBuffer.h"
+#include "../../tools/CRingBuffer.h"
 #include "../../tools/tools.h"
 
 #include <M17/M17Callsign.hpp>
@@ -107,8 +107,8 @@ M17::M17LinkSetupFrame pkt_lsf;      ///< M17 packet link setup frame
 M17::M17FrameDecoder   decoder;      ///< M17 frame decoder
 M17::M17FrameEncoder   encoder;      ///< M17 frame encoder
 
-CRingBuffer<uint8_t> reflTxBuffer(3600);
-CRingBuffer<uint8_t> txBuffer(3300);
+RingBuffer<uint8_t> reflTxBuffer(3600);
+RingBuffer<uint8_t> txBuffer(3300);
 
 const int   magicLen             = 4;
 const char *magicACKN           = "ACKN";
@@ -272,26 +272,23 @@ void* txThread(void *arg)
 
         if (loop > 100)
         {
-            if (txBuffer.getData() >= 5)
+            if (txBuffer.dataSize() >= 5)
             {
-                if (txBuffer.peek() != 0x61)
+                uint8_t buf[1];
+                txBuffer.peek(buf, 1);
+                if (buf[0] != 0x61)
                 {
-                 //   txBuffer.reset();
-                    fprintf(stderr, "TX EOT invalid header.\n");
+                    fprintf(stderr, "TX invalid header.\n");
                     continue;
                 }
-                uint8_t  byte[2];
+                uint8_t  byte[3];
                 uint16_t len = 0;
-                txBuffer.npeek(byte[0], 1);
-                txBuffer.npeek(byte[1], 2);
-                len = (byte[0] << 8) + byte[1];;
-                if (txBuffer.getData() >= len)
+                txBuffer.peek(byte, 3);
+                len = (byte[1] << 8) + byte[2];;
+                if (txBuffer.dataSize() >= len)
                 {
                     uint8_t buf[len];
-                    for (int i=0;i<len;i++)
-                    {
-                        txBuffer.get(buf[i]);
-                    }
+                    txBuffer.getData(buf, len);
                     if (write(sockfd, buf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
@@ -323,7 +320,7 @@ void *connectM17Refl(void *argv)
     char hostname[80];
     char source[9];
     char module[2];
-    char buf[1024];
+    uint8_t buf[1024];
     timer_t t_id = NULL;
 
     sscanf((char*)argv, "%d %s %s %s %d", &hostfd, source, hostname, module, &portno);
@@ -361,7 +358,7 @@ void *connectM17Refl(void *argv)
     serverlen = sizeof(serveraddr);
     call_t srcCall;
     encode_refl_callsign(rptrCallsign, srcCall);
-    strcpy(buf, magicCONN);
+    strcpy((char*)buf, magicCONN);
     memcpy(buf+4, srcCall.data(), 6);
     buf[10] = module[0];
     if (debugM)
@@ -376,10 +373,11 @@ void *connectM17Refl(void *argv)
 
     sleep(1);
     m17ReflConnected = false;
-    txBuffer.put(0x61);
-    txBuffer.put(0x00);
-    txBuffer.put(0x10);
-    txBuffer.put(0x04);
+    buf[0] = 0x61;
+    buf[1] = 0x00;
+    buf[2] = 0x10;
+    buf[3] = 0x04;
+    txBuffer.addData(buf, 4);
 
     bzero(buf, 1024);
     n = recvfrom(sockfd, buf, 1023, 0, (struct sockaddr*)&serveraddr, (socklen_t*)&serverlen);
@@ -394,30 +392,35 @@ void *connectM17Refl(void *argv)
         if (memcmp(magic, magicACKN, 4) == 0)
         {
             m17ReflConnected = true;
-            txBuffer.put(TYPE_CONNECT[0]);
-            txBuffer.put(TYPE_CONNECT[1]);
-            txBuffer.put(TYPE_CONNECT[2]);
-            txBuffer.put(TYPE_CONNECT[3]);
+            uint8_t tmp[4];
+            tmp[0] = TYPE_CONNECT[0];
+            tmp[1] = TYPE_CONNECT[1];
+            tmp[2] = TYPE_CONNECT[2];
+            tmp[3] = TYPE_CONNECT[3];
+            txBuffer.addData(tmp, 4);
         }
         else
         {
-            txBuffer.put(TYPE_NACK[0]);
-            txBuffer.put(TYPE_NACK[1]);
-            txBuffer.put(TYPE_NACK[2]);
-            txBuffer.put(TYPE_NACK[3]);
+            uint8_t tmp[4];
+            tmp[0] = TYPE_NACK[0];
+            tmp[1] = TYPE_NACK[1];
+            tmp[2] = TYPE_NACK[2];
+            tmp[3] = TYPE_NACK[3];
+            txBuffer.addData(tmp, 4);
         }
     }
     else
     {
-        txBuffer.put(TYPE_NACK[0]);
-        txBuffer.put(TYPE_NACK[1]);
-        txBuffer.put(TYPE_NACK[2]);
-        txBuffer.put(TYPE_NACK[3]);
+        uint8_t tmp[4];
+        tmp[0] = TYPE_NACK[0];
+        tmp[1] = TYPE_NACK[1];
+        tmp[2] = TYPE_NACK[2];
+        tmp[3] = TYPE_NACK[3];
+        txBuffer.addData(tmp, 4);
     }
 
-    for (uint8_t x=0;x<7;x++)
-        txBuffer.put(M17Name[x]);
-    txBuffer.put(M17Module[0]);
+    txBuffer.addData((uint8_t*)M17Name, 7);
+    txBuffer.addData((uint8_t*)M17Module, 1);
 
     M17::M17LinkSetupFrame lsf;
     M17::M17FrameEncoder   encoder;      ///< M17 frame encoder
@@ -452,7 +455,7 @@ void *connectM17Refl(void *argv)
                 timeout = 0;
                 encode_callsign(rptrCallsign, srcCall);
                 bzero(buf, 1024);
-                strcpy(buf, magicPONG);
+                strcpy((char*)buf, magicPONG);
                 memcpy(buf+4, srcCall.data(), 6);
                 n = sendto(sockfd, buf, 10, 0, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
                 if (n < 0)
@@ -463,9 +466,11 @@ void *connectM17Refl(void *argv)
 
             if (memcmp(magic, magicM17Voice, 4) == 0 && !txOn)
             {
-                if (txBuffer.getSpace() < 52)
+                if (txBuffer.freeSpace() < 52)
                 {
-                    fprintf(stderr, "**********************Buffer full [%02X]\n", txBuffer.peek());
+                    uint8_t tmp[1];
+                    txBuffer.peek(tmp, 1);
+                    fprintf(stderr, "**********************Buffer full [%02X]\n", tmp[0]);
                     continue;
                 }
                 if (debugM)
@@ -495,65 +500,55 @@ void *connectM17Refl(void *argv)
                     encoder.reset();
                     start_time = time(NULL);
                     encoder.encodeLsf(lsf, m17Frame);
-                    txBuffer.put(0x61);
+                    uint8_t tmp[4];
+                    tmp[0] = 0x61;
                     len = 48 + 4 + 4;
-                    txBuffer.put(0x00);
-                    txBuffer.put(len);
-                    txBuffer.put(0x04);
-                    txBuffer.put('M');
-                    txBuffer.put('1');
-                    txBuffer.put('7');
-                    txBuffer.put('L');
-                    for (int i=0;i<48;i++)
-                        txBuffer.put(m17Frame.data()[i]);
+                    tmp[1] = 0x00;
+                    tmp[2] = len;
+                    tmp[3] = 0x04;
+                    txBuffer.addData(tmp, 4);
+                    txBuffer.addData((uint8_t*)TYPE_LSF, 4);
+                    txBuffer.addData(m17Frame.data(), 48);
                     strcpy(tx_state, "on");
                 }
                 payload_t dataFrame;
                 memcpy(dataFrame.data(), sf.payload, 16);
                 encoder.encodeStreamFrame(dataFrame, m17Frame, ((sf.framenumber & 0x0080) == 0x0080));
 
-                txBuffer.put(0x61);
+                uint8_t tmp[4];
+                tmp[0] = 0x61;
                 len = 48 + 4 + 4;
-                txBuffer.put(0x00);
-                txBuffer.put(len);
-                txBuffer.put(0x04);
-                txBuffer.put('M');
-                txBuffer.put('1');
-                txBuffer.put('7');
-                txBuffer.put('S');
-                for (int i=0;i<48;i++)
-                    txBuffer.put(m17Frame.data()[i]);
+                tmp[1] = 0x00;
+                tmp[2] = len;
+                tmp[3] = 0x04;
+                txBuffer.addData(tmp, 4);
+                txBuffer.addData((uint8_t*)TYPE_STREAM, 4);
+                txBuffer.addData(m17Frame.data(), 48);
                 if (debugM)
                     printf("FN: %04X\n", sf.framenumber);
                 if ((sf.framenumber & 0x0080) == 0x0080)
                 {
-                    txBuffer.put(0x61);
+                    tmp[0] = 0x61;
                     len = 48 + 4 + 4;
-                    txBuffer.put(0x00);
-                    txBuffer.put(len);
-                    txBuffer.put(0x04);
-                    txBuffer.put('M');
-                    txBuffer.put('1');
-                    txBuffer.put('7');
-                    txBuffer.put('S');
-                    for (int i=0;i<48;i++)
-                        txBuffer.put(m17Frame.data()[i]);
+                    tmp[1] = 0x00;
+                    tmp[2] = len;
+                    tmp[3] = 0x04;
+                    txBuffer.addData(tmp, 4);
+                    txBuffer.addData((uint8_t*)TYPE_STREAM, 4);
+                    txBuffer.addData(m17Frame.data(), 48);
                     duration = difftime(time(NULL), start_time);
                     strcpy(tx_state, "off");
-                    lsf.clear();
 
+                    lsf.clear();
                     encoder.encodeEotFrame(m17Frame);
-                    txBuffer.put(0x61);
+                    tmp[0] = 0x61;
                     len = 48 + 4 + 4;
-                    txBuffer.put(0x00);
-                    txBuffer.put(len);
-                    txBuffer.put(0x04);
-                    txBuffer.put('M');
-                    txBuffer.put('1');
-                    txBuffer.put('7');
-                    txBuffer.put('E');
-                    for (int i=0;i<48;i++)
-                        txBuffer.put(m17Frame.data()[i]);
+                    tmp[1] = 0x00;
+                    tmp[2] = len;
+                    tmp[3] = 0x04;
+                    txBuffer.addData(tmp, 4);
+                    txBuffer.addData((uint8_t*)TYPE_EOT, 4);
+                    txBuffer.addData(m17Frame.data(), 48);
                 }
                 timeout = 0;
             }
@@ -584,17 +579,15 @@ void *connectM17Refl(void *argv)
                 encoder.reset();
                 frame_t m17Frame;
                 encoder.encodeLsf(lsf, m17Frame);
-                txBuffer.put(0x61);
+                uint8_t tmp[4];
+                tmp[0] = 0x61;
                 len = 48 + 4 + 4;
-                txBuffer.put(0x00);
-                txBuffer.put(len);
-                txBuffer.put(0x04);
-                txBuffer.put('M');
-                txBuffer.put('1');
-                txBuffer.put('7');
-                txBuffer.put('L');
-                for (int i=0;i<48;i++)
-                    txBuffer.put(m17Frame.data()[i]);
+                tmp[1] = 0x00;
+                tmp[2] = len;
+                tmp[3] = 0x04;
+                txBuffer.addData(tmp, 4);
+                txBuffer.addData((uint8_t*)TYPE_LSF, 4);
+                txBuffer.addData(m17Frame.data(), 48);
                 timeout = 0;
 
                 memset(packetData, 0, 823);
@@ -619,17 +612,14 @@ void *connectM17Refl(void *argv)
                     memcpy(packetFrame.data(), &packetData[cnt*25], 25);
                     packetFrame[25] = cnt << 2;
                     encoder.encodePacketFrame(packetFrame, m17Frame);
-                    txBuffer.put(0x61);
+                    tmp[0] = 0x61;
                     len = 48 + 4 + 4;
-                    txBuffer.put(0x00);
-                    txBuffer.put(len);
-                    txBuffer.put(0x04);
-                    txBuffer.put('M');
-                    txBuffer.put('1');
-                    txBuffer.put('7');
-                    txBuffer.put('P');
-                    for (int i=0;i<48;i++)
-                        txBuffer.put(m17Frame.data()[i]);
+                    tmp[1] = 0x00;
+                    tmp[2] = len;
+                    tmp[3] = 0x04;
+                    txBuffer.addData(tmp, 4);
+                    txBuffer.addData((uint8_t*)TYPE_PACKET, 4);
+                    txBuffer.addData(m17Frame.data(), 48);
                     cnt++;
                     numPacketbytes -= 25;
                 }
@@ -639,31 +629,25 @@ void *connectM17Refl(void *argv)
                 packetFrame[25] = 0x80 | (numPacketbytes << 2);
                 encoder.encodePacketFrame(packetFrame, m17Frame);
 
-                txBuffer.put(0x61);
+                tmp[0] = 0x61;
                 len = 48 + 4 + 4;
-                txBuffer.put(0x00);
-                txBuffer.put(len);
-                txBuffer.put(0x04);
-                txBuffer.put('M');
-                txBuffer.put('1');
-                txBuffer.put('7');
-                txBuffer.put('P');
-                for (int i=0;i<48;i++)
-                    txBuffer.put(m17Frame.data()[i]);
+                tmp[1] = 0x00;
+                tmp[2] = len;
+                tmp[3] = 0x04;
+                txBuffer.addData(tmp, 4);
+                txBuffer.addData((uint8_t*)TYPE_PACKET, 4);
+                txBuffer.addData(m17Frame.data(), 48);
 
                 encoder.encodeEotFrame(m17Frame);
 
-                txBuffer.put(0x61);
+                tmp[0] = 0x61;
                 len = 48 + 4 + 4;
-                txBuffer.put(0x00);
-                txBuffer.put(len);
-                txBuffer.put(0x04);
-                txBuffer.put('M');
-                txBuffer.put('1');
-                txBuffer.put('7');
-                txBuffer.put('E');
-                for (int i=0;i<48;i++)
-                    txBuffer.put(m17Frame.data()[i]);
+                tmp[1] = 0x00;
+                tmp[2] = len;
+                tmp[3] = 0x04;
+                txBuffer.addData(tmp, 4);
+                txBuffer.addData((uint8_t*)TYPE_EOT, 4);
+                txBuffer.addData(m17Frame.data(), 48);
 
                 strcpy(tx_state, "off");
             }
@@ -671,7 +655,7 @@ void *connectM17Refl(void *argv)
 
         if (m17ReflDisconnect)
         {
-            strcpy(buf, magicDISC);
+            strcpy((char*)buf, magicDISC);
             memcpy(buf+4, srcCall.data(), 6);
             n = sendto(sockfd, buf, 10, 0, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
             if (n < 0)
@@ -679,18 +663,16 @@ void *connectM17Refl(void *argv)
             m17ReflConnected = false;
         }
 
-        if (reflTxBuffer.getData() >= 18)
+        if (reflTxBuffer.dataSize() >= 18)
         {
             SM17Frame sf;
             strcpy((char*)sf.magic, magicM17Voice);
             sf.streamid = (streamId >> 8) | ((streamId & 0xff) << 8);
             memcpy((uint8_t*)&sf.lich, rx_lsf.getData(), 28);
             uint8_t tmp[2];
-            reflTxBuffer.get(tmp[0]);
-            reflTxBuffer.get(tmp[1]);
+            reflTxBuffer.getData(tmp, 2);
             sf.framenumber = (tmp[1] << 8) | tmp[0];
-            for (int i=0;i<16;i++)
-                reflTxBuffer.get(sf.payload[i]);
+            reflTxBuffer.getData(sf.payload, 16);
             if (debugM)
                 fprintf(stderr, "FN: %d\n", (tmp[0] << 8) | tmp[1]);
             sf.crc = rx_lsf.m17Crc((uint8_t*)&sf, sizeof(sf) - 2);
@@ -703,7 +685,7 @@ void *connectM17Refl(void *argv)
 
         if (reflPacketRdy)
         {
-            strcpy(buf, magicM17Packet);
+            strcpy((char*)buf, magicM17Packet);
             memcpy(buf+4, rx_lsf.getData(), 30);
             memset(buf+34, 0x05, 1);
             memcpy(buf+35, (uint8_t*)packetData, strlen((char*)packetData)+1);
@@ -717,23 +699,38 @@ void *connectM17Refl(void *argv)
             reflPacketRdy = false;
         }
 
-        delay(10000);
+        delay(1000);
 
-        if (timeout > 1500)
+        if (strcmp(tx_state, "on") == 0 && timeout >= 300000) // 5 minutes
+        {
+            strcpy(tx_state, "off");
+            lsf.clear();
+            frame_t m17Frame;
+            encoder.encodeEotFrame(m17Frame);
+            uint8_t len = 48 + 4 + 4;
+            uint8_t tmp[len];
+            tmp[0] = 0x61;
+            tmp[1] = 0x00;
+            tmp[2] = len;
+            tmp[3] = 0x04;
+            txBuffer.addData(tmp, 4);
+            txBuffer.addData((uint8_t*)TYPE_EOT, 4);
+            txBuffer.addData(m17Frame.data(), 48);
+        }
+
+        if (timeout > 5000) // 5 seconds
             break;
         else
             timeout++;
     }
-    txBuffer.put(0x61);
-    txBuffer.put(0x00);
-    txBuffer.put(0x0F);
-    txBuffer.put(0x04);
-    txBuffer.put(TYPE_DISCONNECT[0]);
-    txBuffer.put(TYPE_DISCONNECT[1]);
-    txBuffer.put(TYPE_DISCONNECT[2]);
-    txBuffer.put(TYPE_DISCONNECT[3]);
-    for (uint8_t x=0;x<7;x++)
-        txBuffer.put(M17Name[x]);
+    uint8_t tmp[4];
+    tmp[0] = 0x61;
+    tmp[1] = 0x00;
+    tmp[2] = 0x0F;
+    tmp[3] = 0x04;
+    txBuffer.addData(tmp, 4);
+    txBuffer.addData((uint8_t*)TYPE_DISCONNECT, 4);
+    txBuffer.addData((uint8_t*)M17Name, 7);
     close(sockfd);
     sleep(1);
     fprintf(stderr, "Disconnected from M17 reflector.\n");
@@ -947,8 +944,7 @@ void* startClient(void *arg)
                 M17StreamFrame sf = decoder.getStreamFrame();
                 if (m17ReflConnected)
                 {
-                    for (int x=0;x<18;x++)
-                        reflTxBuffer.put(sf.getData()[x]);
+                    reflTxBuffer.addData(sf.getData(), 18);
                 }
             }
         }

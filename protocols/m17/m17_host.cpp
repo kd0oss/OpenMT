@@ -66,7 +66,7 @@
 #include <M17/Synchronizer.hpp>
 
 #include "../../tools/tools.h"
-#include "../../tools/RingBuffer.h"
+#include "../../tools/CRingBuffer.h"
 
 using namespace std;
 using namespace M17;
@@ -161,10 +161,10 @@ int                optval;       //< flag value for setsockopt
 struct sockaddr_in serveraddr;   //< server's addr
 struct sockaddr_in clientaddr;   //< client addr
 
-CRingBuffer<uint8_t> txBuffer(3600);
-CRingBuffer<uint8_t> rxBuffer(3600);
-CRingBuffer<uint8_t> gwTxBuffer(3600);
-CRingBuffer<uint8_t> gwCommand(200);
+RingBuffer<uint8_t> txBuffer(3600);
+RingBuffer<uint8_t> rxBuffer(3600);
+RingBuffer<uint8_t> gwTxBuffer(3600);
+RingBuffer<uint8_t> gwCommand(200);
 
 pthread_t modemHostid;
 pthread_t gwHostid;
@@ -293,7 +293,7 @@ void* timerThread(void *arg)
 void* startClient(void *arg)
 {
     struct sockaddr_in serv_addr;
-    char buffer[BUFFER_SIZE] = {0};
+    uint8_t buffer[BUFFER_SIZE] = {0};
     char hostAddress[80];
     strcpy(hostAddress, (char*)arg);
     // Create socket file descriptor
@@ -458,10 +458,9 @@ void* startClient(void *arg)
             }
             if (lsfOk)
             {
-                if (m17ReflConnected && gwTxBuffer.getSpace() >= respLen)
+                if (m17ReflConnected && gwTxBuffer.freeSpace() >= respLen)
                 {
-                    for (uint8_t x=0;x<respLen;x++)
-                        gwTxBuffer.put(buffer[x]);
+                    gwTxBuffer.addData(buffer, respLen);
                 }
                 if (!txOn)
                 {
@@ -470,6 +469,7 @@ void* startClient(void *arg)
                         fprintf(stderr, "ERROR: host disconnect\n");
                         break;
                     }
+                    saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, "", true);
                 }
                 txOn = true;
                 validFrame = true;
@@ -554,6 +554,7 @@ void* startClient(void *arg)
                             fprintf(stderr, "ERROR: host disconnect\n");
                             break;
                         }
+                        saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, "", true);
                     }
                     M17StreamFrame sf = decoder.getStreamFrame();
                     uint16_t diff = (sf.getFrameNumber() & 0x7fff) - (lastFrameNum & 0x7fff);
@@ -630,9 +631,13 @@ void* startClient(void *arg)
                         sprintf(gps, "%f %f %d %d %d", latitude, longitude, altitude, bearing, speed);
                         gpsFound = false;
                     }
-                    if (voiceFrameCnt == 0)
-                        saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, "", true);
                     voiceFrameCnt++;
+
+                    if (statusTimeout)
+                    {
+                        saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, "", true);
+                        statusTimeout = false;
+                    }
 
                     if (modem_duplex)
                     {
@@ -710,10 +715,9 @@ void* startClient(void *arg)
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0 && validFrame)
         {
-            if (m17ReflConnected && gwTxBuffer.getSpace() >= respLen)
+            if (m17ReflConnected && gwTxBuffer.freeSpace() >= respLen)
             {
-                for (uint8_t x=0;x<respLen;x++)
-                    gwTxBuffer.put(buffer[x]);
+                gwTxBuffer.addData(buffer, respLen);
             }
 
             frameCnt = 0;
@@ -724,9 +728,9 @@ void* startClient(void *arg)
                 fprintf(stderr, "Found M17 EOT\n");
             float loss_BER = (float)decoder.bitErr / 3.68F;
             duration = difftime(time(NULL), start_time);
+            saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, gps, false);
             if (voiceFrameCnt > 0)
             {
-                saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, gps, false);
                 saveHistory("M17", "RF", srcCallsign , dstCallsign, loss_BER, metaText, duration);
             }
             else if (totalSMSMessages > 0)
@@ -770,25 +774,23 @@ void* txThread(void *arg)
 
         if (loop > 100)
         {
-            if (gwTxBuffer.getData() >= 5)
+            if (gwTxBuffer.dataSize() >= 5)
             {
-                if (gwTxBuffer.peek() != 0x61)
+                uint8_t buf[1];
+                gwTxBuffer.peek(buf, 1);
+                if (buf[0] != 0x61)
                 {
                     fprintf(stderr, "TX invalid header.\n");
                     continue;
                 }
-                uint8_t  byte[2];
+                uint8_t  byte[3];
                 uint16_t len = 0;
-                gwTxBuffer.npeek(byte[0], 1);
-                gwTxBuffer.npeek(byte[1], 2);
-                len = (byte[0] << 8) + byte[1];;
-                if (gwTxBuffer.getData() >= len)
+                gwTxBuffer.peek(byte, 3);
+                len = (byte[1] << 8) + byte[2];;
+                if (gwTxBuffer.dataSize() >= len)
                 {
                     uint8_t buf[len];
-                    for (int i=0;i<len;i++)
-                    {
-                        gwTxBuffer.get(buf[i]);
-                    }
+                    gwTxBuffer.getData(buf, len);
                     if (write(sockfd, buf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
@@ -800,26 +802,24 @@ void* txThread(void *arg)
             loop = 0;
         }
 
-        if (gwCommand.getData() >= 5)
+        if (gwCommand.dataSize() >= 5)
         {
-            if (gwCommand.peek() != 0x61)
+            uint8_t buf[1];
+            gwCommand.peek(buf, 1);
+            if (buf[0] != 0x61)
             {
                 fprintf(stderr, "TX invalid header.\n");
             }
             else
             {
-                uint8_t  byte[2];
+                uint8_t  byte[3];
                 uint16_t len = 0;
-                gwCommand.npeek(byte[0], 1);
-                gwCommand.npeek(byte[1], 2);
-                len = (byte[0] << 8) + byte[1];;
-                if (gwCommand.getData() >= len)
+                gwCommand.peek(byte, 3);
+                len = (byte[1] << 8) + byte[2];;
+                if (gwCommand.dataSize() >= len)
                 {
                     uint8_t buf[len];
-                    for (int i=0;i<len;i++)
-                    {
-                        gwCommand.get(buf[i]);
-                    }
+                    gwCommand.getData(buf, len);
                     if (write(sockfd, buf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
@@ -961,10 +961,12 @@ void *processGatewaySocket(void *arg)
             rx_lsf.clear();
             smsStarted = false;
             duration = 0;
-            if (!txOn)
-                write(sockfd, setMode, 5);
-            txOn = true;
             bzero(metaText, 53);
+            if (!txOn)
+            {
+                write(sockfd, setMode, 5);
+            }
+            txOn = true;
             strcpy(srcCallsign, "N0CALL");
             strcpy(dstCallsign, "N0CALL");
             frame_t frame;
@@ -976,6 +978,7 @@ void *processGatewaySocket(void *arg)
             rx_lsf      = decoder.getLsf();
             strcpy(srcCallsign, rx_lsf.getSource().c_str());
             strcpy(dstCallsign, rx_lsf.getDestination().c_str());
+            saveLastCall("M17", "NET", srcCallsign, dstCallsign, metaText, NULL, "", true);
             streamType_t streamType = rx_lsf.getType();
             if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
                 (streamType.fields.encSubType == M17_META_TEXT))
@@ -1005,12 +1008,15 @@ void *processGatewaySocket(void *arg)
                 sprintf(gps, "%f %f %d %d %d", latitude, longitude, altitude, bearing, speed);
             }
             write(sockfd, buffer, respLen);
-            saveLastCall("M17", "NET", srcCallsign, dstCallsign, metaText, NULL, "", true);
         }
         else if (memcmp(type, TYPE_STREAM, typeLen) == 0)
         {
-            txOn = true;
             write(sockfd, buffer, respLen);
+            if (statusTimeout)
+            {
+                saveLastCall("M17", "NET", srcCallsign, dstCallsign, metaText, NULL, "", true);
+                statusTimeout = false;
+            }
         }
         else if (memcmp(type, TYPE_PACKET, typeLen) == 0)
         {
@@ -1085,6 +1091,7 @@ void *processGatewaySocket(void *arg)
             if (totalSMSMessages == 0)
             {
                 saveLastCall("M17", "NET", srcCallsign, dstCallsign, metaText, NULL, gps, false);
+fprintf(stderr, "M17 EOT ********************************\n");
                 saveHistory("M17", "NET", srcCallsign , dstCallsign, 0, metaText, duration);
             }
             txOn = false;
@@ -1327,14 +1334,16 @@ int main(int argc, char **argv)
                 }
                 if (parameter == "unlink")
                 {
-                    gwCommand.put(0x61);
-                    gwCommand.put(0x00);
-                    gwCommand.put(0x08);
-                    gwCommand.put(0x04);
-                    gwCommand.put(TYPE_DISCONNECT[0]);
-                    gwCommand.put(TYPE_DISCONNECT[1]);
-                    gwCommand.put(TYPE_DISCONNECT[2]);
-                    gwCommand.put(TYPE_DISCONNECT[3]);
+                    uint8_t buf[8];
+                    buf[0] = 0x61;
+                    buf[1] = 0x00;
+                    buf[2] = 0x08;
+                    buf[3] = 0x04;
+                    buf[4] = TYPE_DISCONNECT[0];
+                    buf[5] = TYPE_DISCONNECT[1];
+                    buf[6] = TYPE_DISCONNECT[2];
+                    buf[7] = TYPE_DISCONNECT[3];
+                    gwCommand.addData(buf, 8);
                     sleep(3);
                     statusTimeout = false;
                     continue;
@@ -1356,20 +1365,20 @@ int main(int argc, char **argv)
                             token = strtok(NULL, ",");
                             char module[2];
                             strcpy(module, token);
-                            gwCommand.put(0x61);
-                            gwCommand.put(0x00);
-                            gwCommand.put(0x16);
-                            gwCommand.put(0x04);
-                            gwCommand.put(TYPE_CONNECT[0]);
-                            gwCommand.put(TYPE_CONNECT[1]);
-                            gwCommand.put(TYPE_CONNECT[2]);
-                            gwCommand.put(TYPE_CONNECT[3]);
+                            uint8_t buf[8];
+                            buf[0] = 0x61;
+                            buf[1] = 0x00;
+                            buf[2] = 0x16;
+                            buf[3] = 0x04;
+                            buf[4] = TYPE_CONNECT[0];
+                            buf[5] = TYPE_CONNECT[1];
+                            buf[6] = TYPE_CONNECT[2];
+                            buf[7] = TYPE_CONNECT[3];
+                            gwCommand.addData(buf, 8);
                             std::string callsign = readHostConfig("main", "callsign");
-                            for (uint8_t x=0;x<6;x++)
-                                gwCommand.put(callsign.c_str()[x]);
-                            for (uint8_t x=0;x<7;x++)
-                                gwCommand.put(name[x]);
-                            gwCommand.put(module[0]);
+                            gwCommand.addData((uint8_t*)callsign.c_str(), 6);
+                            gwCommand.addData((uint8_t*)name, 7);
+                            gwCommand.addData((uint8_t*)module, 1);
                             sleep(3);
                         }
                         else

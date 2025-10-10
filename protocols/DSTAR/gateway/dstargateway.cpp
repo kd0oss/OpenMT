@@ -14,7 +14,7 @@
  *   You should have received a copy of the GNU General Public License     *
  *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
  *                                                                         *
- *   Some functions based on or inspired by Jonathan Naylor G4KLX          *
+ *   Some functions based on or inspired by MMDVM Jonathan Naylor G4KLX    *
  ***************************************************************************/
 
 #include <stdio.h>
@@ -46,7 +46,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#include "../../../tools/RingBuffer.h"
+#include "../../../tools/CRingBuffer.h"
 #include "../../../tools/tools.h"
 #include "../../../tools/CCITTChecksumReverse.h"
 
@@ -88,8 +88,8 @@ struct sockaddr_in servaddrin, servaddrout, cliaddr;
 std::string currentDSTARRefl("");
 std::string rptrCallsign("N0CALL");
 
-CRingBuffer<uint8_t> reflTxBuffer(3600);
-CRingBuffer<uint8_t> txBuffer(3300);
+RingBuffer<uint8_t> reflTxBuffer(3600);
+RingBuffer<uint8_t> txBuffer(3300);
 
 const char *TYPE_HEADER         = "DSTH";
 const char *TYPE_DATA           = "DSTD";
@@ -293,25 +293,23 @@ void* txThread(void *arg)
 
         if (loop > 100)
         {
-            if (txBuffer.getData() >= 5)
+            if (txBuffer.dataSize() >= 5)
             {
-                if (txBuffer.peek() != 0x61)
+                uint8_t buf[1];
+                txBuffer.peek(buf, 1);
+                if (buf[0] != 0x61)
                 {
                     fprintf(stderr, "TX EOT invalid header.\n");
                     continue;
                 }
-                uint8_t  byte[2];
+                uint8_t  byte[3];
                 uint16_t len = 0;
-                txBuffer.npeek(byte[0], 1);
-                txBuffer.npeek(byte[1], 2);
-                len = (byte[0] << 8) + byte[1];;
-                if (txBuffer.getData() >= len)
+                txBuffer.peek(byte, 3);
+                len = (byte[1] << 8) + byte[2];;
+                if (txBuffer.dataSize() >= len)
                 {
                     uint8_t buf[len];
-                    for (int i=0;i<len;i++)
-                    {
-                        txBuffer.get(buf[i]);
-                    }
+                    txBuffer.getData(buf, len);
                     if (write(sockfd, buf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
@@ -845,16 +843,15 @@ void *connectIRCDDBGateway(void *argv)
     ucBytes[10] = 0x2d;
     ucBytes[11] = 0x16;
     sendToGw(cBuffer, ucBytes, true, true);
-    txBuffer.put(0x61);
-    txBuffer.put(0x00);
-    txBuffer.put(0x0F);
-    txBuffer.put(0x04);
-    txBuffer.put(TYPE_DISCONNECT[0]);
-    txBuffer.put(TYPE_DISCONNECT[1]);
-    txBuffer.put(TYPE_DISCONNECT[2]);
-    txBuffer.put(TYPE_DISCONNECT[3]);
-    for (uint8_t x=0;x<7;x++)
-        txBuffer.put(DSTARName[x]);
+
+    uint8_t tmp[4];
+    tmp[0] = 0x61;
+    tmp[1] = 0x00;
+    tmp[2] = 0x0F;
+    tmp[3] = 0x04;
+    txBuffer.addData(tmp, 4);
+    txBuffer.addData((uint8_t*)TYPE_DISCONNECT, 4);
+    txBuffer.addData((uint8_t*)DSTARName, 7);
 
     while (connected)
     {
@@ -939,16 +936,13 @@ void *connectIRCDDBGateway(void *argv)
 
         delay(1000);
     }
-    txBuffer.put(0x61);
-    txBuffer.put(0x00);
-    txBuffer.put(0x0F);
-    txBuffer.put(0x04);
-    txBuffer.put(TYPE_DISCONNECT[0]);
-    txBuffer.put(TYPE_DISCONNECT[1]);
-    txBuffer.put(TYPE_DISCONNECT[2]);
-    txBuffer.put(TYPE_DISCONNECT[3]);
-    for (uint8_t x=0;x<7;x++)
-        txBuffer.put(DSTARName[x]);
+    tmp[0] = 0x61;
+    tmp[1] = 0x00;
+    tmp[2] = 0x0F;
+    tmp[3] = 0x04;
+    txBuffer.addData(tmp, 4);
+    txBuffer.addData((uint8_t*)TYPE_DISCONNECT, 4);
+    txBuffer.addData((uint8_t*)DSTARName, 7);
     close(sockoutfd);
     close(sockinfd);
     sleep(1);
@@ -1114,14 +1108,13 @@ void* startClient(void *arg)
                 strcpy(rpt1Call, readHostConfig("DSTAR", "rpt1Call").c_str());
                 strcpy(rpt2Call, readHostConfig("DSTAR", "rpt2Call").c_str());
                 strcpy(myCall, readHostConfig("main", "callsign").c_str());
-                txBuffer.put(0x61);
-                txBuffer.put(0x00);
-                txBuffer.put(0x08);
-                txBuffer.put(0x04);
-                txBuffer.put(TYPE_COMMAND[0]);
-                txBuffer.put(TYPE_COMMAND[1]);
-                txBuffer.put(TYPE_COMMAND[2]);
-                txBuffer.put(TYPE_COMMAND[3]);
+                uint8_t buf[4];
+                buf[0] = 0x61;
+                buf[1] = 0x00;
+                buf[2] = 0x08;
+                buf[3] = 0x04;
+                txBuffer.addData(buf, 4);
+                txBuffer.addData((uint8_t*)TYPE_COMMAND, 4);
             }
         }
         else if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
@@ -1148,17 +1141,15 @@ void* startClient(void *arg)
                 ucBytes[11] = 0x16;
                 sendToGw(cBuffer, ucBytes, true, true);
 
-                txBuffer.put(0x61);
-                txBuffer.put(0x00);
-                txBuffer.put(0x10);
-                txBuffer.put(0x04);
-                txBuffer.put(TYPE_CONNECT[0]);
-                txBuffer.put(TYPE_CONNECT[1]);
-                txBuffer.put(TYPE_CONNECT[2]);
-                txBuffer.put(TYPE_CONNECT[3]);
-                for (uint8_t x=0;x<7;x++)
-                    txBuffer.put(DSTARName[x]);
-                txBuffer.put(DSTARModule[0]);
+                uint8_t buf[4];
+                buf[0] = 0x61;
+                buf[1] = 0x00;
+                buf[2] = 0x10;
+                buf[3] = 0x04;
+                txBuffer.addData(buf, 4);
+                txBuffer.addData((uint8_t*)TYPE_CONNECT, 4);
+                txBuffer.addData((uint8_t*)DSTARName, 7);
+                txBuffer.addData((uint8_t*)DSTARModule, 1);
                 DSTARReflConnected = true;
             }
         }
@@ -1175,16 +1166,14 @@ void* startClient(void *arg)
                 ucBytes[11] = 0x16;
                 sendToGw(cBuffer, ucBytes, true, true);
 
-                txBuffer.put(0x61);
-                txBuffer.put(0x00);
-                txBuffer.put(0x0F);
-                txBuffer.put(0x04);
-                txBuffer.put(TYPE_DISCONNECT[0]);
-                txBuffer.put(TYPE_DISCONNECT[1]);
-                txBuffer.put(TYPE_DISCONNECT[2]);
-                txBuffer.put(TYPE_DISCONNECT[3]);
-                for (uint8_t x=0;x<7;x++)
-                    txBuffer.put(DSTARName[x]);
+                uint8_t buf[4];
+                buf[0] = 0x61;
+                buf[1] = 0x00;
+                buf[2] = 0x0F;
+                buf[3] = 0x04;
+                txBuffer.addData(buf, 4);
+                txBuffer.addData((uint8_t*)TYPE_DISCONNECT, 4);
+                txBuffer.addData((uint8_t*)DSTARName, 7);
             }
             DSTARReflDisconnect = true;
         }

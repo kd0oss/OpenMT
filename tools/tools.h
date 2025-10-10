@@ -51,9 +51,8 @@ bool clearReflLinkStatus(const char* type);
 bool addReflector(const char* type, const char* name, const char* ip4Addr, const char* ip6Addr, uint16_t port,
                   const char* dashboardURL, const char* refl_title, const char* country);
 bool logError(const char* module, const char* message);
-bool addStatus(const char* property, const char* value);
-bool updateStatus(const char* property, const char* value);
-bool delStatus(const char* property);
+bool setStatus(const char* module, const char* property, const char* value);
+bool delStatus(const char* module, const char* property);
 bool addGPS(const int id, const float latitude, const float longitude,
             const uint16_t altitude, const uint16_t bearing, const uint16_t speed);
 
