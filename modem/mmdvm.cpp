@@ -27,7 +27,6 @@
 #include <ctype.h>
 #include "../tools/tools.h"
 #include "mmdvm.h"
-#include "../tools/RingBuffer.h"
 #include "../tools/CRingBuffer.h"
 
 // ******* MMDVM specific default parameters  ****
