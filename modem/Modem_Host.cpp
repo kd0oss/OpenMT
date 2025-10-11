@@ -1282,7 +1282,10 @@ int processSerial(void)
     {
         if (debugM)
             dump((char*)"STATUS:", buffer, respLen);
-        setM17Space(buffer[12]);
+        if (modem == "mmdvmhs")
+            setM17Space(buffer[13]);
+        else
+            setM17Space(buffer[12]);
         setDSTARSpace(buffer[6]);
     }
     else if (type == TYPE_M17_LSF && respLen == 54)
