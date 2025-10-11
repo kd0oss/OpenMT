@@ -1395,6 +1395,7 @@ async function saveModem()
   if (!resp.ok)
   {
     document.body.style.cursor = 'default';
+    alert("Set new config failed!");
     return;
   }
   var tmp = await resp.text();
@@ -1411,14 +1412,14 @@ async function saveModem()
     if (!resp.ok)
     {
       document.body.style.cursor = 'default';
-      alert("Set new config failed!");
+      alert("New config failed to download to modem!");
       return;
     }
     var tmp = await resp.text();
     document.body.style.cursor = 'default';
     if (tmp != "success")
     {
-      alert("Set new config failed!");
+      alert("New config failed to download to modem!");
     }
     else
       alert("Saved successfully.");
