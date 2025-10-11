@@ -1282,7 +1282,7 @@ int main(int argc, char **argv)
         umask(0);
     }
 
-    clearDashbCommands();
+ //   clearDashbCommands();
     clearReflLinkStatus("M17");
 
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);

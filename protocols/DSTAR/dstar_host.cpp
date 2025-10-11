@@ -1421,7 +1421,7 @@ int main(int argc, char **argv)
     strcpy(rpt2Call, readHostConfig("DSTAR", "rpt2Call").c_str());
     strcpy(myCall, readHostConfig("main", "callsign").c_str());
 
-    clearDashbCommands();
+  //  clearDashbCommands();
     clearReflLinkStatus("DSTAR");
 
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);
