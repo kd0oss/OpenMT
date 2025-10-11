@@ -373,6 +373,8 @@ int openSerial(char *serial)
 void* timerThread(void *arg)
 {
     uint32_t loop[4] = {10000, 0, 0, 0};
+    uint8_t frameDelay = 17;
+
     while (running)
     {
         delay(1000); // 1ms
@@ -383,8 +385,18 @@ void* timerThread(void *arg)
             loop[0] = 0;
         }
 
-        if (loop[1] >= 17)
+        if (loop[1] >= frameDelay)
         {
+            if (currentMode == "DSTAR")
+            {
+                uint8_t space = getModemSpace(currentMode.c_str());
+                if (space < 10)
+                    frameDelay = 18;
+                else if (space > 20)
+                    frameDelay = 16;
+                else
+                    frameDelay = 17;
+            }
             frameTimeout = true;
             loop[1] = 0;
         }
@@ -1482,6 +1494,8 @@ int main(int argc, char **argv)
     strcpy(modem_rxFrequency, readModemConfig("modem1", "rxFrequency").c_str());
     strcpy(modem_txFrequency, readModemConfig("modem1", "txFrequency").c_str());
 
+    clearDashbCommands();
+
     sprintf(modemtty, "/dev/%s", commPort.c_str());
     serialModemFd = openSerial(modemtty);
     if (serialModemFd < 0)
@@ -1552,6 +1566,11 @@ int main(int argc, char **argv)
     setHostConfig("main", "activeModes", "none", "none");
     delay(10000);
     setFrequency(modem_rxFrequency, modem_txFrequency, modem_txFrequency, 255);
+    uint8_t buf[3];
+    buf[0] = 0xE0;
+    buf[1] = 0x03;
+    buf[2] = 0x00;
+    write(serialModemFd, buf, 3);
 
     while (running)
     {
