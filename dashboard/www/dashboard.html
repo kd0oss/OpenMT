@@ -1185,7 +1185,7 @@ async function fetchStatus()
     {
       map.setView([Number(latitude), Number(longitude)], 10);
       marker.remove();
-      marker = new L.Marker([Number(station_latitude), Number(station_longitude)]);
+      marker = new L.Marker([Number(latitude), Number(longitude)]);
       marker.addTo(map);
     }
     last_rid = rid;
