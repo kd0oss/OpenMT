@@ -166,6 +166,7 @@ bool     debugM        = false;      //< If true print debug info.
 bool     txOn          = false;      //< If true we are processing frame data.
 bool     running       = true;       //< Set false to kill all processes and exit program.
 bool     exitRequested = false;      //< Set to true with ctrl + c keyboard input.
+bool     bufReady      = false;      //< Signal when rxModeBuffer has adequate number of bytes.
 
 unsigned int       clientlen;        //< byte size of client's address
 char              *hostaddrp;        //< dotted decimal host addr string
@@ -174,7 +175,7 @@ struct sockaddr_in serveraddr;       //< server's addr
 struct sockaddr_in clientaddr;       //< client addr
 
 RingBuffer<uint8_t>  modemCommandBuffer(300);  //< Modem command buffer
-RingBuffer<uint8_t>  txBuffer(2600);           //< Modem TX buffer
+RingBuffer<uint8_t>  txBuffer(600);            //< Modem TX buffer
 RingBuffer<uint8_t>  rxModeBuffer(3600);       //< Client RX buffer
 RingBuffer<uint8_t>  txModeBuffer(3600);       //< Client TX buffer
 
@@ -393,7 +394,7 @@ void* timerThread(void *arg)
                 if (space < 10)
                     frameDelay = 18;
                 else if (space > 20)
-                    frameDelay = 16;
+                    frameDelay = 15;
                 else
                     frameDelay = 17;
             }
@@ -531,7 +532,7 @@ void* modeTxThread(void *arg)
 {
     while (running)
     {
-        delay(100);
+        delay(20);
 
         if (statusTimeout)
         {
@@ -545,11 +546,10 @@ void* modeTxThread(void *arg)
                 txBuffer.addData(buf, 3);
                 sem_post(&modemTx);
             }
-            getModemSpace(currentMode.c_str());
             statusTimeout = false;
         }
 
-        if (rxModeBuffer.dataSize() >= 3 && frameTimeout)
+        if (rxModeBuffer.dataSize() >= 3 && frameTimeout && bufReady)
         {
             uint8_t buf[2];
             sem_wait(&rxBufSem);
@@ -568,7 +568,7 @@ void* modeTxThread(void *arg)
             uint8_t len = buf[1];
             if (rxModeBuffer.dataSize() >= len)
             {
-                if (getModemSpace(currentMode.c_str()) > 1 && txBuffer.freeSpace() >= len + 3)
+                if (getModemSpace(currentMode.c_str()) > 1 && txBuffer.freeSpace() >= (len + 3))
                 {
                     uint8_t buf[len];
                     sem_wait(&rxBufSem);
@@ -724,14 +724,15 @@ void* commandThread(void *arg)
 // One thread per service.
 void *processClientSocket(void *arg)
 {
+    uint16_t      respLen  = 0;
+    uint16_t      offset   = 0;
     uint8_t       buffer[BUFFER_LENGTH];
-    uint8_t       conn_id = (intptr_t)arg;
-    int           sockFd  = hostClient[conn_id].sockfd;
-    uint16_t      respLen = 0;
-    uint8_t       type    = 0;
-    uint8_t       typeLen = 0;
-    uint16_t      offset  = 0;
-    ssize_t       len     = 0;
+    uint8_t       conn_id  = (intptr_t)arg;
+    uint8_t       type     = 0;
+    uint8_t       typeLen  = 0;
+    int           sockFd   = hostClient[conn_id].sockfd;
+    ssize_t       len      = 0;
+
     bzero(buffer, BUFFER_LENGTH);
 
     int flags = fcntl(sockFd, F_GETFL, 0);
@@ -870,7 +871,7 @@ void *processClientSocket(void *arg)
             type = NET_NACK;
 
     //    if (debugM)
-           dump((char*)"Protocol service data:", (unsigned char*)buffer, respLen);
+           dump((char*)"Protocol service data", (unsigned char*)buffer, respLen);
 
         if (rxModeBuffer.freeSpace() < respLen)
         {
@@ -879,9 +880,17 @@ void *processClientSocket(void *arg)
             fprintf(stderr, "rxModeBuffer out of space. [%02X]\n", tmp[0]);
             rxModeBuffer.clear();
         }
+
+        if (rxModeBuffer.dataSize() >= 100)
+            bufReady = true;
+        else // if (rxModeBuffer.dataSize() == 0)
+            bufReady = false;
+
         // This debug statement to be removed after debugging
-   //     if (debugM)
-            fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Space: %d\n", type, currentMode.c_str(), conn_id, hostClient[conn_id].active, getModemSpace(currentMode.c_str()));
+        if (debugM)
+            fprintf(stderr, "Type: %02X  Mode: %s  Conn: %d  Active: %d  Mode Sp: %2d  Modem Sp: %3d  RX buf: %3d  BR: %d\n",
+                     type, currentMode.c_str(), conn_id, hostClient[conn_id].active,
+                    getModemSpace(currentMode.c_str()), txBuffer.freeSpace(), rxModeBuffer.dataSize(), bufReady);
 
         switch (type)
         {
@@ -994,7 +1003,7 @@ void *processClientSocket(void *arg)
             }
             break;
         }
-        delay(50);
+        delay(10);
     }
     if (connections > 0)
         connections--;
@@ -1241,7 +1250,7 @@ int processSerial(void)
 
     if (debugM)
     {
-        dump((char*)"SERIAL:", buffer, respLen);
+        dump((char*)"SERIAL", buffer, respLen);
         if (type == TYPE_DSTAR_HEADER)
         {
             if (respLen != 46)
@@ -1272,16 +1281,16 @@ int processSerial(void)
     else if (type == MODEM_DEBUG)
     {
         if (debugM)
-            dump((char*)"DEBUG1:", buffer, respLen);
+            dump((char*)"DEBUG1", buffer, respLen);
     }
     else if (type == MODEM_VERSION)
     {
-        fprintf(stderr, "Version\n");
+        dump((char*)"Version", buffer, respLen);
     }
     else if (type == MODEM_STATUS)
     {
         if (debugM)
-            dump((char*)"STATUS:", buffer, respLen);
+            dump((char*)"STATUS", buffer, respLen);
         if (modem == "mmdvmhs")
             setM17Space(buffer[13]);
         else
