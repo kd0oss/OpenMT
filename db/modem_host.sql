@@ -1,4 +1,3 @@
-/*M!999999\- enable the sandbox mode */ 
 -- MariaDB dump 10.19  Distrib 10.5.29-MariaDB, for debian-linux-gnueabihf (armv8l)
 --
 -- Host: localhost    Database: modem_host
@@ -71,7 +70,7 @@ CREATE TABLE `config` (
 
 LOCK TABLES `config` WRITE;
 /*!40000 ALTER TABLE `config` DISABLE KEYS */;
-INSERT INTO `config` VALUES (6,'main','gateways','none'),(7,'main','activeModes','none'),(3,'main','username','admin'),(4,'main','callsign','N0CALL'),(5,'main','title','Repeater Dashboard');
+INSERT INTO `config` VALUES (1,'main','gateways','none','none'),(2,'main','activeModes','none','''none'),(3,'main','username','none','admin'),(4,'main','callsign','none','N0CALL'),(5,'main','title','none','Repeater Dashboard');
 /*!40000 ALTER TABLE `config` ENABLE KEYS */;
 UNLOCK TABLES;
 

@@ -1,4 +1,3 @@
-/*M!999999\- enable the sandbox mode */ 
 -- MariaDB dump 10.19  Distrib 10.5.29-MariaDB, for debian-linux-gnueabihf (armv8l)
 --
 -- Host: localhost    Database: dvmodem
@@ -48,7 +47,7 @@ CREATE TABLE `config` (
 
 LOCK TABLES `config` WRITE;
 /*!40000 ALTER TABLE `config` DISABLE KEYS */;
-INSERT INTO `config` VALUES (1,'modem1','config','port','ttyAMA0'),(4,'modem1','config','mode','duplex'),(5,'modem1','config','modem','mmdvm'),(9,'modem1','config','rxInvert','false'),(10,'modem1','config','txInvert','true'),(11,'modem1','config','pttInvert','false'),(12,'modem1','config','useCOSAsLockout','false'),(13,'modem1','config','trace','false'),(14,'modem1','config','debug','false'),(28,'modem1','config','txDelay','100'),(30,'modem1','config','rxLevel','100'),(41,'modem1','config','rfTXLevel','100'),(42,'modem1','config','rxFrequency','435000000'),(43,'modem1','config','txFrequency','435000000'),(45,'modem1','config','rxDCOffset','0'),(46,'modem1','config','txDCOffset','0'),(51,'modem1','config','baud','460800');
+INSERT INTO `config` VALUES (1,'modem1','config','port','ttyAMA0'),(2,'modem1','config','mode','duplex'),(3,'modem1','config','modem','mmdvm'),(4,'modem1','config','rxInvert','false'),(5,'modem1','config','txInvert','true'),(6,'modem1','config','pttInvert','false'),(7,'modem1','config','useCOSAsLockout','false'),(8,'modem1','config','trace','false'),(9,'modem1','config','debug','false'),(10,'modem1','config','txDelay','100'),(11,'modem1','config','rxLevel','100'),(12,'modem1','config','rfTXLevel','100'),(13,'modem1','config','rxFrequency','435000000'),(14,'modem1','config','txFrequency','435000000'),(15,'modem1','config','rxDCOffset','0'),(16,'modem1','config','txDCOffset','0'),(17,'modem1','config','baud','460800');
 /*!40000 ALTER TABLE `config` ENABLE KEYS */;
 UNLOCK TABLES;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
