@@ -70,7 +70,7 @@ CREATE TABLE `config` (
 
 LOCK TABLES `config` WRITE;
 /*!40000 ALTER TABLE `config` DISABLE KEYS */;
-INSERT INTO `config` VALUES (1,'main','gateways','none','none'),(2,'main','activeModes','none','''none'),(3,'main','username','none','admin'),(4,'main','callsign','none','N0CALL'),(5,'main','title','none','Repeater Dashboard');
+INSERT INTO `config` VALUES (1,'main','gateways','none','none'),(2,'main','activeModes','none','none'),(3,'main','username','none','admin'),(4,'main','callsign','none','N0CALL'),(5,'main','title','none','Repeater Dashboard');
 /*!40000 ALTER TABLE `config` ENABLE KEYS */;
 UNLOCK TABLES;
 
