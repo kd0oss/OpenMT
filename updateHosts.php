@@ -218,7 +218,7 @@ function updateM17Hosts()
                 else
                     $query = "INSERT INTO modem_host.reflectors SET Nick = '".$fields[0]."', ip4 = '".$fields[1]."', port = ".$fields[2].", refl_type = 'M17', has_modules = 'yes'";
                 mysqli_free_result($result);
-                echo $query."\n";
+              //  echo $query."\n";
                 mysqli_query($mysql, $query);
             }
         }
@@ -249,7 +249,7 @@ function updateDMRHosts()
                 else
                     $query = "INSERT INTO modem_host.reflectors SET Nick = '".$fields[0]."', ip4 = '".$fields[1]."', port = ".$fields[2].", refl_type = 'DMR'";
                 mysqli_free_result($result);
-                echo $query."\n";
+              //  echo $query."\n";
                 mysqli_query($mysql, $query);
             }
         }
@@ -287,7 +287,7 @@ echo "Updating DSTAR Hosts.\n";
 updateDSTARHosts();
 echo "Updating DMR Id's.\n";
 updateDMRIds();
-echo "Updates complete.\n";
+echo "\nUpdates complete.\n";
 
 mysqli_close($mysql);
 ?>

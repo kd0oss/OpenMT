@@ -37,34 +37,34 @@ uint8_t          modem_dmrTXLevel          = 50U;
 uint8_t          dmr_space[2]              = {0U, 0U};
 
 bool             modem_pocsagEnabled       = false;
-uint8_t            modem_pocsagTXLevel       = 50U;
+uint8_t          modem_pocsagTXLevel       = 50U;
 char             modem_pocsagFrequency[11] = "0";
 
 bool             modem_nxdnEnabled         = false;
-uint8_t            modem_nxdnTXLevel         = 50U;
+uint8_t          modem_nxdnTXLevel         = 50U;
 unsigned int     modem_nxdnTXHang          = 5U;
 
 bool             modem_fmEnabled           = false;
-uint8_t            modem_fmTXLevel           = 50U;
-uint8_t            modem_cwIdTXLevel         = 50U;
+uint8_t          modem_fmTXLevel           = 50U;
+uint8_t          modem_cwIdTXLevel         = 50U;
 
 bool             modem_p25Enabled          = false;
 unsigned int     modem_p25TXHang           = 5U;
-uint8_t            modem_p25TXLevel          = 50U;
+uint8_t          modem_p25TXLevel          = 50U;
 uint8_t          p25_space                 = 0U;
 
 bool             modem_dstarEnabled        = false;
-uint8_t            modem_dstarTXLevel        = 50U;
+uint8_t          modem_dstarTXLevel        = 50U;
 uint8_t          dstar_space               = 0U;
 
 bool             modem_m17Enabled          = false;
-uint8_t            modem_m17TXLevel          = 50U;
+uint8_t          modem_m17TXLevel          = 50U;
 unsigned int     modem_m17TXHang           = 5U;
 uint8_t          m17_space                 = 0U;
 
 bool             modem_ysfEnabled          = false;
 bool             modem_ysfLoDev            = false;
-uint8_t            modem_ysfTXLevel          = 50U;
+uint8_t          modem_ysfTXLevel          = 50U;
 unsigned int     modem_ysfTXHang           = 4U;
 
 bool             modem_ax25Enabled         = false;
@@ -72,7 +72,7 @@ int              modem_ax25RXTwist         = 6U;
 unsigned int     modem_ax25TXDelay         = 300U;
 unsigned int     modem_ax25SlotTime        = 50U;
 unsigned int     modem_ax25PPersist        = 128U;
-uint8_t            modem_ax25TXLevel         = 50U;
+uint8_t          modem_ax25TXLevel         = 50U;
 /* End of MMDVM parameters */
 
 /* External references from Modem_Host */
@@ -559,34 +559,18 @@ bool set_ConfigHS(const char* modem_name)
 
     buffer[3U] = 0x00U;
     char tmp[20];
-    readHostConfig(modem_name, "config", "rxInvert", tmp);
-    modem_rxInvert = strcasecmp(tmp, "true") == 0 ? true : false;
-    readHostConfig(modem_name, "config", "txInvert", tmp);
-    modem_txInvert = strcasecmp(tmp, "true") == 0 ? true : false;
-    readHostConfig(modem_name, "config", "pttInvert", tmp);
-    modem_pttInvert = strcasecmp(tmp, "true") == 0 ? true : false;
 /* modem_ysfLoDev = readHostConfig(modem_name, "config", "ysfLoDev") == "true" ? true : false; */
     readHostConfig(modem_name, "config", "debug", tmp);
     modem_debug = strcasecmp(tmp, "true") == 0 ? true : false;
     readHostConfig(modem_name, "config", "trace", tmp);
     modem_trace = strcasecmp(tmp, "true") == 0 ? true : false;
-    readHostConfig(modem_name, "config", "useCOSAsLockout", tmp);
-    modem_useCOSAsLockout = strcasecmp(tmp, "true") == 0 ? true : false;
     readHostConfig(modem_name, "config", "mode", tmp);
     modem_duplex = strcasecmp(tmp, "duplex") == 0 ? true : false;
 
-	if (modem_rxInvert)
-		buffer[3U] |= 0x01U;
-	if (modem_txInvert)
-		buffer[3U] |= 0x02U;
-	if (modem_pttInvert)
-		buffer[3U] |= 0x04U;
     if (modem_ysfLoDev)
         buffer[3U] |= 0x08U;
 	if (modem_debug)
 		buffer[3U] |= 0x10U;
-	if (modem_useCOSAsLockout)
-		buffer[3U] |= 0x20U;
     if (!modem_duplex)
         buffer[3U] |= 0x80U;
 

@@ -43,24 +43,24 @@ machine with network access to host.
 
 Directory Stucture
 ===================================================================
-OpenMT              // project root
-    docs            // Documentation
-    db              // Database schema location. MariaDB
-    dsp_lib         // CMISDSP libaray compiled for Raspberry Pi3
-    dashboard       // Dashboard root
-        www         // Web base dashboard files
-    modem           // Host program and related files
-    tools           // Code for functions used by all programs
-    protocols
-        DMR         // DMR protocol service program
-            gateway // DMR gateway program
-        DSTAR       // DSTAR protocol service program
-            gateway // DSTAR gateway to IRCDDBGateway daemon
-        m17         // M17 open source protocol service program
-            gateway // M17 gateway program
-        P25         // P25 protocol service program
-            gateway // P25 gateway program
-        ...         // other protocols as needed
+OpenMT			-- project root
+	docs		-- Documentation
+	db		-- Database schema location. MariaDB
+	dsp_lib		-- CMISDSP libaray compiled for Raspberry Pi3
+	dashboard	-- Dashboard root
+		www	-- Web base dashboard files
+	modem		-- Host program and related files
+	tools		-- Code for functions used by all programs
+	protocols
+		DMR		-- DMR protocol service program
+			gateway	-- DMR gateway program
+		DSTAR		-- DSTAR protocol service program
+			gateway	-- DSTAR gateway to IRCDDBGateway daemon
+		m17		-- M17 open source protocol service program
+			gateway	-- M17 gateway program
+		P25		-- P25 protocol service program
+			gateway	-- P25 gateway program
+		...		-- other protocols as needed
 
 SQL Server (MariaDB)
 ========================================================================

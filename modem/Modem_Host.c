@@ -1015,7 +1015,7 @@ void* modemMMDVMTxThread(void* arg)
                 {
                     fprintf(stderr, "modem TX write failed.\n");
                 }
-                //                 if (buf[2] != 0x01)     dump((char*)"Modem", buf, len);
+        //        if (buf[2] != 0x01)     dump((char*)"Modem", buf, len);
             }
         }
     }
@@ -2359,7 +2359,7 @@ int main(int argc, char** argv)
     readHostConfig(modemName, "config", "modem", modem);
     if (strlen(modem) == 0)
     {
-        setHostConfig(modemName, "config", "modem", "none", "mmdvm_hs");
+        setHostConfig(modemName, "config", "modem", "none", "mmdvmhs");
         readHostConfig(modemName, "config", "modem", modem);
         setHostConfig(modemName, "config", "port", "none", "ttyAMA0");
         setHostConfig(modemName, "config", "mode", "none", "simplex");
@@ -2406,7 +2406,7 @@ int main(int argc, char** argv)
         int err = pthread_create(&(modemTxid), NULL, &modemMMDVMTxThread, NULL);
         if (err != 0)
         {
-            fprintf(stderr, "Can't create modem tx thread :[%s]", strerror(err));
+            fprintf(stderr, "Can't create MMDVM modem tx thread:[%s]", strerror(err));
             return 1;
         }
         else
@@ -2418,7 +2418,7 @@ int main(int argc, char** argv)
         err = pthread_create(&(modetxid), NULL, &modeMMDVMTxThread, NULL);
         if (err != 0)
         {
-            fprintf(stderr, "Can't create mode tx thread :[%s]", strerror(err));
+            fprintf(stderr, "Can't create MMDVM mode tx thread:[%s]", strerror(err));
             return 1;
         }
         else
@@ -2432,7 +2432,7 @@ int main(int argc, char** argv)
         int err = pthread_create(&(modemTxid), NULL, &modemTxThread, NULL);
         if (err != 0)
         {
-            fprintf(stderr, "Can't create modem tx thread :[%s]", strerror(err));
+            fprintf(stderr, "Can't create modem tx thread:[%s]", strerror(err));
             return 1;
         }
         else
@@ -2444,7 +2444,7 @@ int main(int argc, char** argv)
         err = pthread_create(&(modetxid), NULL, &modeTxThread, NULL);
         if (err != 0)
         {
-            fprintf(stderr, "Can't create mode tx thread :[%s]", strerror(err));
+            fprintf(stderr, "Can't create mode tx thread:[%s]", strerror(err));
             return 1;
         }
         else
@@ -2457,7 +2457,7 @@ int main(int argc, char** argv)
     int err = pthread_create(&(timerid), NULL, &timerThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create timer thread :[%s]", strerror(err));
+        fprintf(stderr, "Can't create timer thread:[%s]", strerror(err));
         return 1;
     }
     else
@@ -2469,7 +2469,7 @@ int main(int argc, char** argv)
     err = pthread_create(&(tcpid), NULL, &startTCPServer, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create TCP server thread :[%s]", strerror(err));
+        fprintf(stderr, "Can't create TCP server thread:[%s]", strerror(err));
         return 1;
     }
     else
@@ -2481,7 +2481,7 @@ int main(int argc, char** argv)
     err = pthread_create(&(commandid), NULL, &commandThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create command thread :[%s]", strerror(err));
+        fprintf(stderr, "Can't create command thread:[%s]", strerror(err));
         return 1;
     }
     else
@@ -2500,20 +2500,21 @@ int main(int argc, char** argv)
         readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
 
         set_ConfigHS(modemName);
-        delay(1000);
+        delay(10000);
 
         setFrequency(modem_rxFrequency, modem_txFrequency, modem_txFrequency, 255);
-        delay(1000);
+        delay(10000);
         uint8_t buf[3];
         buf[0] = 0xE0;
         buf[1] = 0x03;
         buf[2] = 0x00;
-        write(serialModemFd, buf, 3);
+        //write(serialModemFd, buf, 3);
+        RingBuffer_addData(&modemCommandBuffer, buf, 3);
     }
     else if (strcasecmp(modem, "mmdvm") == 0)
     {
         set_Config(modemName);
-        delay(1000);
+        delay(10000);
         uint8_t buf[3];
         buf[0] = 0xE0;
         buf[1] = 0x03;
@@ -2578,6 +2579,7 @@ int main(int argc, char** argv)
         if (!ret)
             break;
     }
+
     pthread_mutex_lock(&shutDownMutex);
     setHostConfig(modemName, "main", "gateways", "none", "none");
     setHostConfig(modemName, "main", "activeModes", "none", "none");

@@ -32,6 +32,7 @@ CREATE TABLE `auth` (
 --
 -- Table structure for table `config`
 --
+INSERT INTO `auth` SET `username` = 'admin', `password` = PASSWORD('admin');
 
 DROP TABLE IF EXISTS `config`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
