@@ -22,9 +22,9 @@ add_library(VendorLib STATIC IMPORTED)
 # 2. Set the properties of the imported library
 set_target_properties(VendorLib PROPERTIES
     # Specify the location of the library file
-    IMPORTED_LOCATION "/home/pi/TestMT/dsp_lib/libCMSISDSP.a"
+    IMPORTED_LOCATION "/home/pi/OpenMT/dsp_lib/libCMSISDSP.a"
     # Specify the include directories for the library's headers
-    INTERFACE_INCLUDE_DIRECTORIES "/home/pi/TestMT/dsp_lib/Include"
+    INTERFACE_INCLUDE_DIRECTORIES "/home/pi/OpenMT/dsp_lib/Include"
 )
 
 # Link the source files from the src/ directory to the target
