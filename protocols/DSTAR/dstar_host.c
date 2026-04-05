@@ -2113,6 +2113,7 @@ void* timerThread(void* arg)
                         pthread_mutex_unlock(&rxBufMutex);
                         idle = true;
                         resetTimer("modeHang");
+                        fprintf(stderr, "Sending set IDLE mode.\n");
                     }
                 }
             }
@@ -2428,7 +2429,8 @@ void processEOT(bool isNet)
             delay(18000);
 
             //strcpy(metaText, "Have a nice day.   ");
-            sprintf(metaText, "Your BER: %2.1f     ", loss_BER);
+            bzero(metaText, 23);
+            sprintf(metaText, "Your BER: %2.1f      ", loss_BER);
             for (uint8_t i = 0; i < 19; i++)
             {
                 slowSpeedDataEncode(metaText, buf2 + 17, 1);
