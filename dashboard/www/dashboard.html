@@ -102,7 +102,7 @@
      display: none; /* Hidden by default */
      position: fixed; /* Stay in place */
      z-index: 4; /* Sit on top */
-     left: 400;
+     left: 400px;
      top: 0;
      width: 400px; /* Full width */
      height: 400px; /* Full height */
@@ -223,7 +223,7 @@
    #maintab
    {
       overflow: auto;
-      background-color: blue;
+      background-color: #000000;
    }
 
    .stablink
@@ -532,33 +532,37 @@
 
    .lastheardDiv
    {
-      position: relative;
-      top: 1px;
-      height: 100%;
-      width: 100%;
-      overflow: hidden;
-      background-color: #000000;
-      z-index: 3;
-   }
+     position: relative;
+     top: 1px;
+     width: 100%;
+     height: calc(100vh - 530px);  /* viewport minus banner+tabs+currentComm+creator+padding */
+     overflow-y: auto;
+     overflow-x: auto;
+     background-color: #000000;
+     z-index: 3;
+     -webkit-overflow-scrolling: touch;
+  }
 
    .lastheard
    {
-      position: relative;
-      top: 1px;
-      width: 100%;
-      bottom: 30px;
-      left: 1px;
-      display: inline-block;
-      text-align: center;
-      font-size: 15px;
-      overflow-y: auto;
-      z-index: 3;
+     position: relative;
+     top: 1px;
+     width: 100%;
+     min-width: 600px;
+     left: 1px;
+     text-align: center;
+     font-size: 15px;
+     border-collapse: separate;
+     border-spacing: 0;
+     z-index: 3;
    }
 
-   .lastheard thead
+   .lastheard thead th
    {
       position: sticky; /* Make the header sticky */
       top: 0; /* Stick to the top of the scrollable container */
+      z-index: 4;
+      background-color: green;   /* must be set explicitly or thead becomes transparent when scrolling */
    }
 
    .lastheard tr:nth-child(even)
@@ -724,12 +728,26 @@ var last_rid = "x";
 var modemFields = "";
 var map;
 var marker;
+var modemName = "modem1";
+var modemId = 1;
 
 /* Initialize page structure */
 function openPage(tabln,tab,pageName,elmnt,color)
 {
+  // 1. Get the query string portion of the URL
+  const queryString = window.location.search;
+
+  // 2. Create a URLSearchParams object
+  const urlParams = new URLSearchParams(queryString);
+  if (urlParams.has('modemId'))
+  {
+    modemId = Number(urlParams.get('modemId'));
+    modemName = "modem"+urlParams.get('modemId');
+  }
+
   if (pageName == "settingstab" && !authenticated)
     return;
+
   var i, tabcontent, tablinks;
   tabcontent = document.getElementsByClassName(tab);
   for (i = 0; i < tabcontent.length; i++)
@@ -750,8 +768,20 @@ function initDashBd()
 {
   getConfig();
   setTimeout(fetchStatus, 2000);
+  setTimeout(fetchDashConfig, 3000);
   setTimeout(buildHistoryTable, 3000);
   setTimeout(updateClock, 1000);
+  window.addEventListener('resize', resizeLastHeard);
+  resizeLastHeard();
+}
+
+function resizeLastHeard()
+{
+  var div = document.getElementById('lastheardDiv');
+  var rect = div.getBoundingClientRect();
+  var creator = document.querySelector('.creator');
+  var bottom = creator ? creator.offsetHeight : 25;
+  div.style.height = (window.innerHeight - rect.top - bottom - 5) + 'px';
 }
 
 /* Save mode options to database */
@@ -763,7 +793,7 @@ async function saveModeOption(mode, id)
     alert("Value cannot be blank.");
     return;
   }
-  var url = "data_query.php?command=saveModeOption&mode="+mode+"&parameter="+id+"&value="+encodeURIComponent(value);
+  var url = "data_query.php?command=saveModeOption&modem_name="+modemName+"&mode="+mode+"&parameter="+id+"&value="+encodeURIComponent(value);
   var resp = await fetch(url);
   if (resp.ok)
   {
@@ -773,7 +803,7 @@ async function saveModeOption(mode, id)
     else
     {
       document.body.style.cursor = 'wait';
-      url = "data_query.php?command=dashbCom&action=updateConf"+mode+"&parameter=readConfig";
+      url = "data_query.php?command=dashbCom&modem_name="+modemName+"&action=updateConf"+mode+"&parameter=readConfig";
       resp = await fetch(url);
       if (resp.ok)
       {
@@ -798,27 +828,43 @@ function displayModeOptions(mode, dtype, id, value)
   if (document.getElementById('span_'+mode+'_'+id) || mode == "none")
     return;
 
+  // If section does not exist create it.
   if (!document.getElementById(mode+'_section'))
   {
     var section = "<div class='mode_section' id='"+mode+"_section'>";
     section += "<label style='font-weight: bold;'>"+mode+" Section</label><br>";
+    section += "<table id='modeTable_"+mode+"'><tbody></tbody></table>";
     section += "</div>";
     var tmp = document.getElementById("modetab").innerHTML;
     document.getElementById("modetab").innerHTML = tmp+section;
   }
 
+  // If value is valid add to section.
   if (value != "none")
   {
     var content = document.getElementById(mode+"_section").innerHTML;
-    var html = "<span class='mode_options' id='span_"+mode+"_"+id+"'>";
-    html += "<label>"+id+"</label>";
+    var table = document.getElementById("modeTable_"+mode);
+  //  var html = "<span class='mode_options' id='span_"+mode+"_"+id+"'>";
+  //  html += "<label>"+id+"</label>";
+    var row = table.insertRow(-1);
+    var cell1 = row.insertCell(0);
+    var cell2 = row.insertCell(1);
+    var cell3 = row.insertCell(2);
+    cell1.innerHTML = id;
     if (dtype == "input")
     {
-      html += "&nbsp;<input id='"+mode+"_"+id+"' type='text' value='"+value+"'>";
-      html += "&nbsp;<button onclick='saveModeOption(\""+mode+"\", \""+id+"\")'>Save</button>";
+      cell2.innerHTML = "<input id='"+mode+"_"+id+"' type='text' value='"+value+"'>";
+   //   html += "&nbsp;<input id='"+mode+"_"+id+"' type='text' value='"+value+"'>";
+      cell3.innerHTML = "<button onclick='saveModeOption(\""+mode+"\", \""+id+"\")'>Save</button>";
+   //   html += "&nbsp;<button onclick='saveModeOption(\""+mode+"\", \""+id+"\")'>Save</button>";
     }
-    html += "<br></span>";
-    document.getElementById(mode+"_section").innerHTML = content+html;
+    else
+    {
+      cell2.innerText = value;
+      cell3.innerText = "Read-Only";
+    }
+ //   html += "<br></span>";
+  //  document.getElementById(mode+"_section").innerHTML = content;//+html;
   }
 }
 
@@ -883,7 +929,7 @@ async function configModes(prevModes)
       {
         if (mdActive[i] == "none")
           continue;
-        url = "data_query.php?command=getModeOptions&mode="+mdActive[i];
+        url = "data_query.php?command=getModeOptions&modem_name="+modemName+"&mode="+mdActive[i];
         var resp = await fetch(url);
         if (resp.ok)
         {
@@ -906,9 +952,11 @@ async function configModes(prevModes)
 /* Load current reflector link status from database and update display */
 async function updateGatewayStatus()
 {
+  var linked = [];
+  var l = 0;
   if (activeGateways != "")
   {
-    var url = "data_query.php?command=getLinkedReflectors";
+    var url = "data_query.php?command=getLinkedReflectors&modem_name="+modemName;
     var resp = await fetch(url);
     if (resp.ok)
     {
@@ -925,13 +973,22 @@ async function updateGatewayStatus()
           name = values[1];
           values = fields[2].split('\x1D');
           module = values[1];
+          if (name == module)
+            module = "";
           if (document.getElementById(type+'link'))
           {
+            linked[l++] = type;
             document.getElementById(type+'net').value = name;
             document.getElementById(type+'netmod').value = module;
             if (document.getElementById(type+'_linkstat'))
               document.getElementById(type+'_linkstat').innerHTML = "Linked to "+name+" "+module;
             document.getElementById(type+'link').textContent = "Unlink";
+          }
+          else
+          {
+            linked[l++] = type;
+            if (document.getElementById(type+'_linkstat'))
+              document.getElementById(type+'_linkstat').innerHTML = "Linked to "+name+" "+module;
           }
         }
       }
@@ -940,9 +997,19 @@ async function updateGatewayStatus()
     tmp = activeGateways.split(',');
     for (var i=0;i<tmp.length;i++)
     {
+      var found = false;
+      for (var x=0;x<l;x++)
+      {
+        if (linked[x] == tmp[i])
+        {
+          found = true;
+          break;
+        };
+      }
+      if (found) continue;
       stat = "Not Linked";
       if (document.getElementById(tmp[i]+'_linkstat'))
-        stat = document.getElementById(tmp[i]+'_linkstat').innerHTML;
+        document.getElementById(tmp[i]+'_linkstat').innerHTML = stat;
     }
   }
 }
@@ -966,7 +1033,7 @@ async function getConfig()
 {
   activeGateways = "";
   activeModes = "";
-  var url = "data_query.php?command=getModemConfig";
+  var url = "data_query.php?command=getModemConfig&modem_name="+modemName;
   var resp = await fetch(url);
   if (!resp.ok) return;
   var tmp = await resp.text();
@@ -1018,7 +1085,7 @@ async function getConfig()
   }
   document.getElementById('modemExtras').innerHTML = modemExtras;
 
-  url = "data_query.php?command=getDashConfig";
+  url = "data_query.php?command=getDashConfig&modem_name="+modemName;
   resp = await fetch(url);
   if (!resp.ok) return;
   tmp = await resp.text();
@@ -1058,7 +1125,10 @@ async function getConfig()
       document.getElementById('station_longitude').value = Number(station_longitude);
     }
   }
-  map.setView([Number(station_latitude), Number(station_longitude)], 10);
+  if (Number(station_latitude) == 0.0 && Number(station_longitude) == 0.0)
+    map.setView([Number(station_latitude), Number(station_longitude)], 1);
+  else
+    map.setView([Number(station_latitude), Number(station_longitude)], 10);
   marker.remove();
   marker = new L.Marker([Number(station_latitude), Number(station_longitude)]);
   marker.addTo(map);
@@ -1087,9 +1157,6 @@ function configGateways(prevGateways)
   var table = "";
   for (var i=0;i<modes.length;i++)
   {
-    html = document.getElementById(modes[i]+"_section").innerHTML;
-    html += createReflDropDown(modes[i]);
-    document.getElementById(modes[i]+"_section").innerHTML = html;
     getReflList(modes[i]);
 
     if (i > 0) table += "<br>";
@@ -1105,7 +1172,7 @@ function configGateways(prevGateways)
 /* Load current host status from database */
 async function fetchStatus()
 {
-  var txEnabled = false;
+  var txEnabled = [];
   var fields;
   var latitude = "";
   var longitude = "";
@@ -1113,7 +1180,8 @@ async function fetchStatus()
   var bearing = "";
   var speed = "";
   var smsText = "";
-  var url = "data_query.php?command=getStatus";
+  var suffix = "";
+  var url = "data_query.php?command=getStatus&modem_name="+modemName;
   var resp = await fetch(url);
   if (!resp.ok)
   {
@@ -1126,62 +1194,96 @@ async function fetchStatus()
     setTimeout(fetchStatus, 1000);
     return;
   }
-  tmp = tmp.split('\x1C');
-  for (var i=0;i<tmp.length;i++)
+//alert(tmp);
+  var rtx2 = document.getElementById('rtx2');
+  rtx2.style.display = "none";
+  txEnabled[1] = false;
+  lines = tmp.split('\x1E');
+  for (var l=0;l<lines.length;l++)
   {
-    fields = tmp[i].split('\x1D');
-    if (fields[0] == 'Id')
-      rid = fields[1];
-    if (fields[0] == 'tx_state')
+    var x = l + 1;
+    var id = x.toString();
+
+    if (l == 1)
     {
-      tx_state = fields[1];
-      if (tx_state == "on")
-        txEnabled = true;
-      else
-        txEnabled = false;
+      rtx2.style.display = "table-row";
     }
-    if (fields[0] == 'srcCall')
+    tmp = lines[l].split('\x1C');
+    for (var i=0;i<tmp.length;i++)
     {
-      srcCall = fields[1];
-      if (srcCall == "")
-        break;
-    }
-    if (fields[0] == 'mode')
-      mode = fields[1];
-    if (fields[0] == 'type')
-      type = fields[1];
-    if (fields[0] == 'dstCall')
-      dstCall = fields[1];
-    if (fields[0] == 'metaText')
-      metaText = decodeURIComponent(fields[1]);
-    if (metaText.trim() == "")
-      metaText = "none";
-    if (fields[0] == 'latitude')
-      latitude = fields[1];
-    if (fields[0] == 'longitude')
-      longitude = fields[1];
-    if (fields[0] == 'altitude')
-      altitude = fields[1];
-    if (fields[0] == 'bearing')
-      bearing = fields[1];
-    if (fields[0] == 'speed')
-      speed = fields[1];
-    if (fields[0] == 'smsText')
-      smsText = fields[1];
-    if (fields[0] == 'property')
-    {
-      if (fields[1] == 'active_mode')
+      fields = tmp[i].split('\x1D');
+      if (fields[0] == 'Id')
+        rid = fields[1];
+      if (fields[0] == 'tx_state')
       {
-        i++;
-        value = tmp[i].split('\x1D');
-        currentMode = value[1];
+        tx_state = fields[1];
+        if (tx_state == "on")
+          txEnabled[l] = true;
+        else
+          txEnabled[l] = false;
       }
+      if (fields[0] == 'srcCall')
+      {
+        srcCall = fields[1];
+        if (srcCall == "")
+          break;
+      }
+      if (fields[0] == 'suffix')
+        suffix = fields[1];
+      if (fields[0] == 'mode')
+        mode = fields[1];
+      if (fields[0] == 'type')
+        type = fields[1];
+      if (fields[0] == 'dstCall')
+        dstCall = fields[1];
+      if (fields[0] == 'metaText')
+        metaText = decodeURIComponent(fields[1]);
+      if (metaText.trim() == "")
+        metaText = "none";
+      if (fields[0] == 'latitude')
+        latitude = fields[1];
+      if (fields[0] == 'longitude')
+        longitude = fields[1];
+      if (fields[0] == 'altitude')
+        altitude = fields[1];
+      if (fields[0] == 'bearing')
+        bearing = fields[1];
+      if (fields[0] == 'speed')
+        speed = fields[1];
+      if (fields[0] == 'smsText')
+        smsText = fields[1];
+      if (fields[0] == 'property')
+      {
+        if (fields[1] == 'active_mode')
+        {
+          i++;
+          value = tmp[i].split('\x1D');
+          currentMode = value[1];
+        }
+      }
+
+      document.getElementById('cmode'+id).innerHTML = mode;
+
+      if (suffix != "")
+        document.getElementById('srcCall'+id).innerHTML = srcCall+"/"+suffix;
+      else
+        document.getElementById('srcCall'+id).innerHTML = srcCall;
+
+      if (srcCall != '')
+      {
+        newCall = "yes";
+      }
+
+      document.getElementById('dstCall'+id).innerHTML = dstCall;
+      document.getElementById('metaText'+id).innerHTML = metaText.trim();
     }
   }
+
   if (rid != last_rid)
   {
     if (smsText != "")
       addMessage(srcCall, decodeURIComponent(smsText));
+
     if (latitude != "" && longitude != "")
     {
       map.setView([Number(latitude), Number(longitude)], 10);
@@ -1191,49 +1293,58 @@ async function fetchStatus()
     }
     last_rid = rid;
   }
-  document.getElementById('cmode').innerHTML = mode;
-  document.getElementById('srcCall').innerHTML = srcCall;
-  if (srcCall != '')
-  {
-    newCall = "yes";
-  }
-  document.getElementById('dstCall').innerHTML = dstCall;
-  document.getElementById('metaText').innerHTML = metaText.trim();
 
-  if (txEnabled && mode == currentMode)
+  for (var i=0;i<2;i++)
   {
-    var rtx = document.getElementById('rtx');
-    rtx.style.background = 'red';
-    rtx.style.color = 'white';
-    if (document.getElementById(mode+'_stat'))
-      document.getElementById(mode+'_stat').innerHTML = "TX";
-    //currentMode = mode;
+    var x = i + 1;
+    var id = x.toString();
+    if (txEnabled[i] && mode.includes(currentMode))
+    {
+      var rtx = document.getElementById('rtx'+id);
+      rtx.style.background = 'red';
+      rtx.style.color = 'white';
+    }
+    else
+    {
+      var rtx = document.getElementById('rtx'+id);
+      rtx.style.background = '#D6EEEE';
+      rtx.style.color = '#528dea';
+    }
+  }
+
+  if (txEnabled[0] || txEnabled[1])
+  {
+    if (document.getElementById(currentMode+'_stat'))
+      document.getElementById(currentMode+'_stat').innerHTML = "TX";
   }
   else
   {
-    var rtx = document.getElementById('rtx');
-    rtx.style.background = '#D6EEEE';
-    rtx.style.color = '#528dea';
-    if (document.getElementById(mode+'_stat') && mode == currentMode)
-      document.getElementById(mode+'_stat').innerHTML = "RX";
+    if (document.getElementById(currentMode+'_stat') && mode.includes(currentMode))
+      document.getElementById(currentMode+'_stat').innerHTML = "RX";
   }
 
+  setTimeout(fetchStatus, 1000);
+}
+
+async function fetchDashConfig()
+{
   var prevModes = activeModes;
   var prevGateways = activeGateways;
 
-  url = "data_query.php?command=getDashConfig";
+  url = "data_query.php?command=getDashConfig&modem_name="+modemName;
   resp = await fetch(url);
   if (!resp.ok)
   {
-    setTimeout(fetchStatus, 1000);
+    setTimeout(fetchDashConfig, 3000);
     return;
   }
   tmp = await resp.text();
   if (tmp == "none")
   {
-    setTimeout(fetchStatus, 1000);
+    setTimeout(fetchDashConfig, 3000);
     return;
   }
+
   var modeChanged = false;
   tmp = tmp.split('\x1E');
   for (var i=0;i<tmp.length;i++)
@@ -1275,7 +1386,7 @@ async function fetchStatus()
 
   updateModeStatus();
 
-  setTimeout(fetchStatus, 1000);
+  setTimeout(fetchDashConfig, 3000);
 }
 
 /* Load communcations history from database and update display table */
@@ -1285,13 +1396,14 @@ async function buildHistoryTable()
   var hType = "";
   var hMode = "";
   var hSource = "";
+  var hSuffix = "";
   var hDest = "";
   var hLoss_BER = "";
   var hMessage = "";
   var hDateTime = "";
   var hDuration = "";
 
-  var url = "data_query.php?command=getHistory";
+  var url = "data_query.php?command=getHistory&modem_name="+modemName;
   var resp = await fetch(url);
   if (!resp.ok)
   {
@@ -1307,7 +1419,7 @@ async function buildHistoryTable()
   lines = line.split('\x1E');
 
   var table = "<table id='lastheard' class='lastheard'>";
-  table += "<thead><tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Message</th><th>Destination</th><th>Mode</th><th>Loss/BER</th><th>Len(secs)</th></tr></thead><tbody>";
+  table += "<thead><tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER</th><th>Len(secs)</th></tr></thead><tbody>";
   for (var i=0;i<lines.length;i++)
   {
     tmp = lines[i].split('\x1C');
@@ -1320,6 +1432,8 @@ async function buildHistoryTable()
         hMode = fields[1];
       if (fields[0] == 'source')
         hSource = fields[1];
+      if (fields[0] == 'suffix')
+        hSuffix = fields[1];
       if (fields[0] == 'dest')
         hDest = fields[1];
       if (fields[0] == 'loss_ber')
@@ -1332,7 +1446,10 @@ async function buildHistoryTable()
         hDuration = fields[1];
     }
     table += "<tr><td>"+hDateTime+"</td>";
-    table += "<td>"+hSource+"</td>";
+    if (hSuffix != "")
+      table += "<td>"+hSource+"/"+hSuffix+"</td>";
+    else
+      table += "<td>"+hSource+"</td>";
     table += "<td>"+hMessage+"</td>";
     table += "<td>"+hDest+"</td>";
     table += "<td>"+hMode+"-"+hType+"</td>";
@@ -1360,10 +1477,15 @@ function checkAuth()
 /* Login process for administrative functions */
 async function doAuthentication()
 {
-  username = document.getElementById('fusername').value;
-  var password = document.getElementById('fpassword').value;
-  var url = "data_query.php?command=auth&username="+username+"&passwd="+encodeURIComponent(password);
-  var resp = await fetch(url);
+  var formData = new FormData();
+  formData.append('username', document.getElementById('fusername').value);
+  formData.append('passwd', document.getElementById('fpassword').value);
+ // formData.append('command', 'auth');
+
+  var resp = await fetch("data_query.php?command=auth", {
+    method: 'POST',
+    body: formData
+  });
   if (!resp.ok) return;
   var tmp = await resp.text();
   if (tmp == "authfailed")
@@ -1372,7 +1494,7 @@ async function doAuthentication()
   {
     authenticated = true;
     document.getElementById('id01').style.display='none';
-    openPage('tablink', 'tabcontent', 'settingstab',  document.getElementById('Settings'), 'green');
+    openPage('tablink', 'tabcontent', 'settingstab', document.getElementById('Settings'), 'green');
   }
 }
 
@@ -1380,7 +1502,6 @@ async function doAuthentication()
 async function saveModem()
 {
   document.body.style.cursor = 'wait';
-  var modemName = "modem1"; // this may change if multiple modems are used.
   var newDevice = document.getElementById('deviceType').value;
   var newcommPort = document.getElementById('commPort').value;
   var newBaud = document.getElementById('baud').value;
@@ -1407,7 +1528,7 @@ async function saveModem()
   }
   else
   {
-    url = "data_query.php?command=dashbCom&action=modemHost&parameter=setConfig";
+    url = "data_query.php?command=dashbCom&modem_name="+modemName+"&action=modemHost&parameter=setConfig";
 
     var resp = await fetch(url);
     if (!resp.ok)
@@ -1436,7 +1557,7 @@ async function saveGeneral()
   var newLongitude = document.getElementById('station_longitude').value;
   var moduleName = "main"; // this may change if multiple modems are used.
 
-  var url = "data_query.php?command=saveGeneral&moduleName="+moduleName+"&title="+newTitle+"&callsign="+newCall;
+  var url = "data_query.php?command=saveGeneral&modem_name="+modemName+"&moduleName="+moduleName+"&title="+newTitle+"&callsign="+newCall;
   url += "&latitude="+newLatitude+"&longitude="+newLongitude;
   var resp = await fetch(url);
   if (!resp.ok) return;
@@ -1455,7 +1576,7 @@ async function saveAuth()
   var newUsername = document.getElementById('username').value;
   var newPassword = document.getElementById('password').value;
   var newRPassword = document.getElementById('rpassword').value;
-  var moduleName = "main"; // this may change if multiple modems are used.
+  var moduleName = "main";
 
   if (newPassword != newRPassword)
   {
@@ -1467,8 +1588,17 @@ async function saveAuth()
     alert("Password cannot be blank.");
     return;
   }
-  var url = "data_query.php?command=saveGeneral&moduleName="+moduleName+"&username="+newUsername+"&passwd="+newPassword;
-  var resp = await fetch(url);
+
+  var formData = new FormData();
+  formData.append('username', newUsername);
+  formData.append('passwd', newPassword);
+  formData.append('modem_name', modemName);
+  formData.append('moduleName', moduleName);
+
+  var resp = await fetch("data_query.php?command=saveGeneral", {
+    method: 'POST',
+    body: formData
+  });
   if (!resp.ok) return;
   var tmp = await resp.text();
   if (tmp != "success")
@@ -1483,13 +1613,18 @@ async function saveAuth()
 /* Load reflector list for give mode type and add to drop down */
 async function getReflList(reflType)
 {
-  var list = document.getElementById(reflType+'net');
-  list.options.length = 0;
   var url = "data_query.php?command=getReflectors&refl_type="+reflType;
   var resp = await fetch(url);
   if (!resp.ok) return;
   var tmp = await resp.text();
   if (tmp == "none" || tmp == "failed") return;
+  html = document.getElementById(reflType+"_section").innerHTML;
+  html += createReflDropDown(reflType);
+  document.getElementById(reflType+"_section").innerHTML = html;
+  var list = document.getElementById(reflType+'net');
+  var showModules = false;
+  document.getElementById(reflType+'netmod').style.visibility = 'hidden';
+  list.options.length = 0;
   tmp = tmp.split('\x1E')
   for (var i=0;i<tmp.length;i++)
   {
@@ -1499,7 +1634,12 @@ async function getReflList(reflType)
       newOpt.value = value[1];
       newOpt.text = value[1];
       list.add(newOpt);
+      value = fields[7].split('\x1D');
+      if (value[1] == "yes")
+        showModules = true;
   }
+  if (showModules)
+    document.getElementById(reflType+'netmod').style.visibility = 'visible';
 }
 
 /* Use database to send command to link/unlink reflector */
@@ -1514,7 +1654,7 @@ async function reflConnect(reflType)
   action = "unlink";
   if (link == "Link")
     action = "link,"+name+","+mod;
-  url = "data_query.php?command=dashbCom&action=reflLink"+reflType+"&parameter="+action;
+  url = "data_query.php?command=dashbCom&modem_name="+modemName+"&action=reflLink"+reflType+"&parameter="+action;
 
   document.body.style.cursor = 'wait';
   var resp = await fetch(url);
@@ -1551,7 +1691,7 @@ function createReflDropDown(reflType)
   html += "<label for='"+reflType+"net'>Reflector:</label>";
   html += "<select id='"+reflType+"net' name='"+reflType+"net'></select>";
   html += "&nbsp;<select id='"+reflType+"netmod'>";
-  for (x=65;x<65+26;x++)
+  for (x=65;x<65+26;x++) /* Load module dropdown with ASCII letters A -> Z */
     html += "<option value='"+String.fromCharCode(x)+"'>"+String.fromCharCode(x)+"</option>";
   html += "</select>";
   html += "&nbsp;<button id='"+reflType+"link' class='linkto' onclick='reflConnect(\""+reflType+"\")'>Link</button>";
@@ -1562,10 +1702,21 @@ function createReflDropDown(reflType)
 /* Create and display map centered on current GSP coordinates */
 function createMap(lat, long)
 {
-  var mapOptions = {
-                     center: [lat, long],
-                     zoom: 10
-                   }
+  var mapOptions;
+  if (lat == 0.0 && long == 0.0)
+  {
+    mapOptions = {
+                   center: [lat, long],
+                   zoom: 1
+                 }
+  }
+  else
+  {
+    mapOptions = {
+                   center: [lat, long],
+                   zoom: 10
+                 }
+  }
 
   if (map)
   {
@@ -1632,7 +1783,7 @@ function addMessage(source, message)
 <div class='banner'>
   <span id='banner'>
     <span id=dashTitle>Modem Dashboard</span><br>
-    <span id=dashTitle2 style='font-size:14;'>Version 1.0 beta</span>
+    <span id=dashTitle2 style='font-size:14px;'>OpenMT Version 1.0 beta</span>
   </span>
 
   <span class='lclock' id='lclock'></span>
@@ -1648,9 +1799,10 @@ function addMessage(source, message)
   <div id='maintab' class='tabcontent'>
     <div class='currentComm'>
       <table class='currentCall' id='currentCall'>
-        <tr><th>Call</th><th>Message</th><th>Mode</th><th>Destination</th></tr>
-        <tr id='rtx'><td id='srcCall'></td><td id='metaText'></td><td id='cmode'></td><td id='dstCall'></td></tr>
-      </table>
+        <tr><th>Call</th><th>Text</th><th>Mode</th><th>Destination</th></tr>
+        <tr id='rtx1'><td id='srcCall1'></td><td id='metaText1'></td><td id='cmode1'></td><td id='dstCall1'></td></tr>
+        <tr id='rtx2' style="display: none;"><td id='srcCall2'></td><td id='metaText2'></td><td id='cmode2'></td><td id='dstCall2'></td></tr>
+        </table>
       <table id='modeData' class='modeData'>
         <tr>
           <td id='messages' class='messages'><span class='messageSpan'>Messages:<br><table id='messageTable' class='messageTable'></table></span></td>
@@ -1661,7 +1813,7 @@ function addMessage(source, message)
 
     <div id='lastheardDiv' class='lastheardDiv'>
         <table id='lastheard' class='lastheard'>
-          <tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Message</th><th>Destination</th><th>Mode</th><th>Loss/BER</th><th>Len(secs)</th></tr>
+          <tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER</th><th>Len(secs)</th></tr>
           <tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
         </table>
     </div>
@@ -1681,9 +1833,9 @@ function addMessage(source, message)
         <input id='callsign' type='text' size='8' maxlength='8'>
         <span class='settingsLocation'>
           <label for='station_latitude'>Latitude:</label>
-          <input id='station_latitude' type='float' value='0.0'><br><br>
+          <input id='station_latitude' type='number' step='any' value='0.0'><br><br>
           <label for='station_longitude'>Longitude:</label>
-          <input id='station_longitude' type='float' value='0.0'>
+          <input id='station_longitude' type='number' step='any' value='0.0'>
         </span>
         <button class='genSaveButton' onclick='saveGeneral()'>Save</button>
         <span class='settingsauth'>
@@ -1703,10 +1855,11 @@ function addMessage(source, message)
      <span class='modemSettings'>
         <label for='deviceType'>Device Type:</label>
         <select id='deviceType' name='devtype'>
-          <option value="Module17">Module17</option>
+          <option value="openmt">OpenMT</option>
+          <option value="openmths">OpenMT_HS</option>
           <option value="mmdvm">MMDVM</option>
           <option value="mmdvmhs">MMDVM_HS</option>
-        </select>
+          </select>
         <label for='commPort'>Comm Port:</label>
         <select id='commPort' name='commPort'>
           <option value="ttyACM0">ttyACM0</option>
@@ -1727,7 +1880,8 @@ function addMessage(source, message)
           <option value="115200">115200</option>
           <option value="230400">230400</option>
           <option value="460800">460800</option>
-        </select>
+          <option value="921600">921600</option>
+          </select>
         <label for='mode'>Mode:</label>
         <select id='mode' name='mode'>
           <option value="simplex">Simplex</option>

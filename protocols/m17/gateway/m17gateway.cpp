@@ -27,12 +27,8 @@
 #include <termios.h>
 #include <string.h>
 #include <cstdint>
-#include <vector>
 #include <fcntl.h>
 #include <pthread.h>
-#include <iostream>
-#include <sstream>
-#include <signal.h>
 #include <time.h>
 
 #include <sys/stat.h>
@@ -46,10 +42,11 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#include "../../tools/CRingBuffer.h"
-#include "../../tools/tools.h"
+extern "C" {
+#include <RingBuffer.h>  /* C RingBuffer */
+#include <tools.h>
+}
 
-#include <M17/M17Callsign.hpp>
 #include <M17/M17LinkSetupFrame.hpp>
 #include <M17/M17Datatypes.hpp>
 #include <M17/M17Callsign.hpp>
@@ -75,8 +72,11 @@ using namespace M17;
 
 pthread_t m17Reflid;
 pthread_t clientid;
+pthread_t txid;
 
-int      clientPort        = 18100;
+uint8_t  modemId           = 1;          //< Modem Id used to create modem name.
+char     modemName[10]     = "modem1";   //< Modem name that this program is associated with.
+int      clientPort        = 18200;
 char     M17Name[8]        = "";
 char     M17Module[2]      = "T";
 char     metaText[53]      = "";
@@ -107,8 +107,13 @@ M17::M17LinkSetupFrame pkt_lsf;      ///< M17 packet link setup frame
 M17::M17FrameDecoder   decoder;      ///< M17 frame decoder
 M17::M17FrameEncoder   encoder;      ///< M17 frame encoder
 
-RingBuffer<uint8_t> reflTxBuffer(3600);
-RingBuffer<uint8_t> txBuffer(3300);
+/* C RingBuffer - for future C conversion */
+RingBuffer reflTxBuffer;
+RingBuffer txBuffer;
+
+pthread_mutex_t txBufMutex     = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t reflTxBufMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t stateMutex     = PTHREAD_MUTEX_INITIALIZER;
 
 const int   magicLen             = 4;
 const char *magicACKN           = "ACKN";
@@ -272,24 +277,45 @@ void* txThread(void *arg)
 
         if (loop > 100)
         {
-            if (txBuffer.dataSize() >= 5)
+            pthread_mutex_lock(&txBufMutex);
+            uint32_t avail = RingBuffer_dataSize(&txBuffer);
+            pthread_mutex_unlock(&txBufMutex);
+
+            if (avail >= 5)
             {
                 uint8_t buf[1];
-                txBuffer.peek(buf, 1);
+
+                pthread_mutex_lock(&txBufMutex);
+                RingBuffer_peek(&txBuffer, buf, 1);
+                pthread_mutex_unlock(&txBufMutex);
+
                 if (buf[0] != 0x61)
                 {
                     fprintf(stderr, "TX invalid header.\n");
+                    pthread_mutex_lock(&txBufMutex);
+                    RingBuffer_getData(&txBuffer, buf, 1);
+                    pthread_mutex_unlock(&txBufMutex);
+                    loop = 0;
                     continue;
                 }
                 uint8_t  byte[3];
                 uint16_t len = 0;
-                txBuffer.peek(byte, 3);
-                len = (byte[1] << 8) + byte[2];;
-                if (txBuffer.dataSize() >= len)
+
+                pthread_mutex_lock(&txBufMutex);
+                RingBuffer_peek(&txBuffer, byte, 3);
+                avail = RingBuffer_dataSize(&txBuffer);
+                pthread_mutex_unlock(&txBufMutex);
+
+                len = (byte[1] << 8) + byte[2];
+                if (avail >= len)
                 {
-                    uint8_t buf[len];
-                    txBuffer.getData(buf, len);
-                    if (write(sockfd, buf, len) < 0)
+                    uint8_t tbuf[len];
+
+                    pthread_mutex_lock(&txBufMutex);
+                    RingBuffer_getData(&txBuffer, tbuf, len);
+                    pthread_mutex_unlock(&txBufMutex);
+
+                    if (write(sockfd, tbuf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
                         break;
@@ -300,9 +326,12 @@ void* txThread(void *arg)
             loop = 0;
         }
     }
+
     fprintf(stderr, "TX thread exited.\n");
     int iRet = 500;
+    pthread_mutex_lock(&stateMutex);
     connected = false;
+    pthread_mutex_unlock(&stateMutex);
     pthread_exit(&iRet);
     return NULL;
 }
@@ -314,6 +343,7 @@ void *connectM17Refl(void *argv)
     int hostfd;
     int serverlen;
     int timeout = 0;
+    int pttTimeout = 0;
     uint16_t fn = 0;
     struct sockaddr_in serveraddr;
     struct hostent *server;
@@ -325,6 +355,7 @@ void *connectM17Refl(void *argv)
 
     sscanf((char*)argv, "%d %s %s %s %d", &hostfd, source, hostname, module, &portno);
     printf("%s  %s  %s  %d\n", source, hostname, module, portno);
+    free(argv);  /* free heap buffer allocated by connectToRefl */
     rptrCallsign = source;
 
     /* socket: create the socket */
@@ -334,9 +365,12 @@ void *connectM17Refl(void *argv)
 
     /* gethostbyname: get the server's DNS entry */
     server = gethostbyname(hostname);
-    if (server == NULL) {
-        fprintf(stderr,"ERROR, no such host as %s\n", hostname);
-        exit(0);
+    if (server == NULL)
+    {
+        fprintf(stderr, "ERROR, no such host as %s\n", hostname);
+        int iRet = 100;
+        pthread_exit(&iRet);
+        return NULL;
     }
 
     struct timeval read_timeout;
@@ -372,12 +406,16 @@ void *connectM17Refl(void *argv)
         fprintf(stderr, "Entering M17 reflector comm loop.\n");
 
     sleep(1);
+    pthread_mutex_lock(&stateMutex);
     m17ReflConnected = false;
+    pthread_mutex_unlock(&stateMutex);
     buf[0] = 0x61;
     buf[1] = 0x00;
     buf[2] = 0x10;
     buf[3] = 0x04;
-    txBuffer.addData(buf, 4);
+    pthread_mutex_lock(&txBufMutex);
+    RingBuffer_addData(&txBuffer, buf, 4);
+    pthread_mutex_unlock(&txBufMutex);
 
     bzero(buf, 1024);
     n = recvfrom(sockfd, buf, 1023, 0, (struct sockaddr*)&serveraddr, (socklen_t*)&serverlen);
@@ -391,13 +429,17 @@ void *connectM17Refl(void *argv)
 
         if (memcmp(magic, magicACKN, 4) == 0)
         {
+            pthread_mutex_lock(&stateMutex);
             m17ReflConnected = true;
+            pthread_mutex_unlock(&stateMutex);
             uint8_t tmp[4];
             tmp[0] = TYPE_CONNECT[0];
             tmp[1] = TYPE_CONNECT[1];
             tmp[2] = TYPE_CONNECT[2];
             tmp[3] = TYPE_CONNECT[3];
-            txBuffer.addData(tmp, 4);
+            pthread_mutex_lock(&txBufMutex);
+            RingBuffer_addData(&txBuffer, tmp, 4);
+            pthread_mutex_unlock(&txBufMutex);
         }
         else
         {
@@ -406,7 +448,9 @@ void *connectM17Refl(void *argv)
             tmp[1] = TYPE_NACK[1];
             tmp[2] = TYPE_NACK[2];
             tmp[3] = TYPE_NACK[3];
-            txBuffer.addData(tmp, 4);
+            pthread_mutex_lock(&txBufMutex);
+            RingBuffer_addData(&txBuffer, tmp, 4);
+            pthread_mutex_unlock(&txBufMutex);
         }
     }
     else
@@ -416,16 +460,23 @@ void *connectM17Refl(void *argv)
         tmp[1] = TYPE_NACK[1];
         tmp[2] = TYPE_NACK[2];
         tmp[3] = TYPE_NACK[3];
-        txBuffer.addData(tmp, 4);
+        pthread_mutex_lock(&txBufMutex);
+        RingBuffer_addData(&txBuffer, tmp, 4);
+        pthread_mutex_unlock(&txBufMutex);
     }
 
-    txBuffer.addData((uint8_t*)M17Name, 7);
-    txBuffer.addData((uint8_t*)M17Module, 1);
+    replace_char(M17Name, 7, 0, ' ');
+    pthread_mutex_lock(&txBufMutex);
+    RingBuffer_addData(&txBuffer, (uint8_t*)M17Name, 7);
+    RingBuffer_addData(&txBuffer, (uint8_t*)M17Module, 1);
+    pthread_mutex_unlock(&txBufMutex);
 
     M17::M17LinkSetupFrame lsf;
     M17::M17FrameEncoder   encoder;      ///< M17 frame encoder
-    lsf.clear();
+    /* lsf is C++ object, no clear needed */
+    pthread_mutex_lock(&stateMutex);
     m17ReflDisconnect = false;
+    pthread_mutex_unlock(&stateMutex);
 
     while (m17ReflConnected)
     {
@@ -442,13 +493,25 @@ void *connectM17Refl(void *argv)
             memcpy(magic, buf, 4);
 
             if (memcmp(magic, magicACKN, 4) == 0)
+            {
+                pthread_mutex_lock(&stateMutex);
                 m17ReflConnected = true;
+                pthread_mutex_unlock(&stateMutex);
+            }
 
             if (memcmp(magic, magicNACK, 4) == 0)
+            {
+                pthread_mutex_lock(&stateMutex);
                 m17ReflConnected = false;
+                pthread_mutex_unlock(&stateMutex);
+            }
 
             if (memcmp(magic, magicDISC, 4) == 0)
+            {
+                pthread_mutex_lock(&stateMutex);
                 m17ReflConnected = false;
+                pthread_mutex_unlock(&stateMutex);
+            }
 
             if (memcmp(magic, magicPING, 4) == 0)
             {
@@ -464,18 +527,29 @@ void *connectM17Refl(void *argv)
                     dump((char*)"M17 Refl send data:", (uint8_t*)buf, n);
             }
 
-            if (memcmp(magic, magicM17Voice, 4) == 0 && !txOn)
+            pthread_mutex_lock(&stateMutex);
+            bool isTxOn = txOn;
+            pthread_mutex_unlock(&stateMutex);
+
+            if (memcmp(magic, magicM17Voice, 4) == 0 && !isTxOn)
             {
-                if (txBuffer.freeSpace() < 52)
+                pthread_mutex_lock(&txBufMutex);
+                uint32_t txAvail = RingBuffer_freeSpace(&txBuffer);
+                pthread_mutex_unlock(&txBufMutex);
+
+                if (txAvail < 52)
                 {
                     uint8_t tmp[1];
-                    txBuffer.peek(tmp, 1);
+                    pthread_mutex_lock(&txBufMutex);
+                    RingBuffer_peek(&txBuffer, tmp, 1);
+                    pthread_mutex_unlock(&txBufMutex);
                     fprintf(stderr, "**********************Buffer full [%02X]\n", tmp[0]);
                     continue;
                 }
                 if (debugM)
                     dump((char*)"M17 Refl recv data:", (uint8_t*)buf, n);
 
+                pttTimeout = 0;
                 SM17Frame sf;
                 memcpy((uint8_t*)&sf, buf, sizeof(sf));
                 memcpy((uint8_t*)lsf.getData(), sf.lich.addr_dst, 6);
@@ -506,9 +580,11 @@ void *connectM17Refl(void *argv)
                     tmp[1] = 0x00;
                     tmp[2] = len;
                     tmp[3] = 0x04;
-                    txBuffer.addData(tmp, 4);
-                    txBuffer.addData((uint8_t*)TYPE_LSF, 4);
-                    txBuffer.addData(m17Frame.data(), 48);
+                    pthread_mutex_lock(&txBufMutex);
+                    RingBuffer_addData(&txBuffer, tmp, 4);
+                    RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_LSF, 4);
+                    RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+                    pthread_mutex_unlock(&txBufMutex);
                     strcpy(tx_state, "on");
                 }
                 payload_t dataFrame;
@@ -521,9 +597,11 @@ void *connectM17Refl(void *argv)
                 tmp[1] = 0x00;
                 tmp[2] = len;
                 tmp[3] = 0x04;
-                txBuffer.addData(tmp, 4);
-                txBuffer.addData((uint8_t*)TYPE_STREAM, 4);
-                txBuffer.addData(m17Frame.data(), 48);
+                pthread_mutex_lock(&txBufMutex);
+                RingBuffer_addData(&txBuffer, tmp, 4);
+                RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_STREAM, 4);
+                RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+                pthread_mutex_unlock(&txBufMutex);
                 if (debugM)
                     printf("FN: %04X\n", sf.framenumber);
                 if ((sf.framenumber & 0x0080) == 0x0080)
@@ -533,28 +611,33 @@ void *connectM17Refl(void *argv)
                     tmp[1] = 0x00;
                     tmp[2] = len;
                     tmp[3] = 0x04;
-                    txBuffer.addData(tmp, 4);
-                    txBuffer.addData((uint8_t*)TYPE_STREAM, 4);
-                    txBuffer.addData(m17Frame.data(), 48);
+                    pthread_mutex_lock(&txBufMutex);
+                    RingBuffer_addData(&txBuffer, tmp, 4);
+                    RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_STREAM, 4);
+                    RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+                    pthread_mutex_unlock(&txBufMutex);
                     duration = difftime(time(NULL), start_time);
                     strcpy(tx_state, "off");
 
-                    lsf.clear();
+                    /* lsf is C++ object, no clear needed */
                     encoder.encodeEotFrame(m17Frame);
                     tmp[0] = 0x61;
                     len = 48 + 4 + 4;
                     tmp[1] = 0x00;
                     tmp[2] = len;
                     tmp[3] = 0x04;
-                    txBuffer.addData(tmp, 4);
-                    txBuffer.addData((uint8_t*)TYPE_EOT, 4);
-                    txBuffer.addData(m17Frame.data(), 48);
+                    pthread_mutex_lock(&txBufMutex);
+                    RingBuffer_addData(&txBuffer, tmp, 4);
+                    RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_EOT, 4);
+                    RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+                    pthread_mutex_unlock(&txBufMutex);
                 }
                 timeout = 0;
             }
 
-            if (memcmp(magic, magicM17Packet, 4) == 0 && !txOn)
+            if (memcmp(magic, magicM17Packet, 4) == 0 && !isTxOn)
             {
+                pttTimeout = 0;
                 uint8_t len = 0;
                 strcpy(tx_state, "on");
                 SM17Packet sp;
@@ -585,9 +668,11 @@ void *connectM17Refl(void *argv)
                 tmp[1] = 0x00;
                 tmp[2] = len;
                 tmp[3] = 0x04;
-                txBuffer.addData(tmp, 4);
-                txBuffer.addData((uint8_t*)TYPE_LSF, 4);
-                txBuffer.addData(m17Frame.data(), 48);
+                pthread_mutex_lock(&txBufMutex);
+                RingBuffer_addData(&txBuffer, tmp, 4);
+                RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_LSF, 4);
+                RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+                pthread_mutex_unlock(&txBufMutex);
                 timeout = 0;
 
                 memset(packetData, 0, 823);
@@ -617,9 +702,11 @@ void *connectM17Refl(void *argv)
                     tmp[1] = 0x00;
                     tmp[2] = len;
                     tmp[3] = 0x04;
-                    txBuffer.addData(tmp, 4);
-                    txBuffer.addData((uint8_t*)TYPE_PACKET, 4);
-                    txBuffer.addData(m17Frame.data(), 48);
+                    pthread_mutex_lock(&txBufMutex);
+                    RingBuffer_addData(&txBuffer, tmp, 4);
+                    RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_PACKET, 4);
+                    RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+                    pthread_mutex_unlock(&txBufMutex);
                     cnt++;
                     numPacketbytes -= 25;
                 }
@@ -634,9 +721,11 @@ void *connectM17Refl(void *argv)
                 tmp[1] = 0x00;
                 tmp[2] = len;
                 tmp[3] = 0x04;
-                txBuffer.addData(tmp, 4);
-                txBuffer.addData((uint8_t*)TYPE_PACKET, 4);
-                txBuffer.addData(m17Frame.data(), 48);
+                pthread_mutex_lock(&txBufMutex);
+                RingBuffer_addData(&txBuffer, tmp, 4);
+                RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_PACKET, 4);
+                RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+                pthread_mutex_unlock(&txBufMutex);
 
                 encoder.encodeEotFrame(m17Frame);
 
@@ -645,34 +734,48 @@ void *connectM17Refl(void *argv)
                 tmp[1] = 0x00;
                 tmp[2] = len;
                 tmp[3] = 0x04;
-                txBuffer.addData(tmp, 4);
-                txBuffer.addData((uint8_t*)TYPE_EOT, 4);
-                txBuffer.addData(m17Frame.data(), 48);
+                pthread_mutex_lock(&txBufMutex);
+                RingBuffer_addData(&txBuffer, tmp, 4);
+                RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_EOT, 4);
+                RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+                pthread_mutex_unlock(&txBufMutex);
 
                 strcpy(tx_state, "off");
             }
         }
 
-        if (m17ReflDisconnect)
+        pthread_mutex_lock(&stateMutex);
+        bool doDisconnect = m17ReflDisconnect;
+        pthread_mutex_unlock(&stateMutex);
+
+        if (doDisconnect)
         {
             strcpy((char*)buf, magicDISC);
             memcpy(buf+4, srcCall.data(), 6);
             n = sendto(sockfd, buf, 10, 0, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
             if (n < 0)
                 error((char*)"ERROR in sendto");
+            pthread_mutex_lock(&stateMutex);
             m17ReflConnected = false;
+            pthread_mutex_unlock(&stateMutex);
         }
 
-        if (reflTxBuffer.dataSize() >= 18)
+        pthread_mutex_lock(&reflTxBufMutex);
+        uint32_t reflAvail = RingBuffer_dataSize(&reflTxBuffer);
+        pthread_mutex_unlock(&reflTxBufMutex);
+
+        if (reflAvail >= 18)
         {
             SM17Frame sf;
             strcpy((char*)sf.magic, magicM17Voice);
             sf.streamid = (streamId >> 8) | ((streamId & 0xff) << 8);
             memcpy((uint8_t*)&sf.lich, rx_lsf.getData(), 28);
             uint8_t tmp[2];
-            reflTxBuffer.getData(tmp, 2);
+            pthread_mutex_lock(&reflTxBufMutex);
+            RingBuffer_getData(&reflTxBuffer, tmp, 2);
+            RingBuffer_getData(&reflTxBuffer, sf.payload, 16);
+            pthread_mutex_unlock(&reflTxBufMutex);
             sf.framenumber = (tmp[1] << 8) | tmp[0];
-            reflTxBuffer.getData(sf.payload, 16);
             if (debugM)
                 fprintf(stderr, "FN: %d\n", (tmp[0] << 8) | tmp[1]);
             sf.crc = rx_lsf.m17Crc((uint8_t*)&sf, sizeof(sf) - 2);
@@ -683,7 +786,11 @@ void *connectM17Refl(void *argv)
                dump((char*)"M17 Refl send data:", (uint8_t*)&sf, n);
         }
 
-        if (reflPacketRdy)
+        pthread_mutex_lock(&stateMutex);
+        bool pktRdy = reflPacketRdy;
+        pthread_mutex_unlock(&stateMutex);
+
+        if (pktRdy)
         {
             strcpy((char*)buf, magicM17Packet);
             memcpy(buf+4, rx_lsf.getData(), 30);
@@ -696,45 +803,61 @@ void *connectM17Refl(void *argv)
                 error((char*)"ERROR in sendto");
             if (debugM)
                dump((char*)"M17 Refl send data:", (uint8_t*)buf, n);
+            pthread_mutex_lock(&stateMutex);
             reflPacketRdy = false;
+            pthread_mutex_unlock(&stateMutex);
+            timeout = 0;
         }
 
-        delay(1000);
-
-        if (strcmp(tx_state, "on") == 0 && timeout >= 300000) // 5 minutes
+        if (strcmp(tx_state, "on") == 0 && pttTimeout >= 5000) // 5 seconds
         {
             strcpy(tx_state, "off");
-            lsf.clear();
+            /* lsf is C++ object, no clear needed */
             frame_t m17Frame;
             encoder.encodeEotFrame(m17Frame);
             uint8_t len = 48 + 4 + 4;
-            uint8_t tmp[len];
+            uint8_t tmp[4];
             tmp[0] = 0x61;
             tmp[1] = 0x00;
             tmp[2] = len;
             tmp[3] = 0x04;
-            txBuffer.addData(tmp, 4);
-            txBuffer.addData((uint8_t*)TYPE_EOT, 4);
-            txBuffer.addData(m17Frame.data(), 48);
+            pthread_mutex_lock(&txBufMutex);
+            RingBuffer_addData(&txBuffer, tmp, 4);
+            RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_EOT, 4);
+            RingBuffer_addData(&txBuffer, m17Frame.data(), 48);
+            pthread_mutex_unlock(&txBufMutex);
         }
+
+        if (strcmp(tx_state, "on") == 0)
+            pttTimeout++;
 
         if (timeout > 5000) // 5 seconds
             break;
         else
             timeout++;
+
+        delay(1000);
     }
+
     uint8_t tmp[4];
     tmp[0] = 0x61;
     tmp[1] = 0x00;
-    tmp[2] = 0x0F;
+    tmp[2] = 0x10;
     tmp[3] = 0x04;
-    txBuffer.addData(tmp, 4);
-    txBuffer.addData((uint8_t*)TYPE_DISCONNECT, 4);
-    txBuffer.addData((uint8_t*)M17Name, 7);
-    close(sockfd);
+    pthread_mutex_lock(&txBufMutex);
+    RingBuffer_addData(&txBuffer, tmp, 4);
+    RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_DISCONNECT, 4);
+    replace_char(M17Name, 7, 0, ' ');
+    RingBuffer_addData(&txBuffer, (uint8_t*)M17Name, 7);
+    RingBuffer_addData(&txBuffer, (uint8_t*)M17Module, 1);
+    pthread_mutex_unlock(&txBufMutex);
+    pthread_mutex_lock(&stateMutex);
+    m17ReflConnected = false;
+    pthread_mutex_unlock(&stateMutex);
     sleep(1);
+    close(sockfd);
     fprintf(stderr, "Disconnected from M17 reflector.\n");
-     int iRet = 100;
+    int iRet = 100;
     pthread_exit(&iRet);
     return 0;
 }
@@ -742,14 +865,21 @@ void *connectM17Refl(void *argv)
 // Start up reflector threads.
 void connectToRefl(int sockfd, char *source, char *reflector, char *module, uint16_t port)
 {
-    static char server[80] = "";
-
+    pthread_mutex_lock(&stateMutex);
     m17ReflDisconnect = true;
+    pthread_mutex_unlock(&stateMutex);
     sleep(1);
 
+    /* Heap-allocate so connectM17Refl always has a stable buffer even if
+       connectToRefl is called again before the old thread exits. */
+    char *server = (char*)malloc(120);
+    if (!server)
+    {
+        fprintf(stderr, "connectToRefl: malloc failed\n");
+        return;
+    }
     sprintf(server, "%d %s %s %s %d", sockfd, source, reflector, module, port);
 
-    pthread_t txid;
     int err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)sockfd);
     if (err != 0)
        fprintf(stderr, "Can't create tx thread :[%s]", strerror(err));
@@ -760,11 +890,15 @@ void connectToRefl(int sockfd, char *source, char *reflector, char *module, uint
     }
     err = pthread_create(&(m17Reflid), NULL, &connectM17Refl, server);
     if (err != 0)
+    {
         fprintf(stderr, "Can't create M17 reflector thread :[%s]", strerror(err));
+        free(server);
+    }
     else
     {
         if (debugM)
             fprintf(stderr, "M17 reflector thread created successfully\n");
+        /* server will be freed by connectM17Refl when it exits */
     }
 }
 
@@ -889,15 +1023,18 @@ void* startClient(void *arg)
 
         if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
         {
-            if (!m17ReflConnected)
+            pthread_mutex_lock(&stateMutex);
+            bool reflConn = m17ReflConnected;
+            pthread_mutex_unlock(&stateMutex);
+            if (!reflConn)
             {
-                char source[7];
-                bzero(source, 7);
+                char source[9];
+                bzero(source, 9);
                 bzero(M17Name, 8);
                 bzero(M17Module, 2);
-                memcpy(source, buffer+8, 6);
-                memcpy(M17Name, buffer+14, 7);
-                memcpy(M17Module, buffer+21, 1);
+                memcpy(source, buffer+8, 8);
+                memcpy(M17Name, buffer+16, 7);
+                memcpy(M17Module, buffer+23, 1);
                 fprintf(stderr, "Name: %s  Mod: %s\n", M17Name, M17Module);
                 char url[80];
                 char ipaddr[15];
@@ -910,17 +1047,22 @@ void* startClient(void *arg)
         }
         else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
         {
+            pthread_mutex_lock(&stateMutex);
             m17ReflDisconnect = true;
+            pthread_mutex_unlock(&stateMutex);
         }
         else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
         {
         }
         else if (memcmp(type, TYPE_LSF, typeLen) == 0)
         {
-            if (!txOn)
+            pthread_mutex_lock(&stateMutex);
+            bool isTxOn = txOn;
+            pthread_mutex_unlock(&stateMutex);
+            if (!isTxOn)
             {
                 decoder.reset();
-                rx_lsf.clear();
+                /* rx_lsf is C++ object, no clear needed */
                 streamId = (rand() & 0x7ff);
             }
             frame_t frame;
@@ -940,11 +1082,16 @@ void* startClient(void *arg)
             lsfOk   = rx_lsf.valid();
             if (lsfOk)
             {
+                pthread_mutex_lock(&stateMutex);
                 txOn = true;
+                bool reflConn = m17ReflConnected;
+                pthread_mutex_unlock(&stateMutex);
                 M17StreamFrame sf = decoder.getStreamFrame();
-                if (m17ReflConnected)
+                if (reflConn)
                 {
-                    reflTxBuffer.addData(sf.getData(), 18);
+                    pthread_mutex_lock(&reflTxBufMutex);
+                    RingBuffer_addData(&reflTxBuffer, sf.getData(), 18);
+                    pthread_mutex_unlock(&reflTxBufMutex);
                 }
             }
         }
@@ -967,7 +1114,9 @@ void* startClient(void *arg)
                     totalSMSMessages = 0;
                     memset(packetData, 0, 821);
                     fprintf(stderr, "Packet data detected.\n");
+                    pthread_mutex_lock(&stateMutex);
                     txOn = true;
+                    pthread_mutex_unlock(&stateMutex);
                 }
 
                 // store next frame of message
@@ -996,8 +1145,11 @@ void* startClient(void *arg)
                             memset(tmp, 0, totalSMSLength-3);
                             memcpy(tmp, &packetData[1], totalSMSLength-3);
                             strcpy((char*)packetData, tmp);
+                            free(tmp);
                             totalSMSMessages++;
+                            pthread_mutex_lock(&stateMutex);
                             reflPacketRdy = true;
+                            pthread_mutex_unlock(&stateMutex);
                         }
                         else
                         {   // if message memory allocation fails, crc does not match
@@ -1012,7 +1164,9 @@ void* startClient(void *arg)
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
+            pthread_mutex_lock(&stateMutex);
             txOn = false;
+            pthread_mutex_unlock(&stateMutex);
             lsfOk = false;
         }
 
@@ -1021,7 +1175,9 @@ void* startClient(void *arg)
     fprintf(stderr, "Client thread exited.\n");
     close(sockfd);
     int iRet = 100;
+    pthread_mutex_lock(&stateMutex);
     connected = false;
+    pthread_mutex_unlock(&stateMutex);
     pthread_exit(&iRet);
     return 0;
 }
@@ -1032,10 +1188,26 @@ int main(int argc, char **argv)
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, "dvx")) != -1)
+    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
     {
         switch (c)
         {
+            case 'm':
+            {
+                modemId = atoi(optarg);
+                if (modemId < 1 || modemId > 10)
+                {
+                    fprintf(stderr, "Invalid modem number.\n");
+                    return 1;
+                }
+                sprintf(modemName, "modem%d", modemId);
+                clientPort = 18200 + modemId - 1;
+                fprintf(stderr, "Modem name: %s\n", modemName);
+            }
+            break;
+            case ':':
+                fprintf(stderr, "Option 'm' requires modem number.\n");
+                return 1;
             case 'd':
                 daemon = true;
                 break;
@@ -1046,7 +1218,7 @@ int main(int argc, char **argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: M17_Gateway [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: M17_Gateway [-m modem_number (1-10)] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1071,6 +1243,10 @@ int main(int argc, char **argv)
         umask(0);
     }
 
+    /* Initialize C RingBuffers - for future C conversion */
+    RingBuffer_Init(&reflTxBuffer, 800);
+    RingBuffer_Init(&txBuffer, 800);
+
     int err = pthread_create(&(clientid), NULL, &startClient, m17Host);
     if (err != 0)
     {
@@ -1089,6 +1265,12 @@ int main(int argc, char **argv)
          if (!connected)
              break;
     }
+    
+    /* Cleanup C RingBuffers */
+    RingBuffer_Destroy(&reflTxBuffer);
+    RingBuffer_Destroy(&txBuffer);
+    
     fprintf(stderr, "M17 Gateway terminated.\n");
-    logError("main", "M17 Gateway terminated.");
+    logError(modemName, "main", "M17 Gateway terminated.");
+    return 0;
 }

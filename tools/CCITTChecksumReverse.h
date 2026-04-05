@@ -11,31 +11,43 @@
  *	GNU General Public License for more details.
  */
 
-#ifndef	CCITTChecksumReverse_H
-#define	CCITTChecksumReverse_H
+#ifndef CCITT_CHECKSUM_REVERSE_H
+#define CCITT_CHECKSUM_REVERSE_H
 
+#include <stdbool.h>
 
-class CCCITTChecksumReverse {
-public:
-	CCCITTChecksumReverse();
-	~CCCITTChecksumReverse();
-
-	void update(const unsigned char* data, unsigned int length);
-	void update(const bool* data);
-
-	void result(unsigned char* data);
-	void result(bool* data);
-
-	bool check(const unsigned char* data);
-	bool check(const bool* data);
-
-	void reset();
-
-private:
-	union {
-		unsigned int  m_crc16;
-		unsigned char m_crc8[2U];
-	};
-};
-
+#ifdef __cplusplus
+extern "C" {
 #endif
+
+/* CCITT Checksum (CRC-16-CCITT) structure */
+typedef struct
+{
+    union
+    {
+        unsigned int  crc16;
+        unsigned char crc8[2];
+    };
+} CCITTChecksumReverse;
+
+/* Utility functions for bit/byte conversion */
+unsigned char bitsToByte(const bool* bits);
+unsigned char bitsToByteRev(const bool* bits);
+void byteToBits(unsigned char byte, bool* data);
+void byteToBitsRev(unsigned char byte, bool* data);
+
+/* CCITT Checksum functions */
+void ccitt_checksum_init(CCITTChecksumReverse *checksum);
+void ccitt_checksum_update_bytes(CCITTChecksumReverse *checksum, const unsigned char* data, unsigned int length);
+void ccitt_checksum_update_bits(CCITTChecksumReverse *checksum, const bool* data);
+void ccitt_checksum_result_bytes(CCITTChecksumReverse *checksum, unsigned char* data);
+void ccitt_checksum_result_bits(CCITTChecksumReverse *checksum, bool* data);
+bool ccitt_checksum_check_bytes(CCITTChecksumReverse *checksum, const unsigned char* data);
+bool ccitt_checksum_check_bits(CCITTChecksumReverse *checksum, const bool* data);
+void ccitt_checksum_reset(CCITTChecksumReverse *checksum);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CCITT_CHECKSUM_REVERSE_H */

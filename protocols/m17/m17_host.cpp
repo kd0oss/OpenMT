@@ -21,19 +21,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <strings.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <errno.h>
 #include <termios.h>
 #include <string.h>
-#include <cstdint>
-#include <type_traits>
-#include <vector>
 #include <fcntl.h>
 #include <pthread.h>
-#include <iostream>
-#include <sstream>
-#include <signal.h>
 #include <time.h>
 
 #include <sys/stat.h>
@@ -47,7 +42,6 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 
-#include <M17/M17Callsign.hpp>
 #include <M17/M17LinkSetupFrame.hpp>
 #include <M17/M17Datatypes.hpp>
 #include <M17/M17Callsign.hpp>
@@ -65,8 +59,13 @@
 #include <M17/M17Viterbi.hpp>
 #include <M17/Synchronizer.hpp>
 
-#include "../../tools/tools.h"
-#include "../../tools/CRingBuffer.h"
+extern "C" {
+#include <tools.h>
+#include <RingBuffer.h>  /* C RingBuffer - use extern C for linkage */
+#include <ADF7021.h>
+}
+
+#include <arm_math.h>
 
 using namespace std;
 using namespace M17;
@@ -76,11 +75,13 @@ using namespace M17;
 
 // Mode specific data sent to configure modem. Data from MMDVM project by Jonathan Naylor G4KLX
 //================================================================================================================================
-static int16_t TX_RRC_0_5_FILTER[] = {0, 0, 0, 0, -290, -174, 142, 432, 438, 90, -387, -561, -155, 658, 1225, 767,
+q31_t          DC_FILTER[]      = {3367972, 0, 3367972, 0, 2140747704, 0}; // {b0, 0, b1, b2, -a1, -a2}
+const uint32_t DC_FILTER_STAGES = 1U; // One Biquad stage
+const int16_t  TX_RRC_0_5_FILTER[] = {0, 0, 0, 0, -290, -174, 142, 432, 438, 90, -387, -561, -155, 658, 1225, 767,
 				  -980, -3326, -4648, -3062, 2527, 11552, 21705, 29724, 32767, 29724, 21705,
 				  11552, 2527, -3062, -4648, -3326, -980, 767, 1225, 658, -155, -561, -387, 90,
 				  438, 432, 142, -174, -290}; // numTaps = 45, L = 5
-static int16_t RX_RRC_0_5_FILTER[] = {-147, -88, 72, 220, 223, 46, -197, -285, -79, 334, 623, 390, -498, -1691, -2363, -1556, 1284, 5872, 11033,
+const int16_t  RX_RRC_0_5_FILTER[] = {-147, -88, 72, 220, 223, 46, -197, -285, -79, 334, 623, 390, -498, -1691, -2363, -1556, 1284, 5872, 11033,
 				  15109, 16656, 15109, 11033, 5872, 1284, -1556, -2363, -1691, -498, 390, 623, 334, -79, -285, -197, 46, 223,
 				  220, 72, -88, -147, 0};
 const uint8_t  RX_RRC_0_5_FILTER_LEN       = 42;
@@ -94,6 +95,135 @@ char           MODEM_TYPE[6]               = "4FSK";
 bool           USE_DC_FILTER               = true;
 bool           USE_LP_FILTER               = false;
 //================================================================================================================================
+const q15_t SCALING_FACTOR = 18750;      // Q15(0.55)
+
+const uint8_t MAX_SYNC_BIT_START_ERRS = 0U;
+const uint8_t MAX_SYNC_BIT_RUN_ERRS   = 2U;
+
+const uint8_t MAX_SYNC_SYMBOL_START_ERRS = 0U;
+const uint8_t MAX_SYNC_SYMBOL_RUN_ERRS   = 1U;
+
+const uint8_t BIT_MASK_TABLE[] = {0x80U, 0x40U, 0x20U, 0x10U, 0x08U, 0x04U, 0x02U, 0x01U};
+
+#define WRITE_BIT1(p,i,b) p[(i)>>3] = (b) ? (p[(i)>>3] | BIT_MASK_TABLE[(i)&7]) : (p[(i)>>3] & ~BIT_MASK_TABLE[(i)&7])
+
+const uint8_t M17_SYNC     = 0x77U;
+const uint8_t M17_PREAMBLE = 0x77U;
+const uint8_t M17_LSF      = 0x00U;
+const uint8_t M17_STREAM   = 0x01U;
+const uint8_t M17_PACKET   = 0x02U;
+const uint8_t M17_EOT      = 0x03U;
+
+const uint8_t NOAVEPTR = 99U;
+
+const uint16_t NOENDPTR = 9999U;
+
+const unsigned int MAX_SYNC_FRAMES = 3U + 1U;
+
+/* M17 Constants - using #define for C compatibility */
+#define M17_RADIO_SYMBOL_LENGTH 5U      /* At 24 kHz sample rate */
+
+#define M17_FRAME_LENGTH_BITS    384U
+#define M17_FRAME_LENGTH_BYTES   (M17_FRAME_LENGTH_BITS / 8U)
+#define M17_FRAME_LENGTH_SYMBOLS (M17_FRAME_LENGTH_BITS / 2U)
+#define M17_FRAME_LENGTH_SAMPLES (M17_FRAME_LENGTH_SYMBOLS * M17_RADIO_SYMBOL_LENGTH)
+
+#define M17_SYNC_LENGTH_BITS    16U
+#define M17_SYNC_LENGTH_BYTES   (M17_SYNC_LENGTH_BITS / 8U)
+#define M17_SYNC_LENGTH_SYMBOLS (M17_SYNC_LENGTH_BITS / 2U)
+#define M17_SYNC_LENGTH_SAMPLES (M17_SYNC_LENGTH_SYMBOLS * M17_RADIO_SYMBOL_LENGTH)
+
+const uint8_t M17_LINK_SETUP_SYNC_BYTES[] = {0x55U, 0xF7U};
+const uint8_t M17_STREAM_SYNC_BYTES[]     = {0xFFU, 0x5DU};
+const uint8_t M17_PACKET_SYNC_BYTES[]     = {0x75U, 0xFFU};
+const uint8_t M17_EOF_SYNC_BYTES[]        = {0x55U, 0x5DU};
+
+const q15_t M17_LEVELA =  1481;
+const q15_t M17_LEVELB =  494;
+const q15_t M17_LEVELC = -494;
+const q15_t M17_LEVELD = -1481;
+
+const uint16_t M17_LINK_SETUP_SYNC_BITS = 0x55F7U;
+const uint16_t M17_STREAM_SYNC_BITS     = 0xFF5DU;
+const uint16_t PACKET_SYNC_WORD         = 0x75FFU;
+const uint16_t M17_EOF_SYNC_BITS        = 0x555DU;
+const uint16_t M17_PACKET_SYNC_BITS     = 0x75FFU;
+const uint16_t M17_EOT_SYNC_BITS        = 0x555DU;
+
+// 5     5     F     7
+// 01 01 01 01 11 11 01 11
+// +3 +3 +3 +3 -3 -3 +3 -3
+
+const int8_t M17_LINK_SETUP_SYNC_SYMBOLS_VALUES[] = {+3, +3, +3, +3, -3, -3, +3, -3};
+
+const uint8_t M17_LINK_SETUP_SYNC_SYMBOLS = 0xF2U;
+
+// F     F     5     D
+// 11 11 11 11 01 01 11 01
+// -3 -3 -3 -3 +3 +3 -3 +3
+
+const int8_t M17_STREAM_SYNC_SYMBOLS_VALUES[] = {-3, -3, -3, -3, +3, +3, -3, +3};
+
+const uint8_t M17_STREAM_SYNC_SYMBOLS = 0x0DU;
+
+// 7     5     F     F
+// 01 11 01 01 11 11 11 11
+// +3 -3 +3 +3 -3 -3 -3 -3
+
+const int8_t M17_PACKET_SYNC_SYMBOLS_VALUES[] = {+3, -3, +3, +3, -3, -3, -3, -3};
+
+const uint8_t M17_PACKET_SYNC_SYMBOLS = 0xB0U;
+
+// 5     5     5     D
+// 01 01 01 01 01 01 11 01
+// +3 +3 +3 +3 +3 +3 -3 +3
+
+const int8_t M17_EOF_SYNC_SYMBOLS_VALUES[] = {+3, +3, +3, +3, +3, +3, -3, +3};
+
+const uint8_t M17_EOF_SYNC_SYMBOLS = 0xFDU;
+
+enum M17RX_STATE {
+  M17RXS_NONE,
+  M17RXS_LINK_SETUP,
+  M17RXS_STREAM,
+  M17RXS_PACKET
+};
+
+arm_biquad_casd_df1_inst_q31 dcFilter;
+q31_t                        dcState[4];
+
+arm_fir_interpolate_instance_q15 m17modFilter;
+q15_t                            m17modState[16U];    // blockSize + phaseLength - 1, 4 + 9 - 1 plus some spare
+
+arm_fir_instance_q15             m17rrc05Filter;
+q15_t                            m17rrc05State[70U];         // NoTaps + BlockSize - 1, 42 + 20 - 1 plus some spare
+
+M17RX_STATE m17state;
+uint8_t     m17bitBuffer[M17_RADIO_SYMBOL_LENGTH];
+q15_t       m17buffer[M17_FRAME_LENGTH_SAMPLES];
+uint16_t    m17bitBuf;
+uint16_t    m17bitPtr;
+uint16_t    m17dataPtr;
+uint16_t    m17startPtr;
+uint16_t    m17endPtr;
+uint16_t    m17syncPtr;
+uint16_t    m17bufferPtr;
+uint16_t    m17minSyncPtr;
+uint16_t    m17maxSyncPtr;
+q31_t       m17maxCorr;
+uint16_t    m17lostCount;
+uint8_t     m17countdown;
+M17RX_STATE m17nextState;
+q15_t       m17center[16U];
+q15_t       m17centerVal;
+q15_t       m17threshold[16U];
+q15_t       m17thresholdVal;
+uint8_t     m17averagePtr;
+uint8_t     m17outBuffer[M17_FRAME_LENGTH_BYTES + 3U];
+uint8_t*    m17outBufPtr;
+uint16_t    m17txDelay;  // In bytes
+
+//================================================================================================================================
 
 const char *TYPE_LSF            = "M17L";
 const char *TYPE_STREAM         = "M17S";
@@ -106,14 +236,24 @@ const char *TYPE_CONNECT        = "CONN";
 const char *TYPE_STATUS         = "STAT";
 const char *TYPE_MODE           = "MODE";
 const char *TYPE_COMMAND        = "COMM";
+const char *TYPE_SAMPLE         = "SAMP";
+const char *TYPE_BITS           = "BITS";
+
+const uint8_t PACKET_TYPE_BIT   = 0;
+const uint8_t PACKET_TYPE_SAMP  = 1;
+const uint8_t PACKET_TYPE_FRAME = 2;
 
 const uint8_t COMM_SET_DUPLEX   = 0x00;
 const uint8_t COMM_SET_SIMPLEX  = 0x01;
 const uint8_t COMM_SET_MODE     = 0x02;
 const uint8_t COMM_SET_IDLE     = 0x03;
+const uint8_t COMM_UPDATE_CONF  = 0x04;
 
 int      sockfd           = 0;
 char     modemHost[80]    = "127.0.0.1";
+uint8_t  modemId          = 1;          //< Modem Id used to create modem name.
+char     modemName[10]    = "modem1";   //< Modem name that this program is associated with.
+uint8_t  packetType       = 0;
 char     tx_state[4]      = "off";
 char     srcCallsign[10]  = "";
 char     dstCallsign[10]  = "";
@@ -130,7 +270,6 @@ bool     smsStarted       = false;
 bool     modem_duplex     = true;
 bool     m17ReflConnected = false;
 bool     m17GWConnected   = false;
-bool     statusTimeout    = false;
 bool     reflBusy         = false;
 bool     gpsFound         = false;
 uint8_t  duration         = 0;
@@ -144,11 +283,18 @@ uint8_t  totalSMSMessages = 0;
 uint16_t totalSMSLength   = 0;
 uint16_t voiceFrameCnt    = 0;
 uint16_t lastFrameNum     = 0;
-uint16_t serverPort       = 18100;
+uint16_t serverPort       = 18200;
 uint16_t clientPort       = 18000;
 uint16_t streamId         = 0;
 uint16_t modeHang         = 30000;
 time_t   start_time;
+uint8_t  txLevel          = 50;
+uint8_t  rfPower          = 128;
+char     modem_rxFrequency[11]  = "435000000";
+char     modem_txFrequency[11]  = "435000000";
+uint8_t  symBuffer[600U];
+uint16_t symLen;
+uint16_t symPtr;
 
 M17::M17LinkSetupFrame rx_lsf;   //< M17 link setup frame
 M17::M17LinkSetupFrame pkt_lsf;  //< M17 packet link setup frame
@@ -161,23 +307,54 @@ int                optval;       //< flag value for setsockopt
 struct sockaddr_in serveraddr;   //< server's addr
 struct sockaddr_in clientaddr;   //< client addr
 
-RingBuffer<uint8_t> txBuffer(3600);
-RingBuffer<uint8_t> rxBuffer(3600);
-RingBuffer<uint8_t> gwTxBuffer(3600);
-RingBuffer<uint8_t> gwCommand(200);
+/* C RingBuffer - for future C conversion */
+RingBuffer txBuffer;
+RingBuffer rxBuffer;
+RingBuffer gwTxBuffer;
+RingBuffer gwCommand;
+
+pthread_mutex_t timerMutex   = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t stateMutex   = PTHREAD_MUTEX_INITIALIZER;
 
 pthread_t modemHostid;
 pthread_t gwHostid;
 pthread_t timerid;
 
-uint8_t setMode[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_MODE};
-uint8_t setIdle[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_IDLE};
+const uint8_t SETMODE[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_MODE};
+const uint8_t SETIDLE[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_IDLE};
+
+typedef struct TIMERS
+{
+    char name[20];
+    bool valid;
+    bool enabled;
+    uint32_t duration;
+    uint32_t count;
+    bool triggered;
+} TIMERS;
+
+TIMERS timer[10];
+
+void processBitsNone(bool);
+void processBitsData(bool);
+void writeBits(uint8_t c, bool isEOT);
+void processNone(q15_t sample);
+void processData(q15_t sample);
+bool correlateSync(uint8_t syncSymbols, const int8_t* syncSymbolValues, const uint8_t* syncBytes, uint8_t maxSymbolErrs, uint8_t maxBitErrs);
+void calculateLevels(uint16_t start, uint16_t count);
+void samplesToBits(uint16_t start, uint16_t count, uint8_t* buffer, uint16_t offset, q15_t center, q15_t threshold);
+bool isTimerTriggered(const char* name);
+void resetTimer(const char* name);
+
 
 // error - wrapper for perror
 void error(char *msg)
 {
-  perror(msg);
-  exit(1);
+    perror(msg);
+    exit(1);
 }
 
 // Wait for 'delay' miroseconds
@@ -234,57 +411,1407 @@ void dump(char *text, unsigned char *data, unsigned int length)
     }
 }
 
+bool isActiveMode()
+{
+    char active_mode[10] = "IDLE";
+
+    readStatus(modemName, "main", "active_mode", active_mode);
+
+    if (strcasecmp(active_mode, "M17") == 0 || strcasecmp(active_mode, "IDLE") == 0)
+        return true;
+    else
+        return false;
+}
+
+void reset()
+{
+    m17state        = M17RXS_NONE;
+    m17bitBuf       = 0x0000U;
+    m17bufferPtr    = 0U;
+    m17dataPtr      = 0U;
+    m17bitPtr       = 0U;
+    m17maxCorr      = 0;
+    m17averagePtr   = NOAVEPTR;
+    m17startPtr     = NOENDPTR;
+    m17endPtr       = NOENDPTR;
+    m17syncPtr      = NOENDPTR;
+    m17minSyncPtr   = NOENDPTR;
+    m17maxSyncPtr   = NOENDPTR;
+    m17centerVal    = 0;
+    m17thresholdVal = 0;
+    m17lostCount    = 0U;
+    m17countdown    = 0U;
+    m17nextState    = M17RXS_NONE;
+    m17txDelay      = 240U;      // 200ms
+}
+
+void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
+{
+    static char gps[50];
+    uint8_t     typeLen = 4;
+
+    char cType[4] = "RF";
+    if (isNet)
+        strcpy(cType, "NET");
+
+    if (memcmp(type, "M17", 3) == 0 && memcmp(type, TYPE_EOT, typeLen) != 0)
+    {
+        frame_t frame;
+        for (int x = 0; x < 48; x++)
+        {
+            frame.data()[x] = buffer[x];
+        }
+
+        auto ftype  = decoder.decodeFrame(frame);
+        rx_lsf      = decoder.getLsf();
+        bool lsfOk  = rx_lsf.valid();
+        if (!txOn)
+        {
+            streamId = (rand() & 0x7ff);
+            voiceFrameCnt = 0;
+            frameCnt = 0;
+            validFrame = false;
+            lastFrameNum = 0;
+            bzero(metaText, 53);
+            start_time = time(NULL);
+        }
+        if (lsfOk)
+        {
+            pthread_mutex_lock(&gwTxBufMutex);
+            if (!isNet && m17ReflConnected && RingBuffer_freeSpace(&gwTxBuffer) >= (length + 8))
+            {
+                uint8_t buf[8];
+                buf[0] = 0x61;
+                buf[1] = 0x00;
+                buf[2] = length + 8;
+                buf[3] = 0x04;
+                memcpy(buf + 4, type, 4);
+                RingBuffer_addData(&gwTxBuffer, buf, 8);
+                RingBuffer_addData(&gwTxBuffer, buffer, length);
+            }
+            pthread_mutex_unlock(&gwTxBufMutex);
+            strcpy(srcCallsign, rx_lsf.getSource().c_str());
+            strcpy(dstCallsign, rx_lsf.getDestination().c_str());
+            if (!txOn)
+            {
+                if (write(sockfd, SETMODE, 5) < 0)
+                {
+                    fprintf(stderr, "ERROR: host disconnect\n");
+                    return;
+                }
+                saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, "", true);
+            }
+            txOn = true;
+            validFrame = true;
+            pkt_lsf = decoder.getLsf();
+            // Retrieve extended callsign data
+            if (!smsStarted)
+                packetData[0] = 0x0;
+            streamType_t streamType = rx_lsf.getType();
+
+            if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
+                (streamType.fields.encSubType == M17_META_EXTD_CALLSIGN))
+            {
+                meta_t& meta = rx_lsf.metadata();
+                strcpy(exCall1, decode_callsign(meta.extended_call_sign.call1).c_str());
+                strcpy(exCall2, decode_callsign(meta.extended_call_sign.call2).c_str());
+
+                if (frameCnt == 6)
+                    frameCnt = 0;
+            }
+            // Check if metatext is present
+            else if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
+                (streamType.fields.encSubType == M17_META_TEXT) && rx_lsf.valid() && frameCnt == 6)
+            {
+                frameCnt = 0;
+                meta_t& meta = rx_lsf.metadata();
+                uint8_t blk_len = (meta.raw_data[0] & 0xf0) >> 4;
+                uint8_t blk_id = (meta.raw_data[0] & 0x0f);
+                if (blk_id == 1)
+                {  // On first block reset everything
+                    memset(metaText, 0, 53);
+                    memset(textBuffer, 0, 53);
+                    textOffset = 0;
+                    blk_id_tot = 0;
+                    textStarted = true;
+                }
+                // check if first valid metatext block is found
+                if (textStarted)
+                {
+                    // Check for valid block id
+                    if (blk_id <= 0x0f)
+                    {
+                        blk_id_tot += blk_id;
+                        memcpy(textBuffer+textOffset, meta.raw_data+1, 13);
+                        textOffset += 13;
+                        // Check for completed text message
+                        if ((blk_len == blk_id_tot) || textOffset == 52)
+                        {
+                            memcpy(metaText, textBuffer, textOffset);
+                            textOffset = 0;
+                            blk_id_tot = 0;
+                            textStarted = false;
+                            if (debugM)
+                                fprintf(stderr, "Text: %s\n", metaText);
+                        }
+                    }
+                }
+            }
+            else if ((streamType.fields.encType    == M17_ENCRYPTION_NONE) &&
+                (streamType.fields.encSubType == M17_META_GNSS) && rx_lsf.valid())
+            {
+                gpsFound = true;
+            }
+
+            if (ftype == M17FrameType::LINK_SETUP && validFrame)
+            {
+                if (modem_duplex || isNet)
+                {
+                    uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04, 'M', '1', '7', 'L'};
+                    memcpy(buf + 8, buffer, length);
+                    if (packetType == PACKET_TYPE_FRAME)
+                    {
+                        if (write(sockfd, buf, 56) < 0)
+                        {
+                            fprintf(stderr, "ERROR: host disconnect\n");
+                            return;
+                        }
+                    }
+                    else if (packetType == PACKET_TYPE_BIT || packetType == PACKET_TYPE_SAMP)
+                    {
+                        pthread_mutex_lock(&rxBufMutex);
+                        RingBuffer_addData(&rxBuffer, buf, length + 8);
+                        pthread_mutex_unlock(&rxBufMutex);
+                    }
+                }
+            }
+            else if (ftype == M17FrameType::STREAM && validFrame)
+            {
+                if (!txOn)
+                {
+                    if (write(sockfd, SETMODE, 5) < 0)
+                    {
+                        fprintf(stderr, "ERROR: host disconnect\n");
+                        return;
+                    }
+                    saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, "", true);
+                }
+                M17StreamFrame sf = decoder.getStreamFrame();
+                uint16_t diff = (sf.getFrameNumber() & 0x7fff) - (lastFrameNum & 0x7fff);
+                if ((sf.getFrameNumber() && 0x8000) != 0x8000)
+                {
+                    if (diff > 2 || sf.getFrameNumber() == 0)
+                    {
+                        fprintf(stderr, "Frame number invalid.\n");
+                        lastFrameNum = sf.getFrameNumber() & 0x7fff;
+                        return;
+                    }
+                }
+                else
+                {
+                    fprintf(stderr, "Last frame detected.\n");
+                }
+                lastFrameNum = sf.getFrameNumber();
+                frameCnt++;
+                if (!txOn)
+                    voiceFrameCnt = 0;
+                txOn = true;
+                meta_t& meta = rx_lsf.metadata();
+                if (!gpsFound && streamType.fields.encSubType == M17_META_TEXT)
+                {
+                    uint8_t blk_len = (meta.raw_data[0] & 0xf0) >> 4;
+                    uint8_t blk_id = (meta.raw_data[0] & 0x0f);
+                    if (blk_id == 1)
+                    {  // On first block reset everything
+                        memset(metaText, 0, 53);
+                        memset(textBuffer, 0, 53);
+                        textOffset = 0;
+                        blk_id_tot = 0;
+                        textStarted = true;
+                    }
+                    // check if first valid metatext block is found
+                    if (textStarted)
+                    {
+                        // Check for valid block id
+                        if (blk_id <= 0x0f)
+                        {
+                            blk_id_tot += blk_id;
+                            memcpy(textBuffer+textOffset, meta.raw_data+1, 13);
+                            textOffset += 13;
+                            // Check for completed text message
+                            if ((blk_len == blk_id_tot) || textOffset == 52)
+                            {
+                                memcpy(metaText, textBuffer, textOffset);
+                                textOffset = 0;
+                                blk_id_tot = 0;
+                                textStarted = false;
+                                if (debugM)
+                                    fprintf(stderr, "Text 2: %s\n", metaText);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    float    ltm = 90.0f / 8388607.0f;
+                    float    lgm = 180.0f / 8388607.0f;
+                    uint8_t  data_source = (meta.raw_data[0] & 0xf0) >> 4;
+                    uint8_t  station_type = meta.raw_data[0] & 0x0f;
+                    uint8_t  validity = (meta.raw_data[1] & 0xf0) >> 4;
+                    uint8_t  radius = (meta.raw_data[1] & 0x0e) >> 1;
+                    uint16_t bearing = ((meta.raw_data[1] & 01) << 8) + meta.raw_data[2];
+                    int32_t  lat = (meta.raw_data[3] << 16) + (meta.raw_data[4] << 8) + meta.raw_data[5];
+                    int32_t  lon = (meta.raw_data[6] << 16) + (meta.raw_data[7] << 8) + meta.raw_data[8];
+                    uint16_t altitude = (((meta.raw_data[9] << 8) + meta.raw_data[10]) * 0.5f) - 500;
+                    uint16_t speed = ((meta.raw_data[11] << 4) + ((meta.raw_data[12] & 0xf0) >> 4)) * 0.5f;
+                    float    latitude = lat * ltm;
+                    float    longitude = (lon * lgm) - 360.0f;
+                    //    if (debugM)
+                    fprintf(stderr, "Lat: %f  Lon: %f  Alt: %d\n", latitude, longitude, altitude);
+                    sprintf(gps, "%f %f %d %d %d", latitude, longitude, altitude, bearing, speed);
+                    gpsFound = false;
+                }
+                voiceFrameCnt++;
+
+                if (isTimerTriggered("status"))
+                {
+                    saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, "", true);
+                    resetTimer("status");
+                }
+
+                if (modem_duplex || isNet)
+                {
+                    uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04, 'M', '1', '7', 'S'};
+                    memcpy(buf + 8, buffer, length);
+                    if (packetType == PACKET_TYPE_FRAME)
+                    {
+                        if (write(sockfd, buf, 56) < 0)
+                        {
+                            fprintf(stderr, "ERROR: host disconnect\n");
+                            return;
+                        }
+                    }
+                    else if (packetType == PACKET_TYPE_BIT || packetType == PACKET_TYPE_SAMP)
+                    {
+                        pthread_mutex_lock(&rxBufMutex);
+                        RingBuffer_addData(&rxBuffer, buf, length + 8);
+                        pthread_mutex_unlock(&rxBufMutex);
+                    }
+                }
+            }
+            else if (ftype == M17FrameType::PACKET && validFrame)
+            {
+                M17PacketFrame pf = decoder.getPacketFrame();
+                if (!smsStarted && pf.payload()[0] == 0x05)
+                {  // check for valid SMS packet message
+                    smsLastFrame = 0;
+                    smsStarted = true;
+                    totalSMSLength = 0;
+                    totalSMSMessages = 0;
+                    memset(packetData, 0, 821);
+                    fprintf(stderr, "Packet data detected.\n");
+                }
+
+                // store next frame of message
+                if (smsStarted)
+                {
+                    uint8_t rx_fn   = (pf.payload()[25] >> 2) & 0x1F;
+                    uint8_t rx_last =  pf.payload()[25] >> 7;
+                    if (rx_fn <= 31 && rx_fn == smsLastFrame && !rx_last)
+                    {
+                        memcpy(&packetData[totalSMSLength], pf.payload().data(), 25);
+                        smsLastFrame++;
+                        totalSMSLength += 25;
+                    }
+                    else if (rx_last)
+                    {
+                        memcpy(&packetData[totalSMSLength], pf.payload().data(), rx_fn < 25 ? rx_fn : 25);
+                        totalSMSLength += rx_fn < 25 ? rx_fn : 25;
+                        // check crc matches
+                        uint16_t packet_crc = rx_lsf.m17Crc(packetData, totalSMSLength - 2);
+                        uint16_t crc;
+                        memcpy((uint8_t*)&crc, &packetData[totalSMSLength - 2], 2);
+                        // store completed message into message queue
+                        char *tmp = (char*)malloc(totalSMSLength-3);
+                        if (tmp != NULL && crc == packet_crc)
+                        {
+                            memset(tmp, 0, totalSMSLength-3);
+                            memcpy(tmp, &packetData[1], totalSMSLength-3);
+                            strcpy((char*)packetData, tmp);
+                            totalSMSMessages++;
+                        }
+                        else
+                        {   // if message memory allocation fails, crc does not match
+                            // or duplicate message delete sender call
+                            if (tmp != NULL)
+                                free(tmp);
+                        }
+                        smsStarted    = false;
+                    }
+                }
+
+                if (totalSMSMessages > 0)
+                {
+                    saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, "Packet", (const char*)packetData, "", true);
+                }
+
+                if (modem_duplex || isNet)
+                {
+                    uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04, 'M', '1', '7', 'P'};
+                    memcpy(buf + 8, buffer, length);
+                    if (packetType == PACKET_TYPE_FRAME)
+                    {
+                        if (write(sockfd, buf, 56) < 0)
+                        {
+                            fprintf(stderr, "ERROR: host disconnect\n");
+                            return;
+                        }
+                    }
+                    else if (packetType == PACKET_TYPE_BIT || packetType == PACKET_TYPE_SAMP)
+                    {
+                        pthread_mutex_lock(&rxBufMutex);
+                        RingBuffer_addData(&rxBuffer, buf, length + 8);
+                        pthread_mutex_unlock(&rxBufMutex);
+                    }
+                }
+            }
+        }
+    }
+    else if (memcmp(type, TYPE_EOT, typeLen) == 0 && validFrame)
+    {
+        pthread_mutex_lock(&gwTxBufMutex);
+        if (!isNet && m17ReflConnected && RingBuffer_freeSpace(&gwTxBuffer) >= (length + 8))
+        {
+            uint8_t buf[8];
+            buf[0] = 0x61;
+            buf[1] = 0x00;
+            buf[2] = length + 8;
+            buf[3] = 0x04;
+            memcpy(buf + 4, type, 4);
+            RingBuffer_addData(&gwTxBuffer, buf, 8);
+            RingBuffer_addData(&gwTxBuffer, buffer, length);
+        }
+        pthread_mutex_unlock(&gwTxBufMutex);
+
+        frameCnt = 0;
+        lastFrameNum = 0;
+        /* rx_lsf is a C++ object, will be updated on next decode */
+
+        if (debugM)
+            fprintf(stderr, "Found M17 EOT\n");
+
+        float loss_BER = (float)decoder.bitErr / 3.68F;
+        duration = difftime(time(NULL), start_time);
+        decoder.reset();
+
+        saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, gps, false);
+        if (voiceFrameCnt > 0)
+        {
+            saveHistory(modemName, "M17", cType, srcCallsign, "", dstCallsign, loss_BER, metaText, duration);
+        }
+        else if (totalSMSMessages > 0)
+        {
+            saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, "Packet", (const char*)packetData, gps, false);
+            saveHistory(modemName, "M17", cType, srcCallsign, "", dstCallsign, loss_BER, "Packet", duration);
+        }
+        voiceFrameCnt = 0;
+        gps[0] = 0;
+
+        if (modem_duplex || isNet)
+        {
+            uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'E'};
+            memcpy(buf + 8, buffer, length);
+            if (packetType == PACKET_TYPE_FRAME)
+            {
+                if (write(sockfd, buf, 8) < 0)
+                {
+                    fprintf(stderr, "ERROR: host disconnect\n");
+                    return;
+                }
+            }
+            else if (packetType == PACKET_TYPE_BIT || packetType == PACKET_TYPE_SAMP)
+            {
+                buf[2] = length + 8;
+                pthread_mutex_lock(&rxBufMutex);
+                RingBuffer_addData(&rxBuffer, buf, length + 8);
+                pthread_mutex_unlock(&rxBufMutex);
+            }
+        }
+        bzero(metaText, 53);
+        validFrame = false;
+        txOn = false;
+        reflBusy = false;
+    }
+}
+
+
+void samples(const q15_t* samples, uint8_t length)
+{
+    for (uint8_t i = 0U; i < length; i++)
+    {
+        q15_t sample = samples[i];
+
+        m17bitBuffer[m17bitPtr] <<= 1;
+        if (sample < 0)
+            m17bitBuffer[m17bitPtr] |= 0x01U;
+
+        m17buffer[m17dataPtr] = sample;
+
+        switch (m17state)
+        {
+            case M17RXS_LINK_SETUP:
+            case M17RXS_STREAM:
+            case M17RXS_PACKET:
+                processData(sample);
+                break;
+            default:
+                processNone(sample);
+                break;
+        }
+
+        m17dataPtr++;
+        if (m17dataPtr >= M17_FRAME_LENGTH_SAMPLES)
+            m17dataPtr = 0U;
+
+        m17bitPtr++;
+        if (m17bitPtr >= M17_RADIO_SYMBOL_LENGTH)
+            m17bitPtr = 0U;
+    }
+}
+
+void processNone(q15_t sample)
+{
+    bool ret1 = correlateSync(M17_LINK_SETUP_SYNC_SYMBOLS, M17_LINK_SETUP_SYNC_SYMBOLS_VALUES, M17_LINK_SETUP_SYNC_BYTES, MAX_SYNC_SYMBOL_START_ERRS, MAX_SYNC_BIT_START_ERRS);
+    bool ret2 = correlateSync(M17_STREAM_SYNC_SYMBOLS,     M17_STREAM_SYNC_SYMBOLS_VALUES,     M17_STREAM_SYNC_BYTES,     MAX_SYNC_SYMBOL_START_ERRS, MAX_SYNC_BIT_START_ERRS);
+    bool ret3 = correlateSync(M17_PACKET_SYNC_SYMBOLS,     M17_PACKET_SYNC_SYMBOLS_VALUES,     M17_PACKET_SYNC_BYTES,     MAX_SYNC_SYMBOL_START_ERRS, MAX_SYNC_BIT_START_ERRS);
+
+    if (ret1 || ret2 || ret3)
+    {
+        // On the first sync, start the countdown to the state change
+        if (m17countdown == 0U)
+        {
+            m17averagePtr = NOAVEPTR;
+
+            m17countdown = 5U;
+
+            if (ret1) m17nextState = M17RXS_LINK_SETUP;
+            if (ret2) m17nextState = M17RXS_STREAM;
+            if (ret3) m17nextState = M17RXS_PACKET;
+        }
+    }
+
+    if (m17countdown > 0U)
+        m17countdown--;
+
+    if (m17countdown == 1U)
+    {
+        m17minSyncPtr = m17syncPtr + M17_FRAME_LENGTH_SAMPLES - 1U;
+        if (m17minSyncPtr >= M17_FRAME_LENGTH_SAMPLES)
+            m17minSyncPtr -= M17_FRAME_LENGTH_SAMPLES;
+
+        m17maxSyncPtr = m17syncPtr + 1U;
+        if (m17maxSyncPtr >= M17_FRAME_LENGTH_SAMPLES)
+            m17maxSyncPtr -= M17_FRAME_LENGTH_SAMPLES;
+
+        m17state     = m17nextState;
+        m17countdown = 0U;
+        m17nextState = M17RXS_NONE;
+    }
+}
+
+void processData(q15_t sample)
+{
+    bool eof = false;
+
+    if (m17minSyncPtr < m17maxSyncPtr)
+    {
+        if (m17dataPtr >= m17minSyncPtr && m17dataPtr <= m17maxSyncPtr)
+        {
+            bool ret1 = correlateSync(M17_LINK_SETUP_SYNC_SYMBOLS, M17_LINK_SETUP_SYNC_SYMBOLS_VALUES, M17_LINK_SETUP_SYNC_BYTES, MAX_SYNC_SYMBOL_START_ERRS, MAX_SYNC_BIT_START_ERRS);
+            bool ret2 = correlateSync(M17_STREAM_SYNC_SYMBOLS, M17_STREAM_SYNC_SYMBOLS_VALUES, M17_STREAM_SYNC_BYTES,  MAX_SYNC_SYMBOL_RUN_ERRS, MAX_SYNC_BIT_RUN_ERRS);
+            bool ret3 = correlateSync(M17_PACKET_SYNC_SYMBOLS, M17_PACKET_SYNC_SYMBOLS_VALUES, M17_PACKET_SYNC_BYTES,  MAX_SYNC_SYMBOL_RUN_ERRS, MAX_SYNC_BIT_RUN_ERRS);
+
+            eof = correlateSync(M17_EOF_SYNC_SYMBOLS, M17_EOF_SYNC_SYMBOLS_VALUES, M17_EOF_SYNC_BYTES, MAX_SYNC_SYMBOL_RUN_ERRS, MAX_SYNC_BIT_RUN_ERRS);
+
+            if (ret1) m17state = M17RXS_LINK_SETUP;
+            if (ret2) m17state = M17RXS_STREAM;
+            if (ret3) m17state = M17RXS_PACKET;
+        }
+    } else
+    {
+        if (m17dataPtr >= m17minSyncPtr || m17dataPtr <= m17maxSyncPtr)
+        {
+            bool ret1 = correlateSync(M17_LINK_SETUP_SYNC_SYMBOLS, M17_LINK_SETUP_SYNC_SYMBOLS_VALUES, M17_LINK_SETUP_SYNC_BYTES, MAX_SYNC_SYMBOL_START_ERRS, MAX_SYNC_BIT_START_ERRS);
+            bool ret2 = correlateSync(M17_STREAM_SYNC_SYMBOLS, M17_STREAM_SYNC_SYMBOLS_VALUES, M17_STREAM_SYNC_BYTES,  MAX_SYNC_SYMBOL_RUN_ERRS, MAX_SYNC_BIT_RUN_ERRS);
+            bool ret3 = correlateSync(M17_PACKET_SYNC_SYMBOLS, M17_PACKET_SYNC_SYMBOLS_VALUES, M17_PACKET_SYNC_BYTES,  MAX_SYNC_SYMBOL_RUN_ERRS, MAX_SYNC_BIT_RUN_ERRS);
+
+            eof = correlateSync(M17_EOF_SYNC_SYMBOLS, M17_EOF_SYNC_SYMBOLS_VALUES, M17_EOF_SYNC_BYTES, MAX_SYNC_SYMBOL_RUN_ERRS, MAX_SYNC_BIT_RUN_ERRS);
+
+            if (ret1) m17state = M17RXS_LINK_SETUP;
+            if (ret2) m17state = M17RXS_STREAM;
+            if (ret3) m17state = M17RXS_PACKET;
+        }
+    }
+
+    if (eof)
+    {
+        //  DEBUG4("M17RX: eof sync found pos/center/threshold", m_syncPtr, m_centerVal, m_thresholdVal);
+
+        //    serial.writeM17EOT();
+   //     fprintf(stderr, "Found EOT\n");
+        decodeFrame(TYPE_EOT, NULL, 0, false);
+
+        m17state      = M17RXS_NONE;
+        m17endPtr     = NOENDPTR;
+        m17averagePtr = NOAVEPTR;
+        m17countdown  = 0U;
+        m17nextState  = M17RXS_NONE;
+        m17maxCorr    = 0;
+    }
+
+    if (m17dataPtr == m17endPtr)
+    {
+        // Only update the center and threshold if they are from a good sync
+        if (m17lostCount == MAX_SYNC_FRAMES)
+        {
+            m17minSyncPtr = m17syncPtr + M17_FRAME_LENGTH_SAMPLES - 1U;
+            if (m17minSyncPtr >= M17_FRAME_LENGTH_SAMPLES)
+                m17minSyncPtr -= M17_FRAME_LENGTH_SAMPLES;
+
+            m17maxSyncPtr = m17syncPtr + 1U;
+            if (m17maxSyncPtr >= M17_FRAME_LENGTH_SAMPLES)
+                m17maxSyncPtr -= M17_FRAME_LENGTH_SAMPLES;
+        }
+
+        calculateLevels(m17startPtr, M17_FRAME_LENGTH_SYMBOLS);
+
+        switch (m17state)
+        {
+            case M17RXS_LINK_SETUP:
+                //   DEBUG4("M17RX: link setup sync found pos/center/threshold", m_syncPtr, m_centerVal, m_thresholdVal);
+                break;
+            case M17RXS_STREAM:
+                //    DEBUG4("M17RX: stream sync found pos/center/threshold", m_syncPtr, m_centerVal, m_thresholdVal);
+                break;
+            case M17RXS_PACKET:
+                //    DEBUG4("M17RX: packet sync found pos/center/threshold", m_syncPtr, m_centerVal, m_thresholdVal);
+                break;
+            default:
+                break;
+        }
+
+        uint8_t frame[M17_FRAME_LENGTH_BYTES + 3U];
+        samplesToBits(m17startPtr, M17_FRAME_LENGTH_SYMBOLS, frame, 8U, m17centerVal, m17thresholdVal);
+
+        // We've not seen a stream sync for too long, signal RXLOST and change to RX_NONE
+        m17lostCount--;
+        if (m17lostCount == 0U)
+        {
+            //   DEBUG1("M17RX: sync timed out, lost lock");
+
+            //      serial.writeM17Lost();
+       //     fprintf(stderr, "Found LOST\n");
+            decodeFrame(TYPE_EOT, NULL, 0, false);
+
+            m17state      = M17RXS_NONE;
+            m17endPtr     = NOENDPTR;
+            m17averagePtr = NOAVEPTR;
+            m17countdown  = 0U;
+            m17nextState  = M17RXS_NONE;
+            m17maxCorr    = 0;
+        }
+        else
+        {
+            frame[0U] = m17lostCount == (MAX_SYNC_FRAMES - 1U) ? 0x01U : 0x00U;
+
+            switch (m17state)
+            {
+                case M17RXS_LINK_SETUP:
+             //       fprintf(stderr, "Found LSF\n");
+                    decodeFrame(TYPE_LSF, frame + 1, 48, false);
+                    //       writeRSSILinkSetup(frame);
+                    break;
+                case M17RXS_STREAM:
+            //        fprintf(stderr, "Found Stream\n");
+                    decodeFrame(TYPE_STREAM, frame + 1, 48, false);
+                    //       writeRSSIStream(frame);
+                    break;
+                case M17RXS_PACKET:
+            //        fprintf(stderr, "Found Packet\n");
+                    decodeFrame(TYPE_PACKET, frame + 1, 48, false);
+                    //       writeRSSIPacket(frame);
+                    break;
+                default:
+                    break;
+            }
+
+            m17maxCorr   = 0;
+            m17nextState = M17RXS_NONE;
+        }
+    }
+}
+
+bool correlateSync(uint8_t syncSymbols, const int8_t* syncSymbolValues, const uint8_t* syncBytes, uint8_t maxSymbolErrs, uint8_t maxBitErrs)
+{
+    if (countBits8(m17bitBuffer[m17bitPtr] ^ syncSymbols) <= maxSymbolErrs)
+    {
+        uint16_t ptr = m17dataPtr + M17_FRAME_LENGTH_SAMPLES - M17_SYNC_LENGTH_SAMPLES + M17_RADIO_SYMBOL_LENGTH;
+        if (ptr >= M17_FRAME_LENGTH_SAMPLES)
+            ptr -= M17_FRAME_LENGTH_SAMPLES;
+
+        q31_t corr = 0;
+        q15_t min =  16000;
+        q15_t max = -16000;
+
+        for (uint8_t i = 0U; i < M17_SYNC_LENGTH_SYMBOLS; i++)
+        {
+            q15_t val = m17buffer[ptr];
+
+            if (val > max)
+                max = val;
+            if (val < min)
+                min = val;
+
+            switch (syncSymbolValues[i])
+            {
+                case +3:
+                    corr -= (val + val + val);
+                    break;
+                case +1:
+                    corr -= val;
+                    break;
+                case -1:
+                    corr += val;
+                    break;
+                default:  // -3
+                    corr += (val + val + val);
+                    break;
+            }
+
+            ptr += M17_RADIO_SYMBOL_LENGTH;
+            if (ptr >= M17_FRAME_LENGTH_SAMPLES)
+                ptr -= M17_FRAME_LENGTH_SAMPLES;
+        }
+
+        if (corr > m17maxCorr)
+        {
+            if (m17averagePtr == NOAVEPTR)
+            {
+                m17centerVal = (max + min) >> 1;
+
+                q31_t v1 = (max - m17centerVal) * SCALING_FACTOR;
+                m17thresholdVal = q15_t(v1 >> 15);
+            }
+
+            uint16_t startPtr = m17dataPtr + M17_FRAME_LENGTH_SAMPLES - M17_SYNC_LENGTH_SAMPLES + M17_RADIO_SYMBOL_LENGTH;
+            if (startPtr >= M17_FRAME_LENGTH_SAMPLES)
+                startPtr -= M17_FRAME_LENGTH_SAMPLES;
+
+            uint8_t sync[M17_SYNC_LENGTH_BYTES];
+            samplesToBits(startPtr, M17_SYNC_LENGTH_SYMBOLS, sync, 0U, m17centerVal, m17thresholdVal);
+
+            uint8_t errs = 0U;
+            for (uint8_t i = 0U; i < M17_SYNC_LENGTH_BYTES; i++)
+                errs += countBits8(sync[i] ^ syncBytes[i]);
+
+            if (errs <= maxBitErrs)
+            {
+                m17maxCorr   = corr;
+                m17lostCount = MAX_SYNC_FRAMES;
+                m17syncPtr   = m17dataPtr;
+
+                m17startPtr = startPtr;
+
+                m17endPtr = m17dataPtr + M17_FRAME_LENGTH_SAMPLES - M17_SYNC_LENGTH_SAMPLES - 1U;
+                if (m17endPtr >= M17_FRAME_LENGTH_SAMPLES)
+                    m17endPtr -= M17_FRAME_LENGTH_SAMPLES;
+
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+void calculateLevels(uint16_t start, uint16_t count)
+{
+    q15_t maxPos = -16000;
+    q15_t minPos =  16000;
+    q15_t maxNeg =  16000;
+    q15_t minNeg = -16000;
+
+    for (uint16_t i = 0U; i < count; i++)
+    {
+        q15_t sample = m17buffer[start];
+
+        if (sample > 0)
+        {
+            if (sample > maxPos)
+                maxPos = sample;
+            if (sample < minPos)
+                minPos = sample;
+        } else
+        {
+            if (sample < maxNeg)
+                maxNeg = sample;
+            if (sample > minNeg)
+                minNeg = sample;
+        }
+
+        start += M17_RADIO_SYMBOL_LENGTH;
+        if (start >= M17_FRAME_LENGTH_SAMPLES)
+            start -= M17_FRAME_LENGTH_SAMPLES;
+    }
+
+    q15_t posThresh = (maxPos + minPos) >> 1;
+    q15_t negThresh = (maxNeg + minNeg) >> 1;
+
+    q15_t center = (posThresh + negThresh) >> 1;
+
+    q15_t threshold = posThresh - center;
+
+    // DEBUG5("M17RX: pos/neg/center/threshold", posThresh, negThresh, center, threshold);
+
+    if (m17averagePtr == NOAVEPTR)
+    {
+        for (uint8_t i = 0U; i < 16U; i++)
+        {
+            m17center[i] = center;
+            m17threshold[i] = threshold;
+        }
+
+        m17averagePtr = 0U;
+    } else
+    {
+        m17center[m17averagePtr] = center;
+        m17threshold[m17averagePtr] = threshold;
+
+        m17averagePtr++;
+        if (m17averagePtr >= 16U)
+            m17averagePtr = 0U;
+    }
+
+    m17centerVal = 0;
+    m17thresholdVal = 0;
+
+    for (uint8_t i = 0U; i < 16U; i++)
+    {
+        m17centerVal += m17center[i];
+        m17thresholdVal += m17threshold[i];
+    }
+
+    m17centerVal >>= 4;
+    m17thresholdVal >>= 4;
+}
+
+void samplesToBits(uint16_t start, uint16_t count, uint8_t* buffer, uint16_t offset, q15_t center, q15_t threshold)
+{
+    for (uint16_t i = 0U; i < count; i++)
+    {
+        q15_t sample = m17buffer[start] - center;
+
+        if (sample < -threshold)
+        {
+            WRITE_BIT1(buffer, offset, false);
+            offset++;
+            WRITE_BIT1(buffer, offset, true);
+            offset++;
+        } else if (sample < 0)
+        {
+            WRITE_BIT1(buffer, offset, false);
+            offset++;
+            WRITE_BIT1(buffer, offset, false);
+            offset++;
+        } else if (sample < threshold)
+        {
+            WRITE_BIT1(buffer, offset, true);
+            offset++;
+            WRITE_BIT1(buffer, offset, false);
+            offset++;
+        } else
+        {
+            WRITE_BIT1(buffer, offset, true);
+            offset++;
+            WRITE_BIT1(buffer, offset, true);
+            offset++;
+        }
+
+        start += M17_RADIO_SYMBOL_LENGTH;
+        if (start >= M17_FRAME_LENGTH_SAMPLES)
+            start -= M17_FRAME_LENGTH_SAMPLES;
+    }
+}
+
+void writeBits(uint8_t c, bool isEOT)
+{
+    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'B', 'I', 'T', 'S'}; // setup 8 byte header
+    static uint8_t bytePos = 8; // set first position after header
+
+    bytes[bytePos++] = c;
+    if (bytePos == 200)
+    {
+        write(sockfd, bytes, 200);
+        bytePos = 8;
+        //  delay(1000);
+    }
+
+    if (bytePos > 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
+    {
+        memset(bytes+bytePos, 0, 200 - bytePos);
+        write(sockfd, bytes, 200);
+        bytePos = 8;
+    }
+}
+
+void writeSamples(uint8_t c, bool isEOT)
+{
+    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'}; // setup 8 byte header
+    static uint8_t bytePos = 8; // set first position after header
+    q15_t          inBuffer[4U];
+    q15_t          outBuffer[M17_RADIO_SYMBOL_LENGTH * 4U];
+
+    const uint8_t MASK = 0xC0U;
+
+    for (uint8_t i = 0U; i < 4U; i++, c <<= 2)
+    {
+        switch (c & MASK)
+        {
+            case 0xC0U:
+                inBuffer[i] = M17_LEVELA;
+            break;
+            case 0x80U:
+                inBuffer[i] = M17_LEVELB;
+            break;
+            case 0x00U:
+                inBuffer[i] = M17_LEVELC;
+            break;
+            default:
+                inBuffer[i] = M17_LEVELD;
+            break;
+        }
+    }
+
+    arm_fir_interpolate_q15(&m17modFilter, inBuffer, outBuffer, 4U);
+
+    for (uint8_t i = 0U; i < M17_RADIO_SYMBOL_LENGTH * 4U; i++)
+    {
+        bytes[bytePos++] = (outBuffer[i] & 0x00ff);
+        bytes[bytePos++] = (outBuffer[i] & 0xff00) >> 8;
+        if (bytePos == 200)
+        {
+            write(sockfd, bytes, 200);
+            bytePos = 8;
+            delay(500);
+        }
+    }
+
+    if (bytePos > 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
+    {
+        memset(bytes+bytePos, 0, 200 - bytePos);
+        write(sockfd, bytes, 200);
+        bytePos = 8;
+    }
+}
+
+void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_tx)
+{
+    if (type == M17_LSF && symLen == 0U)
+    {
+        if (!m_tx)
+        {
+            for (uint16_t i = 0U; i < m17txDelay; i++)
+                symBuffer[symLen++] = M17_SYNC;
+        }
+        else
+        {
+            for (uint8_t i = 0U; i < length; i++)
+                symBuffer[symLen++] = data[i];
+        }
+
+        symPtr = 0U;
+        fprintf(stderr, "LSF\n");
+    }
+
+    if (type == M17_STREAM && symLen == 0U)
+    {
+        for (uint8_t i = 0U; i < length; i++)
+            symBuffer[symLen++] = data[i];
+
+        symPtr = 0U;
+        fprintf(stderr, "Stream\n");
+    }
+
+    if (type == M17_PACKET && symLen == 0U)
+    {
+        for (uint8_t i = 0U; i < length; i++)
+            symBuffer[symLen++] = data[i];
+
+        symPtr = 0U;
+        fprintf(stderr, "Packet\n");
+    }
+
+    if (type == M17_EOT && symLen == 0U)
+    {
+        for (uint8_t i = 0U; i < length; i++)
+            symBuffer[symLen++] = data[i];
+
+        symPtr = 0U;
+        fprintf(stderr, "EOT\n");
+    }
+
+    while (symLen > 0U)
+    {
+        uint8_t c = symBuffer[symPtr++];
+        if (packetType == PACKET_TYPE_SAMP)
+        {
+            if (type == M17_EOT && symPtr >= symLen)
+                writeSamples(c, true);
+            else
+                writeSamples(c, false);
+        }
+        else if (packetType == PACKET_TYPE_BIT)
+        {
+            if (type == M17_EOT && symPtr >= symLen)
+                writeBits(c, true);
+            else
+                writeBits(c, false);
+        }
+
+        if (symPtr >= symLen)
+        {
+            symPtr = 0U;
+            symLen = 0U;
+            return;
+        }
+    }
+}
+
+void processBits(uint8_t* bytes, uint8_t length)
+{
+    bool bit;
+
+    for (uint8_t i = 0; i < length; i++)
+    {
+        for (int8_t j = 7; j >= 0; j--)
+        {
+            if ((bytes[i] & (0x01 << j)) > 0)
+                bit = true;
+            else
+                bit = false;
+
+            switch (m17state)
+            {
+                case M17RXS_LINK_SETUP:
+                case M17RXS_STREAM:
+                case M17RXS_PACKET:
+                    processBitsData(bit);
+                    break;
+                default:
+                    processBitsNone(bit);
+                    break;
+            }
+        }
+    }
+}
+
+void processBitsNone(bool bit)
+{
+    m17bitBuf <<= 1;
+    if (bit)
+        m17bitBuf |= 0x01U;
+
+    // Exact matching of the packet sync bit sequence
+    if (countBits16(m17bitBuf ^ M17_PACKET_SYNC_BITS) <= MAX_SYNC_BIT_START_ERRS)
+    {
+        fprintf(stderr, "M17RX: packet sync found in None\n");
+        for (uint8_t i = 0U; i < M17_SYNC_LENGTH_BYTES; i++)
+            m17outBufPtr[i] = M17_PACKET_SYNC_BYTES[i];
+
+        m17lostCount = MAX_SYNC_FRAMES;
+        m17bufferPtr = M17_SYNC_LENGTH_BITS;
+        m17state     = M17RXS_PACKET;
+
+        //  io.setDecode(true);
+
+        return;
+    }
+
+    // Exact matching of the link setup sync bit sequence
+    if (countBits16(m17bitBuf ^ M17_LINK_SETUP_SYNC_BITS) <= MAX_SYNC_BIT_START_ERRS)
+    {
+        fprintf(stderr, "M17RX: link setup sync found in None\n");
+        for (uint8_t i = 0U; i < M17_SYNC_LENGTH_BYTES; i++)
+            m17outBufPtr[i] = M17_LINK_SETUP_SYNC_BYTES[i];
+
+        m17lostCount = MAX_SYNC_FRAMES;
+        m17bufferPtr = M17_SYNC_LENGTH_BITS;
+        m17state     = M17RXS_LINK_SETUP;
+
+        // io.setDecode(true);
+
+        return;
+    }
+
+    // Exact matching of the stream sync bit sequence
+    if (countBits16(m17bitBuf ^ M17_STREAM_SYNC_BITS) <= MAX_SYNC_BIT_START_ERRS)
+    {
+        fprintf(stderr, "M17RX: stream sync found in None\n");
+        for (uint8_t i = 0U; i < M17_SYNC_LENGTH_BYTES; i++)
+            m17outBufPtr[i] = M17_STREAM_SYNC_BYTES[i];
+
+        m17lostCount = MAX_SYNC_FRAMES;
+        m17bufferPtr = M17_SYNC_LENGTH_BITS;
+        m17state     = M17RXS_STREAM;
+
+        // io.setDecode(true);
+
+        return;
+    }
+}
+
+void processBitsData(bool bit)
+{
+    m17bitBuf <<= 1;
+    if (bit)
+        m17bitBuf |= 0x01U;
+
+    WRITE_BIT1(m17outBufPtr, m17bufferPtr, bit);
+
+    m17bufferPtr++;
+    if (m17bufferPtr > M17_FRAME_LENGTH_BITS)
+        reset();
+
+    // Only search for the syncs in the right place +-1 bit
+    if (m17bufferPtr >= (M17_SYNC_LENGTH_BITS - 1U) && m17bufferPtr <= (M17_SYNC_LENGTH_BITS + 1U))
+    {
+        // Fuzzy matching of the packet sync bit sequence
+        if (countBits16(m17bitBuf ^ M17_PACKET_SYNC_BITS) <= MAX_SYNC_BIT_RUN_ERRS)
+        {
+            //   DEBUG2("M17RX: found packet sync, pos", m17bufferPtr - M17_SYNC_LENGTH_BITS);
+            m17lostCount = MAX_SYNC_FRAMES;
+            m17bufferPtr = M17_SYNC_LENGTH_BITS;
+            m17state     = M17RXS_PACKET;
+            return;
+        }
+
+        // Fuzzy matching of the link setup sync bit sequence
+        if (countBits16(m17bitBuf ^ M17_LINK_SETUP_SYNC_BITS) <= MAX_SYNC_BIT_RUN_ERRS)
+        {
+            //   DEBUG2("M17RX: found link setup sync, pos", m17bufferPtr - M17_SYNC_LENGTH_BITS);
+            m17lostCount = MAX_SYNC_FRAMES;
+            m17bufferPtr = M17_SYNC_LENGTH_BITS;
+            m17state     = M17RXS_LINK_SETUP;
+            return;
+        }
+
+        // Fuzzy matching of the stream sync bit sequence
+        if (countBits16(m17bitBuf ^ M17_STREAM_SYNC_BITS) <= MAX_SYNC_BIT_RUN_ERRS)
+        {
+            //   DEBUG2("M17RX: found stream sync, pos", m17bufferPtr - M17_SYNC_LENGTH_BITS);
+            m17lostCount = MAX_SYNC_FRAMES;
+            m17bufferPtr = M17_SYNC_LENGTH_BITS;
+            m17state     = M17RXS_STREAM;
+            return;
+        }
+
+        // Fuzzy matching of the EOT sync bit sequence
+        if (countBits16(m17bitBuf ^ M17_EOT_SYNC_BITS) <= MAX_SYNC_BIT_RUN_ERRS)
+        {
+            //   DEBUG2("M17RX: found eot sync, pos", m17bufferPtr - M17_SYNC_LENGTH_BITS);
+            //      serial.writeM17EOT();
+            //        uint8_t buf[8] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'E'};
+            decodeFrame(TYPE_EOT, NULL, 0, false);
+            reset();
+            return;
+        }
+    }
+
+    // Send a frame to the host if the required number of bits have been received
+    if (m17bufferPtr == M17_FRAME_LENGTH_BITS)
+    {
+        // We've not seen a sync for too long, signal RXLOST and change to RX_NONE
+        m17lostCount--;
+        if (m17lostCount == 0U)
+        {
+            //   DEBUG1("M17RX: sync timed out, lost lock");
+            //     uint8_t buf[8] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'E'};
+            decodeFrame(TYPE_EOT, NULL, 0, false);
+            //      serial.writeM17Lost();
+            reset();
+        }
+        else
+        {
+            // Write data to host
+            m17outBuffer[0U] = m17lostCount == (MAX_SYNC_FRAMES - 1U) ? 0x01U : 0x00U;
+
+            switch (m17state)
+            {
+                case M17RXS_LINK_SETUP:
+                {
+                    //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'L'};
+                    //    memcpy(buf + 8, m17outBuffer, 48);
+                    decodeFrame(TYPE_LSF, m17outBuffer+1, 48, false);
+                    //   writeRSSILinkSetup(m17outBuffer);
+                    break;
+                }
+                case M17RXS_STREAM:
+                {
+                    //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'S'};
+                    //    memcpy(buf + 8, m17outBuffer, 48);
+                    decodeFrame(TYPE_STREAM, m17outBuffer+1, 48, false);
+                    //   writeRSSIStream(m17outBuffer);
+                    break;
+                }
+                case M17RXS_PACKET:
+                {
+                    //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'P'};
+                    //    memcpy(buf + 8, m17outBuffer, 48);
+                    decodeFrame(TYPE_PACKET, m17outBuffer+1, 48, false);
+                    //   writeRSSIPacket(m17outBuffer);
+                    break;
+                }
+                default:
+                    break;
+            }
+
+            // Start the next frame
+            memset(m17outBuffer, 0x00U, M17_FRAME_LENGTH_BYTES + 3U);
+            m17bufferPtr = 0U;
+        }
+    }
+}
+
+void initTimers()
+{
+    for (uint8_t i = 0; i < 10; i++)
+    {
+        bzero(timer[i].name, 20);
+        timer[i].valid     = false;
+        timer[i].duration  = 0;
+        timer[i].count     = 0;
+        timer[i].enabled   = false;
+        timer[i].triggered = false;
+    }
+}
+
+int8_t getTimer(const char* name, uint32_t duration)
+{
+    for (uint8_t i = 0; i < 10; i++)
+    {
+        pthread_mutex_lock(&timerMutex);
+        if (!timer[i].valid)
+        {
+            strcpy(timer[i].name, name);
+            timer[i].valid     = true;
+            timer[i].enabled   = true;
+            timer[i].triggered = false;
+            timer[i].count     = 0;
+            timer[i].duration  = duration;
+            pthread_mutex_unlock(&timerMutex);
+            return i;
+        }
+        pthread_mutex_unlock(&timerMutex);
+    }
+    return -1;
+}
+
+bool isTimerTriggered(const char* name)
+{
+    for (uint8_t i = 0; i < 10; i++)
+    {
+        pthread_mutex_lock(&timerMutex);
+        if (timer[i].valid && timer[i].triggered && strcasecmp(timer[i].name, name) == 0)
+        {
+            pthread_mutex_unlock(&timerMutex);
+            return true;
+        }
+        pthread_mutex_unlock(&timerMutex);
+    }
+    return false;
+}
+
+void resetTimer(const char* name)
+{
+    for (uint8_t i = 0; i < 10; i++)
+    {
+        pthread_mutex_lock(&timerMutex);
+        if (timer[i].valid && strcasecmp(timer[i].name, name) == 0)
+        {
+            timer[i].count     = 0;
+            timer[i].triggered = false;
+            pthread_mutex_unlock(&timerMutex);
+            return;
+        }
+        pthread_mutex_unlock(&timerMutex);
+    }
+}
+
+void disableTimer(uint8_t id)
+{
+    pthread_mutex_lock(&timerMutex);
+    bzero(timer[id].name, 20);
+    timer[id].valid     = false;
+    timer[id].enabled   = false;
+    timer[id].triggered = false;
+    timer[id].duration  = 0;
+    timer[id].count     = 0;
+    pthread_mutex_unlock(&timerMutex);
+}
+
 // Simple timer thread.
 // Each loop through the while statement takes 1 millisecond.
 void* timerThread(void *arg)
 {
-    uint32_t loop[3] = {0, 0, 0};
     bool     idle = true;
+
+    if (getTimer("modeHang", modeHang) < 0)
+    {
+        fprintf(stderr, "Timer thread exited.\n");
+        int iRet = 600;
+        pthread_exit(&iRet);
+        return NULL;
+    }
 
     while (connected)
     {
         delay(1000);
 
-        if (loop[0] >= 2000)
+        for (uint8_t i = 0; i < 10; i++)
         {
-            statusTimeout = true;
-            loop[0] = 0;
-        }
-
-        if (loop[1] >= 30000000)
-        {
-            reflBusy = false;
-            loop[1] = 0;
-        }
-
-        if (!statusTimeout)
-            loop[0]++;
-
-        if (reflBusy)
-            loop[1]++;
-
-        if (txOn)
-        {
-            idle = false;
-            loop[2] = 0;
-        }
-        else
-        {
-            if (!idle)
+            pthread_mutex_lock(&timerMutex);
+            if (timer[i].valid && timer[i].enabled)
             {
-                if (loop[2] >= modeHang)
+                if (timer[i].count >= timer[i].duration)
                 {
-                    write(sockfd, setIdle, 5);
-                    idle = true;
+                    timer[i].triggered = true;
+                    timer[i].count     = 0;
                 }
-                else
-                    loop[2]++;
+                else if (!timer[i].triggered)
+                {
+                    timer[i].count++;
+                }
+            }
+            pthread_mutex_unlock(&timerMutex);
+            // fprintf(stderr, "T: %d  N: %s D: %u C: %u\n", i, timer[i].name, timer[i].duration, timer[i].count);
+            if (txOn && strcasecmp(timer[i].name, "modeHang") == 0)
+            {
+                idle = false;
+                resetTimer("modeHang");
+            }
+            else if (!txOn && strcasecmp(timer[i].name, "modeHang") == 0)
+            {
+                if (!idle)
+                {
+                    if (isTimerTriggered("modeHang"))
+                    {
+                        pthread_mutex_lock(&rxBufMutex);
+                        RingBuffer_addData(&rxBuffer, SETIDLE, 5);
+                        pthread_mutex_unlock(&rxBufMutex);
+                        //    write(sockfd, SETIDLE, 5);
+                        idle = true;
+                        resetTimer("modeHang");
+                    }
+                }
             }
         }
     }
-    if (debugM)
-        fprintf(stderr, "Timer thread exited.\n");
+
+    fprintf(stderr, "Timer thread exited.\n");
     int iRet = 600;
+    pthread_exit(&iRet);
+    return NULL;
+}
+
+void* rxThread(void* arg)
+{
+    uint8_t loop = 0;
+
+    while (connected)
+    {
+        delay(100);
+        loop++;
+
+        if (loop > 100)
+        {
+            pthread_mutex_lock(&rxBufMutex);
+            uint32_t avail = RingBuffer_dataSize(&rxBuffer);
+            pthread_mutex_unlock(&rxBufMutex);
+
+            if (avail >= 5)
+            {
+                uint8_t buf[1];
+
+                pthread_mutex_lock(&rxBufMutex);
+                RingBuffer_peek(&rxBuffer, buf, 1);
+                pthread_mutex_unlock(&rxBufMutex);
+
+                if (buf[0] != 0x61)
+                {
+                    fprintf(stderr, "RX invalid header.\n");
+                    pthread_mutex_lock(&rxBufMutex);
+                    RingBuffer_getData(&rxBuffer, buf, 1);
+                    pthread_mutex_unlock(&rxBufMutex);
+                    loop = 0;
+                    continue;
+                }
+                uint8_t byte[3];
+                uint16_t len = 0;
+
+                pthread_mutex_lock(&rxBufMutex);
+                RingBuffer_peek(&rxBuffer, byte, 3);
+                avail = RingBuffer_dataSize(&rxBuffer);
+                pthread_mutex_unlock(&rxBufMutex);
+
+                len = (byte[1] << 8) + byte[2];
+                if (avail >= len)
+                {
+                    uint8_t buf[len];
+
+                    pthread_mutex_lock(&rxBufMutex);
+                    RingBuffer_getData(&rxBuffer, buf, len);
+                    pthread_mutex_unlock(&rxBufMutex);
+
+                    if (len == 5)
+                    {
+                        if (write(sockfd, buf, len) < 0)
+                        {
+                            fprintf(stderr, "ERROR: remote disconnect\n");
+                            break;
+                        }
+                        loop = 0;
+                        continue;
+                    }
+                    uint8_t type[4];
+                    memcpy(type, buf + 4, 4);
+                    if (memcmp(type, TYPE_LSF, 4) == 0)
+                    {
+                        processTx(buf + 8, 48, M17_LSF, false); // send preamble
+                        processTx(buf + 8, 48, M17_LSF, true);  // send LSF
+                    }
+                    else if (memcmp(type, TYPE_STREAM, 4) == 0)
+                    {
+                        processTx(buf + 8, 48, M17_STREAM, true);
+                    }
+                    else if (memcmp(type, TYPE_PACKET, 4) == 0)
+                    {
+                        processTx(buf + 8, 48, M17_PACKET, true);
+                    }
+                    else if (memcmp(type, TYPE_EOT, 4) == 0)
+                    {
+                        processTx(buf + 8, 48, M17_EOT, true);
+                    }
+                }
+            }
+            loop = 0;
+        }
+    }
+
+    fprintf(stderr, "RX thread exited.\n");
+    int iRet         = 500;
+    pthread_mutex_lock(&stateMutex);
+    m17GWConnected = false;
+    pthread_mutex_unlock(&stateMutex);
     pthread_exit(&iRet);
     return NULL;
 }
@@ -338,12 +1865,11 @@ void* startClient(void *arg)
     sleep(1);
     fprintf(stderr, "Connected to host.\n");
 
-    char gps[50] = "";
     ssize_t len = 0;
     uint8_t offset = 0;
     uint16_t respLen = 0;
     uint8_t typeLen = 0;
-    uint8_t configLen = 4 + 4 + 11 + 6 + 1 + 1 + 1 + 1 + 42 + 1 + 1 + 1 + 1 + 45;
+    uint8_t configLen = 4 + 4 + 11 + 6 + 1 + 40 + 16 + 1 + 1; // + 1 + 1 + 1 + 1 + 42 + 1 + 1 + 1 + 1 + 45;
 
     buffer[0] = 0x61;
     buffer[1] = 0x00;
@@ -352,21 +1878,43 @@ void* startClient(void *arg)
     memcpy(buffer+4, TYPE_MODE, 4);
     memcpy(buffer+8, MODE_NAME, 11);
     memcpy(buffer+19, MODEM_TYPE, 6);
-    buffer[25] = USE_DC_FILTER;
-    buffer[26] = USE_LP_FILTER;
-    buffer[27] = RX_RRC_FILTER_STATE_LEN;
-    buffer[28] = RX_RRC_0_5_FILTER_LEN;
-    memcpy(buffer+29, RX_RRC_0_5_FILTER, RX_RRC_0_5_FILTER_LEN);
-    buffer[71] = TX_SYMBOL_LENGTH;
-    buffer[72] = TX_RRC_FILTER_STATE_LEN;
-    buffer[73] = TX_RRC_0_5_FILTER_PHASE_LEN;
-    buffer[74] = TX_RRC_0_5_FILTER_LEN;
-    memcpy(buffer+75, TX_RRC_0_5_FILTER, TX_RRC_0_5_FILTER_LEN);
+    buffer[25] = txLevel;
+    //    buffer[25] = USE_DC_FILTER;
+    //    buffer[26] = USE_LP_FILTER;
+    uint8_t bytes[40];
+
+    // Dev: +1 symb 800 Hz, symb rate = 4800
+    uint32_t reg3 = 0x2A4CC093;
+    uint32_t reg10 = 0x049E472A;
+
+    // K=32
+    uint32_t reg4  = (uint32_t) 0b0100           << 0;   // register 4
+    reg4 |= (uint32_t) 0b011                     << 4;   // mode, 4FSK
+    reg4 |= (uint32_t) 0b0                       << 7;
+    reg4 |= (uint32_t) 0b11                      << 8;
+    reg4 |= (uint32_t) 590U                      << 10;  // Disc BW
+    reg4 |= (uint32_t) 7U                        << 20;  // Post dem BW
+    reg4 |= (uint32_t) 0b10                      << 30;  // IF filter (12.5 kHz)
+
+    uint32_t reg2 = (uint32_t) 0b10              << 28;  // invert data (and RC alpha = 0.5)
+    reg2 |= (uint32_t) 0b111                     << 4;   // modulation (RC 4FSK)
+
+    uint32_t reg13 = (uint32_t) 0b1101           << 0;   // register 13
+    reg13 |= (uint32_t) ADF7021_SLICER_TH_M17    << 4;   // slicer threshold
+
+    ifConf(bytes, reg2, reg3, reg4, reg10, reg13, atol(modem_rxFrequency), atol(modem_txFrequency),
+           txLevel, rfPower, 0, true);
+
+    memcpy(buffer + 26, bytes, 40);
+    uint64_t tmp[2] = {M17_LINK_SETUP_SYNC_BITS, 0xffff};
+    memcpy(buffer + 66, (uint8_t*)tmp, 16);
+    buffer[82] = 0x20; // use 16 bit counter
+    buffer[83] = 0x11; // TX MSB first / scan multiplier
     write(sockfd, buffer, configLen);
     sleep(1);
 
     decoder.reset();
-    rx_lsf.clear();
+    /* rx_lsf is a C++ object, will be updated on first decode */
 
     while (connected)
     {
@@ -428,7 +1976,7 @@ void* startClient(void *arg)
         memcpy(type, buffer+4, typeLen);
 
         if (debugM)
-            dump((char*)"M17 Frame data", (unsigned char*)buffer, respLen);
+            dump((char*)"M17 data", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -437,321 +1985,54 @@ void* startClient(void *arg)
             else if (buffer[8] == COMM_SET_SIMPLEX)
                 modem_duplex = false;
         }
-        else if (memcmp(type, TYPE_LSF, typeLen) == 0 || memcmp(type, TYPE_STREAM, typeLen) == 0 || memcmp(type, TYPE_PACKET, typeLen) == 0)
+        else if (memcmp(type, TYPE_SAMPLE, typeLen) == 0)
         {
-            frame_t frame;
-            for (int x=0;x<48;x++)
+            packetType = PACKET_TYPE_SAMP;
+            q15_t smp[2];
+            q15_t in[2];
+            for (uint16_t i = 8; i < respLen; i = i + 4)
             {
-                frame.data()[x] = buffer[x+4+typeLen];
-            }
-            auto  ftype  = decoder.decodeFrame(frame);
-            rx_lsf      = decoder.getLsf();
-            bool  lsfOk = rx_lsf.valid();
-            if (!txOn)
-            {
-                streamId = (rand() & 0x7ff);
-                voiceFrameCnt = 0;
-                frameCnt = 0;
-                validFrame = false;
-                lastFrameNum = 0;
-                start_time = time(NULL);
-            }
-            if (lsfOk)
-            {
-                if (m17ReflConnected && gwTxBuffer.freeSpace() >= respLen)
+                memcpy(in, buffer + i, 4);
+                if (USE_DC_FILTER)
                 {
-                    gwTxBuffer.addData(buffer, respLen);
-                }
-                if (!txOn)
-                {
-                    if (write(sockfd, setMode, 5) < 0)
-                    {
-                        fprintf(stderr, "ERROR: host disconnect\n");
-                        break;
-                    }
-                    saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, "", true);
-                }
-                txOn = true;
-                validFrame = true;
-                pkt_lsf = decoder.getLsf();
-                strcpy(srcCallsign, rx_lsf.getSource().c_str());
-                strcpy(dstCallsign, rx_lsf.getDestination().c_str());
-                // Retrieve extended callsign data
-                if (!smsStarted)
-                    packetData[0] = 0x0;
-                streamType_t streamType = rx_lsf.getType();
+                    q31_t q31Samples[2];
+                    arm_q15_to_q31(in, q31Samples, 2);
 
-                if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
-                    (streamType.fields.encSubType == M17_META_EXTD_CALLSIGN))
-                {
-                    meta_t& meta = rx_lsf.metadata();
-                    strcpy(exCall1, decode_callsign(meta.extended_call_sign.call1).c_str());
-                    strcpy(exCall2, decode_callsign(meta.extended_call_sign.call2).c_str());
+                    q31_t dcValues[2];
+                    arm_biquad_cascade_df1_q31(&dcFilter, q31Samples, dcValues, 2);
 
-                    if (frameCnt == 6)
-                        frameCnt = 0;
+                    q31_t dcLevel = 0;
+                    for (uint8_t i = 0U; i < 2; i++)
+                        dcLevel += dcValues[i];
+
+                    dcLevel /= 2;
+
+                    q15_t offset = q15_t(__SSAT((dcLevel >> 16), 16));
+
+                    q15_t dcSamples[2];
+                    for (uint8_t i = 0U; i < 2; i++)
+                        dcSamples[i] = in[i] - offset;
+
+                    arm_fir_fast_q15(&m17rrc05Filter, dcSamples, smp, 2);
                 }
-                // Check if metatext is present
-                else if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
-                         (streamType.fields.encSubType == M17_META_TEXT) &&
-                          rx_lsf.valid() && frameCnt == 6)
-                {
-                    frameCnt = 0;
-                    meta_t& meta = rx_lsf.metadata();
-                    uint8_t blk_len = (meta.raw_data[0] & 0xf0) >> 4;
-                    uint8_t blk_id = (meta.raw_data[0] & 0x0f);
-                    if (blk_id == 1)
-                    {  // On first block reset everything
-                        memset(metaText, 0, 53);
-                        memset(textBuffer, 0, 53);
-                        textOffset = 0;
-                        blk_id_tot = 0;
-                        textStarted = true;
-                    }
-                    // check if first valid metatext block is found
-                    if (textStarted)
-                    {
-                        // Check for valid block id
-                        if (blk_id <= 0x0f)
-                        {
-                            blk_id_tot += blk_id;
-                            memcpy(textBuffer+textOffset, meta.raw_data+1, 13);
-                            textOffset += 13;
-                            // Check for completed text message
-                            if ((blk_len == blk_id_tot) || textOffset == 52)
-                            {
-                                memcpy(metaText, textBuffer, textOffset);
-                                textOffset = 0;
-                                blk_id_tot = 0;
-                                textStarted = false;
-                                if (debugM)
-                                    fprintf(stderr, "Text: %s\n", metaText);
-                            }
-                        }
-                    }
-                }
-                else if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
-                         (streamType.fields.encSubType == M17_META_GNSS) &&
-                          rx_lsf.valid())
-                {
-                    gpsFound = true;
-                }
+                else
+                    arm_fir_fast_q15(&m17rrc05Filter, in, smp, 2);
 
-                if (modem_duplex && ftype == M17FrameType::LINK_SETUP && validFrame)
-                {
-                    if (write(sockfd, buffer, respLen) < 0)
-                    {
-                        fprintf(stderr, "ERROR: host disconnect\n");
-                        break;
-                    }
-                }
-                else if (ftype == M17FrameType::STREAM && validFrame)
-                {
-                    if (!txOn)
-                    {
-                        if (write(sockfd, setMode, 5) < 0)
-                        {
-                            fprintf(stderr, "ERROR: host disconnect\n");
-                            break;
-                        }
-                        saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, "", true);
-                    }
-                    M17StreamFrame sf = decoder.getStreamFrame();
-                    uint16_t diff = (sf.getFrameNumber() & 0x7fff) - (lastFrameNum & 0x7fff);
-                    if ((sf.getFrameNumber() && 0x8000) != 0x8000)
-                    {
-                        if (diff > 2 || sf.getFrameNumber() == 0)
-                        {
-                            fprintf(stderr, "Frame number invalid.\n");
-                            lastFrameNum = sf.getFrameNumber() & 0x7fff;
-                            continue;;
-                        }
-                    }
-                    else
-                    {
-                        fprintf(stderr, "Last frame detected.\n");
-                    }
-                    lastFrameNum = sf.getFrameNumber();
-                    frameCnt++;
-                    if (!txOn)
-                        voiceFrameCnt = 0;
-                    txOn = true;
-                    meta_t& meta = rx_lsf.metadata();
-                    if (!gpsFound && streamType.fields.encSubType == M17_META_TEXT)
-                    {
-                        uint8_t blk_len = (meta.raw_data[0] & 0xf0) >> 4;
-                        uint8_t blk_id = (meta.raw_data[0] & 0x0f);
-                        if (blk_id == 1)
-                        {  // On first block reset everything
-                            memset(metaText, 0, 53);
-                            memset(textBuffer, 0, 53);
-                            textOffset = 0;
-                            blk_id_tot = 0;
-                            textStarted = true;
-                        }
-                        // check if first valid metatext block is found
-                        if (textStarted)
-                        {
-                            // Check for valid block id
-                            if (blk_id <= 0x0f)
-                            {
-                                blk_id_tot += blk_id;
-                                memcpy(textBuffer+textOffset, meta.raw_data+1, 13);
-                                textOffset += 13;
-                                // Check for completed text message
-                                if ((blk_len == blk_id_tot) || textOffset == 52)
-                                {
-                                    memcpy(metaText, textBuffer, textOffset);
-                                    textOffset = 0;
-                                    blk_id_tot = 0;
-                                    textStarted = false;
-                                    if (debugM)
-                                        fprintf(stderr, "Text 2: %s\n", metaText);
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        float    ltm = 90.0f / 8388607.0f;
-                        float    lgm = 180.0f / 8388607.0f;
-                        uint8_t  data_source = (meta.raw_data[0] & 0xf0) >> 4;
-                        uint8_t  station_type = meta.raw_data[0] & 0x0f;
-                        uint8_t  validity = (meta.raw_data[1] & 0xf0) >> 4;
-                        uint8_t  radius = (meta.raw_data[1] & 0x0e) >> 1;
-                        uint16_t bearing = ((meta.raw_data[1] & 01) << 8) + meta.raw_data[2];
-                        int32_t  lat = (meta.raw_data[3] << 16) + (meta.raw_data[4] << 8) + meta.raw_data[5];
-                        int32_t  lon = (meta.raw_data[6] << 16) + (meta.raw_data[7] << 8) + meta.raw_data[8];
-                        uint16_t altitude = (((meta.raw_data[9] << 8) + meta.raw_data[10]) * 0.5f) - 500;
-                        uint16_t speed = ((meta.raw_data[11] << 4) + ((meta.raw_data[12] & 0xf0) >> 4)) * 0.5f;
-                        float    latitude = lat * ltm;
-                        float    longitude = (lon * lgm) - 360.0f;
-                        if (debugM)
-                            fprintf(stderr, "Lat: %f  Lon: %f  Alt: %d\n", latitude, longitude, altitude);
-                        sprintf(gps, "%f %f %d %d %d", latitude, longitude, altitude, bearing, speed);
-                        gpsFound = false;
-                    }
-                    voiceFrameCnt++;
-
-                    if (statusTimeout)
-                    {
-                        saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, "", true);
-                        statusTimeout = false;
-                    }
-
-                    if (modem_duplex)
-                    {
-                        if (write(sockfd, buffer, respLen) < 0)
-                        {
-                            fprintf(stderr, "ERROR: host disconnect\n");
-                            break;
-                        }
-                    }
-                }
-                else if (ftype == M17FrameType::PACKET && validFrame)
-                {
-                    M17PacketFrame pf = decoder.getPacketFrame();
-                    if (!smsStarted && pf.payload()[0] == 0x05)
-                    {  // check for valid SMS packet message
-                        smsLastFrame = 0;
-                        smsStarted = true;
-                        totalSMSLength = 0;
-                        totalSMSMessages = 0;
-                        memset(packetData, 0, 821);
-                        fprintf(stderr, "Packet data detected.\n");
-                    }
-
-                    // store next frame of message
-                    if (smsStarted)
-                    {
-                        uint8_t rx_fn   = (pf.payload()[25] >> 2) & 0x1F;
-                        uint8_t rx_last =  pf.payload()[25] >> 7;
-                        if (rx_fn <= 31 && rx_fn == smsLastFrame && !rx_last)
-                        {
-                            memcpy(&packetData[totalSMSLength], pf.payload().data(), 25);
-                            smsLastFrame++;
-                            totalSMSLength += 25;
-                        }
-                        else if (rx_last)
-                        {
-                            memcpy(&packetData[totalSMSLength], pf.payload().data(), rx_fn < 25 ? rx_fn : 25);
-                            totalSMSLength += rx_fn < 25 ? rx_fn : 25;
-                            // check crc matches
-                            uint16_t packet_crc = rx_lsf.m17Crc(packetData, totalSMSLength - 2);
-                            uint16_t crc;
-                            memcpy((uint8_t*)&crc, &packetData[totalSMSLength - 2], 2);
-                            // store completed message into message queue
-                            char *tmp = (char*)malloc(totalSMSLength-3);
-                            if (tmp != NULL && crc == packet_crc)
-                            {
-                                memset(tmp, 0, totalSMSLength-3);
-                                memcpy(tmp, &packetData[1], totalSMSLength-3);
-                                strcpy((char*)packetData, tmp);
-                                totalSMSMessages++;
-                            }
-                            else
-                            {   // if message memory allocation fails, crc does not match
-                                // or duplicate message delete sender call
-                                if (tmp != NULL)
-                                    free(tmp);
-                            }
-                            smsStarted    = false;
-                        }
-                    }
-
-                    if (totalSMSMessages > 0)
-                        saveLastCall("M17", "RF", srcCallsign, dstCallsign, "Packet", (const char*)packetData, "", true);
-
-                    if (modem_duplex)
-                    {
-                        if (write(sockfd, buffer, respLen) < 0)
-                        {
-                            fprintf(stderr, "ERROR: host disconnect\n");
-                            break;
-                        }
-                    }
-                }
+                samples(smp, 2);
             }
         }
-        else if (memcmp(type, TYPE_EOT, typeLen) == 0 && validFrame)
+        else if (memcmp(type, TYPE_BITS, typeLen) == 0)
         {
-            if (m17ReflConnected && gwTxBuffer.freeSpace() >= respLen)
-            {
-                gwTxBuffer.addData(buffer, respLen);
-            }
-
-            frameCnt = 0;
-            lastFrameNum = 0;
-            rx_lsf.clear();
-            decoder.reset();
-            if (debugM)
-                fprintf(stderr, "Found M17 EOT\n");
-            float loss_BER = (float)decoder.bitErr / 3.68F;
-            duration = difftime(time(NULL), start_time);
-            saveLastCall("M17", "RF", srcCallsign, dstCallsign, metaText, NULL, gps, false);
-            if (voiceFrameCnt > 0)
-            {
-                saveHistory("M17", "RF", srcCallsign , dstCallsign, loss_BER, metaText, duration);
-            }
-            else if (totalSMSMessages > 0)
-            {
-                saveLastCall("M17", "RF", srcCallsign, dstCallsign, "Packet", (const char*)packetData, gps, false);
-                saveHistory("M17", "RF", srcCallsign , dstCallsign, loss_BER, "Packet", duration);
-            }
-            voiceFrameCnt = 0;
-            gps[0] = 0;
-            if (modem_duplex)
-            {
-                if (write(sockfd, buffer, respLen) < 0)
-                {
-                    fprintf(stderr, "ERROR: host disconnect\n");
-                    break;
-                }
-            }
-            validFrame = false;
-            txOn = false;
+            packetType = PACKET_TYPE_BIT;
+            processBits(buffer + 8, respLen - 8);
+        }
+        else
+        {
+            packetType = PACKET_TYPE_FRAME;
+            decodeFrame((const char*)type, buffer + 8, respLen - 8, false);
         }
     }
+    txOn = false;
     fprintf(stderr, "Disconnected from host.\n");
     // Close socket
     close(sockfd);
@@ -774,24 +2055,45 @@ void* txThread(void *arg)
 
         if (loop > 100)
         {
-            if (gwTxBuffer.dataSize() >= 5)
+            pthread_mutex_lock(&gwTxBufMutex);
+            uint32_t avail = RingBuffer_dataSize(&gwTxBuffer);
+            pthread_mutex_unlock(&gwTxBufMutex);
+
+            if (avail >= 5)
             {
                 uint8_t buf[1];
-                gwTxBuffer.peek(buf, 1);
+
+                pthread_mutex_lock(&gwTxBufMutex);
+                RingBuffer_peek(&gwTxBuffer, buf, 1);
+                pthread_mutex_unlock(&gwTxBufMutex);
+
                 if (buf[0] != 0x61)
                 {
                     fprintf(stderr, "TX invalid header.\n");
+                    pthread_mutex_lock(&gwTxBufMutex);
+                    RingBuffer_getData(&gwTxBuffer, buf, 1);
+                    pthread_mutex_unlock(&gwTxBufMutex);
+                    loop = 0;
                     continue;
                 }
                 uint8_t  byte[3];
                 uint16_t len = 0;
-                gwTxBuffer.peek(byte, 3);
-                len = (byte[1] << 8) + byte[2];;
-                if (gwTxBuffer.dataSize() >= len)
+
+                pthread_mutex_lock(&gwTxBufMutex);
+                RingBuffer_peek(&gwTxBuffer, byte, 3);
+                avail = RingBuffer_dataSize(&gwTxBuffer);
+                pthread_mutex_unlock(&gwTxBufMutex);
+
+                len = (byte[1] << 8) + byte[2];
+                if (avail >= len)
                 {
-                    uint8_t buf[len];
-                    gwTxBuffer.getData(buf, len);
-                    if (write(sockfd, buf, len) < 0)
+                    uint8_t tbuf[len];
+
+                    pthread_mutex_lock(&gwTxBufMutex);
+                    RingBuffer_getData(&gwTxBuffer, tbuf, len);
+                    pthread_mutex_unlock(&gwTxBufMutex);
+
+                    if (write(sockfd, tbuf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
                         break;
@@ -802,25 +2104,45 @@ void* txThread(void *arg)
             loop = 0;
         }
 
-        if (gwCommand.dataSize() >= 5)
+        pthread_mutex_lock(&gwCmdMutex);
+        uint32_t cmdAvail = RingBuffer_dataSize(&gwCommand);
+        pthread_mutex_unlock(&gwCmdMutex);
+
+        if (cmdAvail >= 5)
         {
             uint8_t buf[1];
-            gwCommand.peek(buf, 1);
+
+            pthread_mutex_lock(&gwCmdMutex);
+            RingBuffer_peek(&gwCommand, buf, 1);
+            pthread_mutex_unlock(&gwCmdMutex);
+
             if (buf[0] != 0x61)
             {
                 fprintf(stderr, "TX invalid header.\n");
+                pthread_mutex_lock(&gwCmdMutex);
+                RingBuffer_getData(&gwCommand, buf, 1);
+                pthread_mutex_unlock(&gwCmdMutex);
             }
             else
             {
                 uint8_t  byte[3];
                 uint16_t len = 0;
-                gwCommand.peek(byte, 3);
-                len = (byte[1] << 8) + byte[2];;
-                if (gwCommand.dataSize() >= len)
+
+                pthread_mutex_lock(&gwCmdMutex);
+                RingBuffer_peek(&gwCommand, byte, 3);
+                cmdAvail = RingBuffer_dataSize(&gwCommand);
+                pthread_mutex_unlock(&gwCmdMutex);
+
+                len = (byte[1] << 8) + byte[2];
+                if (cmdAvail >= len)
                 {
-                    uint8_t buf[len];
-                    gwCommand.getData(buf, len);
-                    if (write(sockfd, buf, len) < 0)
+                    uint8_t cbuf[len];
+
+                    pthread_mutex_lock(&gwCmdMutex);
+                    RingBuffer_getData(&gwCommand, cbuf, len);
+                    pthread_mutex_unlock(&gwCmdMutex);
+
+                    if (write(sockfd, cbuf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
                         break;
@@ -829,6 +2151,7 @@ void* txThread(void *arg)
             }
         }
     }
+
     fprintf(stderr, "TX thread exited.\n");
     int iRet = 500;
     pthread_exit(&iRet);
@@ -846,8 +2169,10 @@ void *processGatewaySocket(void *arg)
     uint8_t  buffer[BUFFER_SIZE];
     char     gps[50] = "";
 
+    pthread_mutex_lock(&stateMutex);
     m17GWConnected = true;
-    addGateway("main", "M17");
+    pthread_mutex_unlock(&stateMutex);
+    addGateway(modemName, "main", "M17");
     txOn = false;
 
     while (1)
@@ -915,196 +2240,79 @@ void *processGatewaySocket(void *arg)
 
         typeLen = buffer[3];
         uint8_t type[typeLen];
-        memcpy(type, buffer+4, typeLen);
+        memcpy(type, buffer + 4, typeLen);
 
         if (debugM)
             dump((char*)"M17 Gateway data:", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_NACK, typeLen) == 0)
         {
+            pthread_mutex_lock(&stateMutex);
             m17ReflConnected = false;
+            pthread_mutex_unlock(&stateMutex);
             char tmp[8];
             bzero(tmp, 8);
-            memcpy(tmp, buffer+4+typeLen, 7);
-            ackDashbCommand("reflLinkM17", "failed");
-            setReflectorStatus("M17", (const char*)tmp, "Unlinked");
+            memcpy(tmp, buffer + 4 + typeLen, 7);
+            ackDashbCommand(modemName, "reflLinkM17", "failed");
+            setReflectorStatus(modemName, "M17", (const char*)tmp, false);
         }
         else if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
         {
+            pthread_mutex_lock(&stateMutex);
             m17ReflConnected = true;
-            ackDashbCommand("reflLinkM17", "success");
-            char tmp[8];
-            bzero(tmp, 8);
-            memcpy(tmp, buffer+4+typeLen, 7);
-            char module[2];
-            bzero(module, 2);
-            module[0] = buffer[15];
-            setReflectorStatus("M17", (const char*)tmp, module);
+            pthread_mutex_unlock(&stateMutex);
+            ackDashbCommand(modemName, "reflLinkM17", "success");
+            char tmp[9];
+            bzero(tmp, 9);
+            memcpy(tmp, buffer + 4 + typeLen, 7);
+            tmp[7] = ' ';
+            tmp[8] = buffer[15];
+            setReflectorStatus(modemName, "M17", (const char*)tmp, true);
         }
         else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
         {
+            pthread_mutex_lock(&stateMutex);
             m17ReflConnected = false;
-            char tmp[8];
-            bzero(tmp, 8);
-            memcpy(tmp, buffer+4+typeLen, 7);
-            ackDashbCommand("reflLinkM17", "success");
-            setReflectorStatus("M17", (const char*)tmp, "Unlinked");
+            pthread_mutex_unlock(&stateMutex);
+            char tmp[10];
+            bzero(tmp, 10);
+            memcpy(tmp, buffer + 4 + typeLen, 7);
+            tmp[7] = ' ';
+            tmp[8] = buffer[15];
+            ackDashbCommand(modemName, "reflLinkM17", "success");
+            setReflectorStatus(modemName, "M17", (const char*)tmp, false);
         }
         else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
         {
         }
-        else if (memcmp(type, TYPE_LSF, typeLen) == 0)
+        else if (memcmp(type, TYPE_LSF, typeLen) == 0 && isActiveMode())
         {
+            pthread_mutex_lock(&stateMutex);
             reflBusy = true;
-            start_time = time(NULL);
-            decoder.reset();
-            rx_lsf.clear();
-            smsStarted = false;
-            duration = 0;
-            bzero(metaText, 53);
-            if (!txOn)
-            {
-                write(sockfd, setMode, 5);
-            }
-            txOn = true;
-            strcpy(srcCallsign, "N0CALL");
-            strcpy(dstCallsign, "N0CALL");
-            frame_t frame;
-            for (int x=0;x<48;x++)
-            {
-                frame.data()[x] = buffer[x+4+typeLen];
-            }
-            auto  ftype = decoder.decodeFrame(frame);
-            rx_lsf      = decoder.getLsf();
-            strcpy(srcCallsign, rx_lsf.getSource().c_str());
-            strcpy(dstCallsign, rx_lsf.getDestination().c_str());
-            saveLastCall("M17", "NET", srcCallsign, dstCallsign, metaText, NULL, "", true);
-            streamType_t streamType = rx_lsf.getType();
-            if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
-                (streamType.fields.encSubType == M17_META_TEXT))
-            {
-                meta_t& meta = rx_lsf.metadata();
-                memcpy(metaText, meta.raw_data+1, 13);
-            }
-            else if ((streamType.fields.encType   == M17_ENCRYPTION_NONE) &&
-                     (streamType.fields.encSubType == M17_META_GNSS) &&
-                      rx_lsf.valid())
-            {
-                meta_t&  meta = rx_lsf.metadata();
-                float    ltm = 90.0f / 8388607.0f;
-                float    lgm = 180.0f / 8388607.0f;
-                uint8_t  data_source = (meta.raw_data[0] & 0xf0) >> 4;
-                uint8_t  station_type = meta.raw_data[0] & 0x0f;
-                uint8_t  validity = (meta.raw_data[1] & 0xf0) >> 4;
-                uint8_t  radius = (meta.raw_data[1] & 0x0e) >> 1;
-                uint16_t bearing = ((meta.raw_data[1] & 01) << 8) + meta.raw_data[2];
-                int32_t  lat = (meta.raw_data[3] << 16) + (meta.raw_data[4] << 8) + meta.raw_data[5];
-                int32_t  lon = (meta.raw_data[6] << 16) + (meta.raw_data[7] << 8) + meta.raw_data[8];
-                uint16_t altitude = (((meta.raw_data[9] << 8) + meta.raw_data[10]) * 0.5f) - 500;
-                uint16_t speed = ((meta.raw_data[11] << 4) + ((meta.raw_data[12] & 0xf0) >> 4)) * 0.5f;
-                float    latitude = lat * ltm;
-                float    longitude = (lon * lgm) - 360.0f;
-                fprintf(stderr, "Lat: %f  Lon: %f  Alt: %d\n", latitude, longitude, altitude);
-                sprintf(gps, "%f %f %d %d %d", latitude, longitude, altitude, bearing, speed);
-            }
-            write(sockfd, buffer, respLen);
+            pthread_mutex_unlock(&stateMutex);
+            decodeFrame(TYPE_LSF, buffer + 8, 48, true);
         }
-        else if (memcmp(type, TYPE_STREAM, typeLen) == 0)
+        else if (memcmp(type, TYPE_STREAM, typeLen) == 0 && isActiveMode())
         {
-            write(sockfd, buffer, respLen);
-            if (statusTimeout)
-            {
-                saveLastCall("M17", "NET", srcCallsign, dstCallsign, metaText, NULL, "", true);
-                statusTimeout = false;
-            }
+            decodeFrame(TYPE_STREAM, buffer + 8, 48, true);
         }
-        else if (memcmp(type, TYPE_PACKET, typeLen) == 0)
+        else if (memcmp(type, TYPE_PACKET, typeLen) == 0 && isActiveMode())
         {
-            txOn = true;
-            frame_t frame;
-            for (int x=0;x<48;x++)
-            {
-                frame.data()[x] = buffer[x+4+typeLen];
-            }
-            auto  ftype = decoder.decodeFrame(frame);
-            M17PacketFrame pf = decoder.getPacketFrame();
-            if (!smsStarted && pf.payload()[0] == 0x05)
-            {  // check for valid SMS packet message
-                smsLastFrame = 0;
-                smsStarted = true;
-                totalSMSLength = 0;
-                totalSMSMessages = 0;
-                memset(packetData, 0, 821);
-            }
-
-            // store next frame of message
-            if (smsStarted)
-            {
-                uint8_t rx_fn   = (pf.payload()[25] >> 2) & 0x1F;
-                uint8_t rx_last =  pf.payload()[25] >> 7;
-                if (rx_fn <= 31 && rx_fn == smsLastFrame && !rx_last)
-                {
-                    memcpy(&packetData[totalSMSLength], pf.payload().data(), 25);
-                    smsLastFrame++;
-                    totalSMSLength += 25;
-                }
-                else if (rx_last)
-                {
-                    memcpy(&packetData[totalSMSLength], pf.payload().data(), rx_fn < 25 ? rx_fn : 25);
-                    totalSMSLength += rx_fn < 25 ? rx_fn : 25;
-                    // check crc matches
-                    uint16_t packet_crc = rx_lsf.m17Crc(packetData, totalSMSLength - 2);
-                    uint16_t crc;
-                    memcpy((uint8_t*)&crc, &packetData[totalSMSLength - 2], 2);
-                    // store completed message into message queue
-                    char *tmp = (char*)malloc(totalSMSLength-3);
-                    if (tmp != NULL && crc == packet_crc)
-                    {
-                        memset(tmp, 0, totalSMSLength-3);
-                        memcpy(tmp, &packetData[1], totalSMSLength-3);
-                        strcpy((char*)packetData, tmp);
-                        totalSMSMessages++;
-                    }
-                    else
-                    {   // if message memory allocation fails, crc does not match
-                        // or duplicate message delete sender call
-                        if (tmp != NULL)
-                            free(tmp);
-                    }
-                    smsStarted    = false;
-                }
-            }
-
-            if (totalSMSMessages > 0)
-            {
-                saveLastCall("M17", "NET", srcCallsign, dstCallsign, "Packet", (const char*)packetData, "", false);
-                saveHistory("M17", "NET", srcCallsign , dstCallsign, 0, "Packet", 0);
-                smsStarted = false;
-            }
-
-            write(sockfd, buffer, respLen);
+            decodeFrame(TYPE_PACKET, buffer + 8, 48, true);
         }
-        else if (memcmp(type, TYPE_EOT, typeLen) == 0)
+        else if (memcmp(type, TYPE_EOT, typeLen) == 0 && isActiveMode())
         {
-            write(sockfd, buffer, respLen);
-            duration = difftime(time(NULL), start_time);
-            if (totalSMSMessages == 0)
-            {
-                saveLastCall("M17", "NET", srcCallsign, dstCallsign, metaText, NULL, gps, false);
-fprintf(stderr, "M17 EOT ********************************\n");
-                saveHistory("M17", "NET", srcCallsign , dstCallsign, 0, metaText, duration);
-            }
-            txOn = false;
-            totalSMSMessages = 0;
-            gps[0] = 0;
+            decodeFrame(TYPE_EOT, buffer + 8, 48, true);
         }
         delay(5);
     }
     fprintf(stderr, "Gateway disconnected.\n");
-    m17GWConnected = false;
+    pthread_mutex_lock(&stateMutex);
+    m17GWConnected   = false;
     m17ReflConnected = false;
-    delGateway("main", "M17");
-    clearReflLinkStatus("M17");
+    pthread_mutex_unlock(&stateMutex);
+    delGateway(modemName, "main", "M17");
+    clearReflLinkStatus(modemName, "M17");
     int iRet = 100;
     pthread_exit(&iRet);
     return 0;
@@ -1218,6 +2426,15 @@ void *startTCPServer(void *arg)
                 fprintf(stderr, "TX thread created successfully\n");
         }
 
+        pthread_t rxid;
+        err = pthread_create(&(rxid), NULL, &rxThread, NULL);
+        if (err != 0)
+            fprintf(stderr, "Can't create rx thread :[%s]", strerror(err));
+        else
+        {
+            if (debugM) fprintf(stderr, "RX thread created successfully\n");
+        }
+
         pthread_t procid;
         err = pthread_create(&(procid), NULL, &processGatewaySocket, (void*)(intptr_t)childfd);
         if (err != 0)
@@ -1243,10 +2460,27 @@ int main(int argc, char **argv)
     int  ret;
     int  c;
 
-    while ((c = getopt(argc, argv, "dvx")) != -1)
+    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
     {
         switch (c)
         {
+            case 'm':
+            {
+                modemId = atoi(optarg);
+                if (modemId < 1 || modemId > 10)
+                {
+                    fprintf(stderr, "Invalid modem number.\n");
+                    return 1;
+                }
+                sprintf(modemName, "modem%d", modemId);
+                clientPort = 18000 + modemId - 1;
+                serverPort = 18200 + modemId - 1;
+                fprintf(stderr, "Modem name: %s\n", modemName);
+            }
+                break;
+            case ':':
+                fprintf(stderr, "Option 'm' requires modem number.\n");
+                return 1;
             case 'd':
                 daemon = true;
                 break;
@@ -1257,7 +2491,7 @@ int main(int argc, char **argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: M17_Service [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: M17_Service [-m modem_number (1-10)] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1282,8 +2516,60 @@ int main(int argc, char **argv)
         umask(0);
     }
 
- //   clearDashbCommands();
-    clearReflLinkStatus("M17");
+    /* Initialize C RingBuffers - for future C conversion */
+    RingBuffer_Init(&txBuffer, 800);
+    RingBuffer_Init(&rxBuffer, 1600);
+    RingBuffer_Init(&gwTxBuffer, 800);
+    RingBuffer_Init(&gwCommand, 200);
+
+    initTimers();
+    if (getTimer("status", 2000) < 0) return 0;
+    if (getTimer("dbComm", 2000) < 0) return 0;
+
+    memset(dcState, 0x00U, 4U * sizeof(q31_t));
+    dcFilter.numStages = DC_FILTER_STAGES;
+    dcFilter.pState    = dcState;
+    dcFilter.pCoeffs   = DC_FILTER;
+    dcFilter.postShift = 0;
+
+    memset(m17rrc05State, 0x00U, 70U * sizeof(q15_t));
+    m17rrc05Filter.numTaps = RX_RRC_0_5_FILTER_LEN;
+    m17rrc05Filter.pState  = m17rrc05State;
+    m17rrc05Filter.pCoeffs = RX_RRC_0_5_FILTER;
+
+    memset(m17modState, 0x00U, 16U * sizeof(q15_t));
+    m17modFilter.L           = M17_RADIO_SYMBOL_LENGTH;
+    m17modFilter.phaseLength = TX_RRC_0_5_FILTER_PHASE_LEN;
+    m17modFilter.pCoeffs     = TX_RRC_0_5_FILTER;
+    m17modFilter.pState      = m17modState;
+
+    char tmp[15];
+    readHostConfig(modemName, "config", "modem", tmp);
+    if (strcasecmp(tmp, "openmt") == 0)
+        packetType = PACKET_TYPE_SAMP;
+    else if (strcasecmp(tmp, "openmths") == 0)
+        packetType = PACKET_TYPE_BIT;
+    else
+        packetType = PACKET_TYPE_FRAME;
+
+    readHostConfig(modemName, "M17", "txLevel", tmp);
+    if (strlen(tmp) == 0)
+    {
+        setHostConfig(modemName, "M17", "txLevel", "input", "50");
+        setHostConfig(modemName, "M17", "rfPower", "input", "128");
+    }
+
+    readHostConfig(modemName, "config", "rxFrequency", modem_rxFrequency);
+    readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
+
+    readHostConfig(modemName, "M17", "txLevel", tmp);
+    txLevel = atoi(tmp);
+    readHostConfig(modemName, "M17", "rfPower", tmp);
+    rfPower = atoi(tmp);
+
+    //   clearDashbCommands();
+    clearReflLinkStatus(modemName, "M17");
+    reset();
 
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);
     if (err != 0)
@@ -1322,36 +2608,52 @@ int main(int argc, char **argv)
 
     while (connected)
     {
-        if (statusTimeout)
+        if (isTimerTriggered("dbComm"))
         {
+            char parameter[31];
+
             if (m17GWConnected)
             {
-                std::string parameter = readDashbCommand("reflLinkM17");
-                if (parameter.empty())
+                readDashbCommand(modemName, "updateConfM17", parameter);
+                if (strlen(parameter) > 0)
                 {
-                    statusTimeout = false;
+                    uint8_t buf[9];
+                    buf[0] = 0x61;
+                    buf[1] = 0x00;
+                    buf[2] = 0x09;
+                    buf[3] = 0x04;
+                    memcpy(buf + 4, TYPE_COMMAND, 4);
+                    buf[8] = COMM_UPDATE_CONF;
+                    pthread_mutex_lock(&gwCmdMutex);
+                    RingBuffer_addData(&gwCommand, buf, 9);
+                    pthread_mutex_unlock(&gwCmdMutex);
+                }
+
+                readDashbCommand(modemName, "reflLinkM17", parameter);
+                if (strlen(parameter) == 0)
+                {
+                    resetTimer("dbComm");
                     continue;
                 }
-                if (parameter == "unlink")
+                if (strcasecmp(parameter, "unlink") == 0)
                 {
                     uint8_t buf[8];
                     buf[0] = 0x61;
                     buf[1] = 0x00;
                     buf[2] = 0x08;
                     buf[3] = 0x04;
-                    buf[4] = TYPE_DISCONNECT[0];
-                    buf[5] = TYPE_DISCONNECT[1];
-                    buf[6] = TYPE_DISCONNECT[2];
-                    buf[7] = TYPE_DISCONNECT[3];
-                    gwCommand.addData(buf, 8);
+                    memcpy(buf + 4, TYPE_DISCONNECT, 4);
+                    pthread_mutex_lock(&gwCmdMutex);
+                    RingBuffer_addData(&gwCommand, buf, 8);
+                    pthread_mutex_unlock(&gwCmdMutex);
                     sleep(3);
-                    statusTimeout = false;
+                    resetTimer("dbComm");
                     continue;
                 }
                 else if (!m17ReflConnected)
                 {
                     char tmp[41];
-                    strcpy(tmp, parameter.c_str());
+                    strcpy(tmp, parameter);
                     char *token = NULL;
                     token = strtok((char*)tmp, ",");
                     if (token != NULL)
@@ -1368,40 +2670,53 @@ int main(int argc, char **argv)
                             uint8_t buf[8];
                             buf[0] = 0x61;
                             buf[1] = 0x00;
-                            buf[2] = 0x16;
+                            buf[2] = 0x18;
                             buf[3] = 0x04;
-                            buf[4] = TYPE_CONNECT[0];
-                            buf[5] = TYPE_CONNECT[1];
-                            buf[6] = TYPE_CONNECT[2];
-                            buf[7] = TYPE_CONNECT[3];
-                            gwCommand.addData(buf, 8);
-                            std::string callsign = readHostConfig("main", "callsign");
-                            gwCommand.addData((uint8_t*)callsign.c_str(), 6);
-                            gwCommand.addData((uint8_t*)name, 7);
-                            gwCommand.addData((uint8_t*)module, 1);
+                            memcpy(buf + 4, TYPE_CONNECT, 4);
+                            char callsign[9];
+                            bzero(callsign, 9);
+                            readHostConfig(modemName, "main", "callsign", callsign);
+                            pthread_mutex_lock(&gwCmdMutex);
+                            RingBuffer_addData(&gwCommand, buf, 8);
+                            RingBuffer_addData(&gwCommand, (uint8_t*)callsign, 8);
+                            RingBuffer_addData(&gwCommand, (uint8_t*)name, 7);
+                            RingBuffer_addData(&gwCommand, (uint8_t*)module, 1);
+                            pthread_mutex_unlock(&gwCmdMutex);
                             sleep(3);
                         }
                         else
-                            ackDashbCommand("reflLinkM17", "failed");
+                            ackDashbCommand(modemName, "reflLinkM17", "failed");
                     }
                     else
-                        ackDashbCommand("reflLinkM17", "failed");
+                        ackDashbCommand(modemName, "reflLinkM17", "failed");
                 }
                 else
-                   ackDashbCommand("reflLinkM17", "failed");
+                {
+                    ackDashbCommand(modemName, "reflLinkM17", "failed");
+                    if (debugM)
+                        fprintf(stderr, "Previous reflector still linked.\n");
+                }
             }
             else
             {
-                std::string parameter = readDashbCommand("reflLinkM17");
-                if (!parameter.empty())
+                readDashbCommand(modemName, "reflLinkM17", parameter);
+                if (strlen(parameter) > 0)
                 {
-                    ackDashbCommand("reflLinkM17", "No gateway");
+                    ackDashbCommand(modemName, "reflLinkM17", "No gateway");
                 }
             }
-            statusTimeout = false;
+            resetTimer("dbComm");
         }
         delay(500000);
     }
+    
+    /* Cleanup C RingBuffers */
+    RingBuffer_Destroy(&txBuffer);
+    RingBuffer_Destroy(&rxBuffer);
+    RingBuffer_Destroy(&gwTxBuffer);
+    RingBuffer_Destroy(&gwCommand);
+    
     fprintf(stderr, "M17 service terminated.\n");
-    logError("main", "M17 host terminated.");
+    logError(modemName, "main", "M17 host terminated.");
+    return 0;
 }
