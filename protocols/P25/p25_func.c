@@ -650,7 +650,6 @@ void encodeLDU1(uint8_t* data)
 void encodeLDU2(uint8_t* data)
 {
     assert(data != NULL);
-    assert(p25mi != NULL);
 
     uint8_t rs[18U];
     memset(rs, 0x00U, 18U);

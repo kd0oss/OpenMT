@@ -401,10 +401,10 @@ void decodeP25(uint8_t* data, bool isNet)
                 pthread_mutex_unlock(&gwTxBufMutex);
             }
 
-            decodeLDU1(data + 8);
+            bool ret = decodeLDU1(data + 8);
             // Add busy bits, inbound busy
             addBusyBits(data + 8, P25_LDU_FRAME_LENGTH_BITS, false, true);
-            if (getSrcId() > 0 && !rx_started && valid)
+            if (getSrcId() > 0 && !rx_started && valid && ret)
             {
                 pthread_mutex_lock(&stateMutex);
                 rx_started = true;
@@ -1423,11 +1423,7 @@ void* txThread(void *arg)
 
                 pthread_mutex_lock(&gwTxBufMutex);
                 RingBuffer_peek(&gwTxBuffer, byte, 3);
-                pthread_mutex_unlock(&gwTxBufMutex);
-
                 len = (byte[1] << 8) + byte[2];
-
-                pthread_mutex_lock(&gwTxBufMutex);
                 avail = RingBuffer_dataSize(&gwTxBuffer);
                 pthread_mutex_unlock(&gwTxBufMutex);
 
@@ -1475,11 +1471,7 @@ void* txThread(void *arg)
 
                 pthread_mutex_lock(&gwCmdMutex);
                 RingBuffer_peek(&gwCommand, byte, 3);
-                pthread_mutex_unlock(&gwCmdMutex);
-
                 len = (byte[1] << 8) + byte[2];
-
-                pthread_mutex_lock(&gwCmdMutex);
                 cmdAvail = RingBuffer_dataSize(&gwCommand);
                 pthread_mutex_unlock(&gwCmdMutex);
 
@@ -1499,6 +1491,7 @@ void* txThread(void *arg)
             }
         }
     }
+
     pthread_mutex_lock(&stateMutex);
     p25GWConnected = false;
     pthread_mutex_unlock(&stateMutex);
@@ -1775,17 +1768,6 @@ void* startClient(void *arg)
             fprintf(stderr, "Gateway host thread created successfully\n");
     }
 
-    err = pthread_create(&(timerid), NULL, &timerThread, NULL);
-    if (err != 0)
-    {
-        fprintf(stderr, "Can't create timer thread :[%s]", strerror(err));
-        return 0;
-    }
-    else
-    {
-        if (debugM) fprintf(stderr, "Timer thread created successfully\n");
-    }
-
     pthread_t rxid;
     err = pthread_create(&(rxid), NULL, &rxThread, NULL);
     if (err != 0)
@@ -1796,6 +1778,17 @@ void* startClient(void *arg)
     else
     {
         if (debugM) fprintf(stderr, "RX thread created successfully\n");
+    }
+
+    err = pthread_create(&(timerid), NULL, &timerThread, NULL);
+    if (err != 0)
+    {
+        fprintf(stderr, "Can't create timer thread :[%s]", strerror(err));
+        return 0;
+    }
+    else
+    {
+        if (debugM) fprintf(stderr, "Timer thread created successfully\n");
     }
 
     sleep(1);
@@ -2026,8 +2019,7 @@ void* startTCPServer(void* arg)
 
         if (childfd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
 
-        hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr,
-                              sizeof(clientaddr.sin_addr.s_addr), AF_INET);
+        hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
         if (hostp == NULL)
         {
             error((char*)"ERROR on gethostbyaddr");
