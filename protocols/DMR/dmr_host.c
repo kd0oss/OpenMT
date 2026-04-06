@@ -829,6 +829,10 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
             sendDataToModem(buf, 2, 2, isNet);
             isGroup[1] = true;
         }
+        else if (!modem_duplex)
+        {
+            sendCommToModem((uint8_t*)SETMODE, 5);
+        }
 
         dataSync  = (buffer[8] & DMR_SYNC_DATA) == DMR_SYNC_DATA;
         audioSync = (buffer[8] & DMR_SYNC_AUDIO) == DMR_SYNC_AUDIO;
