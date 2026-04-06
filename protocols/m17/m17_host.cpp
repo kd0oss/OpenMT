@@ -1862,6 +1862,15 @@ void* startClient(void *arg)
         }
     }
 
+    pthread_t rxid;
+    int err = pthread_create(&(rxid), NULL, &rxThread, NULL);
+    if (err != 0)
+        fprintf(stderr, "Can't create rx thread :[%s]", strerror(err));
+    else
+    {
+        if (debugM) fprintf(stderr, "RX thread created successfully\n");
+    }
+
     sleep(1);
     fprintf(stderr, "Connected to host.\n");
 
@@ -2424,15 +2433,6 @@ void *startTCPServer(void *arg)
         {
             if (debugM)
                 fprintf(stderr, "TX thread created successfully\n");
-        }
-
-        pthread_t rxid;
-        err = pthread_create(&(rxid), NULL, &rxThread, NULL);
-        if (err != 0)
-            fprintf(stderr, "Can't create rx thread :[%s]", strerror(err));
-        else
-        {
-            if (debugM) fprintf(stderr, "RX thread created successfully\n");
         }
 
         pthread_t procid;
