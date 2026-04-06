@@ -1683,11 +1683,9 @@ int main(int argc, char** argv)
     else
         packetType = PACKET_TYPE_FRAME;
 
-    readHostConfig(modemName, "DMR", "callsign", stationCall);
-    if (strlen(stationCall) == 0)
+    readHostConfig(modemName, "DMR", "ID", tmp);
+    if (strlen(tmp) == 0)
     {
-        setHostConfig(modemName, "DMR", "callsign", "input", "N0CALL");
-        readHostConfig(modemName, "DMR", "callsign", stationCall);
         setHostConfig(modemName, "DMR", "txLevel", "input", "75");
         setHostConfig(modemName, "DMR", "rfPower", "input", "128");
         setHostConfig(modemName, "DMR", "ID", "input", "1");
@@ -1699,6 +1697,7 @@ int main(int argc, char** argv)
         setHostConfig(modemName, "DMR", "slots", "input", "3");
     }
 
+    readHostConfig(modemName, "main", "callsign", stationCall);
     readHostConfig(modemName, "config", "rxFrequency", modem_rxFrequency);
     readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
 
