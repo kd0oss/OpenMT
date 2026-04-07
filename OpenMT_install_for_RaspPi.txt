@@ -17,15 +17,16 @@ sudo raspi-config
 # Edit /boot/firmware/config.txt and add dtoverlay=miniuart-bt to [all] section.
 
 sudo apt install git
-git clone https://github.com/kd0oss/OpenMT.git
-
 sudo apt install nginx
 sudo apt install php-fpm
 sudo apt install mariadb-server mariadb-client libmariadbd-dev
 sudo apt install php
 sudo apt install php-mysql
+sudo apt install php-curl
 sudo apt install build-essential
 sudo apt install cmake
+
+git clone https://github.com/kd0oss/OpenMT.git
 
 # Set mariadb server to bind to all network interfaces.
 sudo nano /etc/mysql/mariadb.conf.d/50-server.cnf
@@ -50,10 +51,6 @@ sudo rm -R /var/www/html
 sudo mkdir /var/www/dashboard
 sudo cp dashboard/www/* /var/www/dashboard
 
-# Update Reflectors and DMR Id's.
-cd OpenMT
-php -q updateHosts.php
-
 # Create database permissions file.
 sudo nano /etc/openmt.ini
 # Add these lines.
@@ -61,6 +58,10 @@ sudo nano /etc/openmt.ini
 passwd=dvpass123
 host=localhost
 # Ctrl+x to save and close editor.
+
+# Update Reflectors and DMR Id's.
+cd OpenMT
+php -q updateHosts.php
 
 # Update /etc/nginx/sites-available/default to look like this:
 sudo nano /etc/nginx/sites-available/default
@@ -119,7 +120,7 @@ server {
 
 # Enable mysql by editing /etc/php/{PHP version}/fpm/php.ini
 sudo nano /etc/php/{PHP version}/fpm/php.ini
-# Search for extension=mysqli and uncomment it.
+# Search for extension=mysqli and uncomment it by removing the leading semicolon.
 # Save changes.
 
 # Now reboot.
@@ -127,11 +128,12 @@ sudo nano /etc/php/{PHP version}/fpm/php.ini
 # Login to RaspPI and cd to OpenMT.
 cd OpenMT
 
-######## NOTE: As you enter each executable directory compile using:
+######## NOTE: As you enter each executable directory compile using. #####
 mkdir build
 cd build
 cmake ..
 make
+##########################################################################
 
 # Then cd to OpenMT/modem and start modem host using
 cd OpenMT/modem
