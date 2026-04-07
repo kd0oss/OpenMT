@@ -763,6 +763,24 @@ function openPage(tabln,tab,pageName,elmnt,color)
   elmnt.style.backgroundColor = color;
 }
 
+/* Fetch with timeout - aborts after ms milliseconds */
+async function fetchWithTimeout(url, ms)
+{
+  var controller = new AbortController();
+  var timer = setTimeout(function() { controller.abort(); }, ms);
+  try
+  {
+    var resp = await fetch(url, { signal: controller.signal });
+    clearTimeout(timer);
+    return resp;
+  }
+  catch (err)
+  {
+    clearTimeout(timer);
+    throw err;   /* rethrow so callers can catch it */
+  }
+}
+
 /* Load configuration and start refresh processes */
 function initDashBd()
 {
@@ -1033,105 +1051,119 @@ async function getConfig()
 {
   activeGateways = "";
   activeModes = "";
-  var url = "data_query.php?command=getModemConfig&modem_name="+modemName;
-  var resp = await fetch(url);
-  if (!resp.ok) return;
-  var tmp = await resp.text();
-  if (tmp == "none") return;
-  tmp = tmp.split('\x1E');
-  for (var i=0;i<tmp.length;i++)
+  try
   {
-    var fields = tmp[i].split('\x1D');
-    if (fields[0] == 'mode')
+    var url = "data_query.php?command=getModemConfig&modem_name="+modemName;
+    var resp = await fetchWithTimeout(url, 8000);
+    if (!resp.ok) return;
+    var tmp = await resp.text();
+    if (tmp == "none") return;
+    tmp = tmp.split('\x1E');
+    for (var i=0;i<tmp.length;i++)
     {
-      if (fields[1] == 'duplex')
+      var fields = tmp[i].split('\x1D');
+      if (fields[0] == 'mode')
       {
-        duplex = true;
-        document.getElementById('mode').value = "duplex";
+        if (fields[1] == 'duplex')
+        {
+          duplex = true;
+          document.getElementById('mode').value = "duplex";
+        }
+        else
+        {
+          duplex = false;
+          document.getElementById('mode').value = "simplex";
+        }
       }
-      else
+      if (fields[0] == 'modem')
       {
-        duplex = false;
-        document.getElementById('mode').value = "simplex";
+        modem = fields[1];
+        document.getElementById('deviceType').value = modem;
+      }
+      if (fields[0] == 'port')
+      {
+        commport = fields[1];
+        document.getElementById('commPort').value = commport;
+      }
+      if (fields[0] == 'baud')
+      {
+        baud = fields[1];
+        document.getElementById('baud').value = baud;
       }
     }
-    if (fields[0] == 'modem')
-    {
-      modem = fields[1];
-      document.getElementById('deviceType').value = modem;
-    }
-    if (fields[0] == 'port')
-    {
-      commport = fields[1];
-      document.getElementById('commPort').value = commport;
-    }
-    if (fields[0] == 'baud')
-    {
-      baud = fields[1];
-      document.getElementById('baud').value = baud;
-    }
-  }
 
-  var modemExtras = "";
-  modemFields = "";
-  for (var i=0;i<tmp.length;i++)
+    var modemExtras = "";
+    modemFields = "";
+    for (var i=0;i<tmp.length;i++)
+    {
+      var fields = tmp[i].split('\x1D');
+      if (fields[0] == 'mode' || fields[0] == 'modem' || fields[0] == 'baud' || fields[0] == 'port')
+        continue;
+      modemExtras += "<label style='display:inline-block;width:200px'>"+fields[0]+"</label>&nbsp;<input id='"+fields[0]+"' type='text' value='"+fields[1]+"'><br>";
+      if (modemFields != "") modemFields += ",";
+      modemFields += fields[0];
+    }
+    document.getElementById('modemExtras').innerHTML = modemExtras;
+  }
+  catch (err)
   {
-    var fields = tmp[i].split('\x1D');
-    if (fields[0] == 'mode' || fields[0] == 'modem' || fields[0] == 'baud' || fields[0] == 'port')
-      continue;
-    modemExtras += "<label style='display:inline-block;width:200px'>"+fields[0]+"</label>&nbsp;<input id='"+fields[0]+"' type='text' value='"+fields[1]+"'><br>";
-    if (modemFields != "") modemFields += ",";
-    modemFields += fields[0];
+    console.warn("getConfig failed:", err.message);
   }
-  document.getElementById('modemExtras').innerHTML = modemExtras;
 
-  url = "data_query.php?command=getDashConfig&modem_name="+modemName;
-  resp = await fetch(url);
-  if (!resp.ok) return;
-  tmp = await resp.text();
-  if (tmp == "none") return;
-  tmp = tmp.split('\x1E');
-  for (var i=0;i<tmp.length;i++)
+  try
   {
-    var fields = tmp[i].split('\x1D');
-    if (fields[0] == 'title')
+    url = "data_query.php?command=getDashConfig&modem_name="+modemName;
+    resp = await fetch(url);
+    if (!resp.ok) return;
+    tmp = await resp.text();
+    if (tmp == "none") return;
+    tmp = tmp.split('\x1E');
+    for (var i=0;i<tmp.length;i++)
     {
-      dashboardTitle = fields[1];
-      document.getElementById('title').value = dashboardTitle;
-      document.getElementById('windowTitle').innerHTML = dashboardTitle;
-      document.getElementById('dashTitle').innerHTML = dashboardTitle;
-    }
-    if (fields[0] == 'username')
-    {
-      username = fields[1];
-      document.getElementById('username').value = username;
-      document.getElementById('fusername').value = username;
-    }
-    if (fields[0] == 'callsign')
-    {
-      rptrCallsign = fields[1];
-      document.getElementById('callsign').value = rptrCallsign;
-    }
+      var fields = tmp[i].split('\x1D');
+      if (fields[0] == 'title')
+      {
+        dashboardTitle = fields[1];
+        document.getElementById('title').value = dashboardTitle;
+        document.getElementById('windowTitle').innerHTML = dashboardTitle;
+        document.getElementById('dashTitle').innerHTML = dashboardTitle;
+      }
+      if (fields[0] == 'username')
+      {
+        username = fields[1];
+        document.getElementById('username').value = username;
+        document.getElementById('fusername').value = username;
+      }
+      if (fields[0] == 'callsign')
+      {
+        rptrCallsign = fields[1];
+        document.getElementById('callsign').value = rptrCallsign;
+      }
 
-    if (fields[0] == 'latitude')
-    {
-      station_latitude = fields[1];
-      document.getElementById('station_latitude').value = Number(station_latitude);
-    }
+      if (fields[0] == 'latitude')
+      {
+        station_latitude = fields[1];
+        document.getElementById('station_latitude').value = Number(station_latitude);
+      }
 
-    if (fields[0] == 'longitude')
-    {
-      station_longitude = fields[1];
-      document.getElementById('station_longitude').value = Number(station_longitude);
+      if (fields[0] == 'longitude')
+      {
+        station_longitude = fields[1];
+        document.getElementById('station_longitude').value = Number(station_longitude);
+      }
     }
+    if (Number(station_latitude) == 0.0 && Number(station_longitude) == 0.0)
+      map.setView([Number(station_latitude), Number(station_longitude)], 1);
+    else
+      map.setView([Number(station_latitude), Number(station_longitude)], 10);
+    marker.remove();
+    marker = new L.Marker([Number(station_latitude), Number(station_longitude)]);
+    marker.addTo(map);
   }
-  if (Number(station_latitude) == 0.0 && Number(station_longitude) == 0.0)
-    map.setView([Number(station_latitude), Number(station_longitude)], 1);
-  else
-    map.setView([Number(station_latitude), Number(station_longitude)], 10);
-  marker.remove();
-  marker = new L.Marker([Number(station_latitude), Number(station_longitude)]);
-  marker.addTo(map);
+  catch (err)
+  {
+    console.warn("getConfig failed:", err.message);
+  }
 }
 
 /* Setup and initialize gateway display */
@@ -1181,149 +1213,159 @@ async function fetchStatus()
   var speed = "";
   var smsText = "";
   var suffix = "";
-  var url = "data_query.php?command=getStatus&modem_name="+modemName;
-  var resp = await fetch(url);
-  if (!resp.ok)
-  {
-    setTimeout(fetchStatus, 1000);
-    return;
-  }
-  var tmp = await resp.text();
-  if (tmp == "none")
-  {
-    setTimeout(fetchStatus, 1000);
-    return;
-  }
-//alert(tmp);
-  var rtx2 = document.getElementById('rtx2');
-  rtx2.style.display = "none";
-  txEnabled[1] = false;
-  lines = tmp.split('\x1E');
-  for (var l=0;l<lines.length;l++)
-  {
-    var x = l + 1;
-    var id = x.toString();
 
-    if (l == 1)
+  try
+  {
+    var url = "data_query.php?command=getStatus&modem_name="+modemName;
+    var resp = await fetchWithTimeout(url, 5000);
+    if (!resp.ok)
     {
-      rtx2.style.display = "table-row";
+      setTimeout(fetchStatus, 1000);
+      return;
     }
-    tmp = lines[l].split('\x1C');
-    for (var i=0;i<tmp.length;i++)
+    var tmp = await resp.text();
+    if (tmp == "none")
     {
-      fields = tmp[i].split('\x1D');
-      if (fields[0] == 'Id')
-        rid = fields[1];
-      if (fields[0] == 'tx_state')
+      setTimeout(fetchStatus, 1000);
+      return;
+    }
+  //alert(tmp);
+    var rtx2 = document.getElementById('rtx2');
+    rtx2.style.display = "none";
+    txEnabled[1] = false;
+    lines = tmp.split('\x1E');
+    for (var l=0;l<lines.length;l++)
+    {
+      var x = l + 1;
+      var id = x.toString();
+
+      if (l == 1)
       {
-        tx_state = fields[1];
-        if (tx_state == "on")
-          txEnabled[l] = true;
-        else
-          txEnabled[l] = false;
+        rtx2.style.display = "table-row";
       }
-      if (fields[0] == 'srcCall')
+      tmp = lines[l].split('\x1C');
+      for (var i=0;i<tmp.length;i++)
       {
-        srcCall = fields[1];
-        if (srcCall == "")
-          break;
-      }
-      if (fields[0] == 'suffix')
-        suffix = fields[1];
-      if (fields[0] == 'mode')
-        mode = fields[1];
-      if (fields[0] == 'type')
-        type = fields[1];
-      if (fields[0] == 'dstCall')
-        dstCall = fields[1];
-      if (fields[0] == 'metaText')
-        metaText = decodeURIComponent(fields[1]);
-      if (metaText.trim() == "")
-        metaText = "none";
-      if (fields[0] == 'latitude')
-        latitude = fields[1];
-      if (fields[0] == 'longitude')
-        longitude = fields[1];
-      if (fields[0] == 'altitude')
-        altitude = fields[1];
-      if (fields[0] == 'bearing')
-        bearing = fields[1];
-      if (fields[0] == 'speed')
-        speed = fields[1];
-      if (fields[0] == 'smsText')
-        smsText = fields[1];
-      if (fields[0] == 'property')
-      {
-        if (fields[1] == 'active_mode')
+        fields = tmp[i].split('\x1D');
+        if (fields[0] == 'Id')
+          rid = fields[1];
+        if (fields[0] == 'tx_state')
         {
-          i++;
-          value = tmp[i].split('\x1D');
-          currentMode = value[1];
+          tx_state = fields[1];
+          if (tx_state == "on")
+            txEnabled[l] = true;
+          else
+            txEnabled[l] = false;
         }
+        if (fields[0] == 'srcCall')
+        {
+          srcCall = fields[1];
+          if (srcCall == "")
+            break;
+        }
+        if (fields[0] == 'suffix')
+          suffix = fields[1];
+        if (fields[0] == 'mode')
+          mode = fields[1];
+        if (fields[0] == 'type')
+          type = fields[1];
+        if (fields[0] == 'dstCall')
+          dstCall = fields[1];
+        if (fields[0] == 'metaText')
+          metaText = decodeURIComponent(fields[1]);
+        if (metaText.trim() == "")
+          metaText = "none";
+        if (fields[0] == 'latitude')
+          latitude = fields[1];
+        if (fields[0] == 'longitude')
+          longitude = fields[1];
+        if (fields[0] == 'altitude')
+          altitude = fields[1];
+        if (fields[0] == 'bearing')
+          bearing = fields[1];
+        if (fields[0] == 'speed')
+          speed = fields[1];
+        if (fields[0] == 'smsText')
+          smsText = fields[1];
+        if (fields[0] == 'property')
+        {
+          if (fields[1] == 'active_mode')
+          {
+            i++;
+            value = tmp[i].split('\x1D');
+            currentMode = value[1];
+          }
+        }
+
+        document.getElementById('cmode'+id).innerHTML = mode;
+
+        if (suffix != "")
+          document.getElementById('srcCall'+id).innerHTML = srcCall+"/"+suffix;
+        else
+          document.getElementById('srcCall'+id).innerHTML = srcCall;
+
+        if (srcCall != '')
+        {
+          newCall = "yes";
+        }
+
+        document.getElementById('dstCall'+id).innerHTML = dstCall;
+        document.getElementById('metaText'+id).innerHTML = metaText.trim();
       }
+    }
 
-      document.getElementById('cmode'+id).innerHTML = mode;
+    if (rid != last_rid)
+    {
+      if (smsText != "")
+        addMessage(srcCall, decodeURIComponent(smsText));
 
-      if (suffix != "")
-        document.getElementById('srcCall'+id).innerHTML = srcCall+"/"+suffix;
-      else
-        document.getElementById('srcCall'+id).innerHTML = srcCall;
-
-      if (srcCall != '')
+      if (latitude != "" && longitude != "")
       {
-        newCall = "yes";
+        map.setView([Number(latitude), Number(longitude)], 10);
+        marker.remove();
+        marker = new L.Marker([Number(latitude), Number(longitude)]);
+        marker.addTo(map);
       }
-
-      document.getElementById('dstCall'+id).innerHTML = dstCall;
-      document.getElementById('metaText'+id).innerHTML = metaText.trim();
+      last_rid = rid;
     }
-  }
 
-  if (rid != last_rid)
-  {
-    if (smsText != "")
-      addMessage(srcCall, decodeURIComponent(smsText));
-
-    if (latitude != "" && longitude != "")
+    for (var i=0;i<2;i++)
     {
-      map.setView([Number(latitude), Number(longitude)], 10);
-      marker.remove();
-      marker = new L.Marker([Number(latitude), Number(longitude)]);
-      marker.addTo(map);
+      var x = i + 1;
+      var id = x.toString();
+      if (txEnabled[i] && mode.includes(currentMode))
+      {
+        var rtx = document.getElementById('rtx'+id);
+        rtx.style.background = 'red';
+        rtx.style.color = 'white';
+      }
+      else
+      {
+        var rtx = document.getElementById('rtx'+id);
+        rtx.style.background = '#D6EEEE';
+        rtx.style.color = '#528dea';
+      }
     }
-    last_rid = rid;
-  }
 
-  for (var i=0;i<2;i++)
-  {
-    var x = i + 1;
-    var id = x.toString();
-    if (txEnabled[i] && mode.includes(currentMode))
+    if (txEnabled[0] || txEnabled[1])
     {
-      var rtx = document.getElementById('rtx'+id);
-      rtx.style.background = 'red';
-      rtx.style.color = 'white';
+      if (document.getElementById(currentMode+'_stat'))
+        document.getElementById(currentMode+'_stat').innerHTML = "TX";
     }
     else
     {
-      var rtx = document.getElementById('rtx'+id);
-      rtx.style.background = '#D6EEEE';
-      rtx.style.color = '#528dea';
+      if (document.getElementById(currentMode+'_stat') && mode.includes(currentMode))
+        document.getElementById(currentMode+'_stat').innerHTML = "RX";
     }
-  }
 
-  if (txEnabled[0] || txEnabled[1])
-  {
-    if (document.getElementById(currentMode+'_stat'))
-      document.getElementById(currentMode+'_stat').innerHTML = "TX";
+    setTimeout(fetchStatus, 1000);
   }
-  else
+  catch (err)
   {
-    if (document.getElementById(currentMode+'_stat') && mode.includes(currentMode))
-      document.getElementById(currentMode+'_stat').innerHTML = "RX";
+    /* Network dropped, timed out, or server unreachable */
+    console.warn("fetchStatus failed:", err.message);
+    setTimeout(fetchStatus, 3000);
   }
-
-  setTimeout(fetchStatus, 1000);
 }
 
 async function fetchDashConfig()
@@ -1403,63 +1445,71 @@ async function buildHistoryTable()
   var hDateTime = "";
   var hDuration = "";
 
-  var url = "data_query.php?command=getHistory&modem_name="+modemName;
-  var resp = await fetch(url);
-  if (!resp.ok)
+  try
   {
-    setTimeout(buildHistoryTable, 5000);
-    return;
-  }
-  var line = await resp.text();
-  if (line == "none")
-  {
-    setTimeout(buildHistoryTable, 5000);
-    return;
-  }
-  lines = line.split('\x1E');
-
-  var table = "<table id='lastheard' class='lastheard'>";
-  table += "<thead><tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER</th><th>Len(secs)</th></tr></thead><tbody>";
-  for (var i=0;i<lines.length;i++)
-  {
-    tmp = lines[i].split('\x1C');
-    for (var j=0;j<tmp.length;j++)
+    var url = "data_query.php?command=getHistory&modem_name="+modemName;
+    var resp = await fetchWithTimeout(url, 8000);
+    if (!resp.ok)
     {
-      fields = tmp[j].split('\x1D');
-      if (fields[0] == 'type')
-        hType = fields[1];
-      if (fields[0] == 'mode')
-        hMode = fields[1];
-      if (fields[0] == 'source')
-        hSource = fields[1];
-      if (fields[0] == 'suffix')
-        hSuffix = fields[1];
-      if (fields[0] == 'dest')
-        hDest = fields[1];
-      if (fields[0] == 'loss_ber')
-        hLoss_BER = fields[1];
-      if (fields[0] == 'ss_message')
-        hMessage = fields[1];
-      if (fields[0] == 'datetime')
-        hDateTime = fields[1];
-      if (fields[0] == 'duration')
-        hDuration = fields[1];
+      setTimeout(buildHistoryTable, 5000);
+      return;
     }
-    table += "<tr><td>"+hDateTime+"</td>";
-    if (hSuffix != "")
-      table += "<td>"+hSource+"/"+hSuffix+"</td>";
-    else
-      table += "<td>"+hSource+"</td>";
-    table += "<td>"+hMessage+"</td>";
-    table += "<td>"+hDest+"</td>";
-    table += "<td>"+hMode+"-"+hType+"</td>";
-    table += "<td>"+hLoss_BER+"</td>";
-    table += "<td>"+hDuration+"</td></tr>";
-  }
-  table += "</tbody></table>"
-  document.getElementById('lastheardDiv').innerHTML = table;
+    var line = await resp.text();
+    if (line == "none")
+    {
+      setTimeout(buildHistoryTable, 5000);
+      return;
+    }
+    lines = line.split('\x1E');
 
-  setTimeout(buildHistoryTable, 5000);
+    var table = "<table id='lastheard' class='lastheard'>";
+    table += "<thead><tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER</th><th>Len(secs)</th></tr></thead><tbody>";
+    for (var i=0;i<lines.length;i++)
+    {
+      tmp = lines[i].split('\x1C');
+      for (var j=0;j<tmp.length;j++)
+      {
+        fields = tmp[j].split('\x1D');
+        if (fields[0] == 'type')
+          hType = fields[1];
+        if (fields[0] == 'mode')
+          hMode = fields[1];
+        if (fields[0] == 'source')
+          hSource = fields[1];
+        if (fields[0] == 'suffix')
+          hSuffix = fields[1];
+        if (fields[0] == 'dest')
+          hDest = fields[1];
+        if (fields[0] == 'loss_ber')
+          hLoss_BER = fields[1];
+        if (fields[0] == 'ss_message')
+          hMessage = fields[1];
+        if (fields[0] == 'datetime')
+          hDateTime = fields[1];
+        if (fields[0] == 'duration')
+          hDuration = fields[1];
+      }
+      table += "<tr><td>"+hDateTime+"</td>";
+      if (hSuffix != "")
+        table += "<td>"+hSource+"/"+hSuffix+"</td>";
+      else
+        table += "<td>"+hSource+"</td>";
+      table += "<td>"+hMessage+"</td>";
+      table += "<td>"+hDest+"</td>";
+      table += "<td>"+hMode+"-"+hType+"</td>";
+      table += "<td>"+hLoss_BER+"</td>";
+      table += "<td>"+hDuration+"</td></tr>";
+    }
+    table += "</tbody></table>"
+    document.getElementById('lastheardDiv').innerHTML = table;
+
+    setTimeout(buildHistoryTable, 5000);
+  }
+  catch (err)
+  {
+    console.warn("buildHistoryTable failed:", err.message);
+    setTimeout(buildHistoryTable, 5000);
+  }
 }
 
 /* Check if user authenticated for admin functions */
