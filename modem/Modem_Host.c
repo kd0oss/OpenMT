@@ -170,11 +170,11 @@ struct sockaddr_in serveraddr;  //< server's addr
 struct sockaddr_in clientaddr;  //< client addr
 
 RingBuffer modemCommandBuffer; /* Modem command buffer */
-RingBuffer txBuffer;           /* Modem TX buffer */
+RingBuffer modemTxBuffer;           /* Modem TX buffer */
 RingBuffer rxModeBuffer;       /* Client RX buffer */
 RingBuffer txModeBuffer;       /* Client TX buffer */
 
-pthread_mutex_t txBufMutex       = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t modemTxBufMutex       = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t modemComBufMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t rxBufModeMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t txBufModeMutex   = PTHREAD_MUTEX_INITIALIZER;
@@ -528,8 +528,6 @@ void disableTimer(uint8_t id)
 // Each loop through the while statement takes 1 millisecond.
 void* timerThread(void* arg)
 {
-    uint32_t loop[4] = {10000, 0, 0, 0};
-
     if (getTimer("frameDelay", 20) < 0)
     {
         if (debugM) fprintf(stderr, "Timer thread exited.\n");
@@ -542,9 +540,9 @@ void* timerThread(void* arg)
     {
         delay(1000);  // 1ms
 
+        pthread_mutex_lock(&timerMutex);
         for (uint8_t i = 0; i < 10; i++)
         {
-            pthread_mutex_lock(&timerMutex);
             if (timer[i].valid && timer[i].enabled)
             {
                 if (timer[i].count >= timer[i].duration)
@@ -557,87 +555,90 @@ void* timerThread(void* arg)
                     timer[i].count++;
                 }
             }
-            pthread_mutex_unlock(&timerMutex);
-
-            if (isTimerTriggered("frameDelay"))
-            {
-                pthread_mutex_lock(&rxBufModeMutex);
-                if (RingBuffer_dataSize(&rxModeBuffer) == 0)
-                    bufReady = false;
-                pthread_mutex_unlock(&rxBufModeMutex);
-
-                if (strncasecmp(modem, "mmdvm", 5) == 0)
-                {
-                    if (strcmp(currentMode, "DSTAR") == 0)
-                    {
-                        uint8_t space = getModemSpace(currentMode, 1);
-                        if (space < 10)
-                            resetTimer("frameDelay", 18);
-                        else if (space > 17)
-                            resetTimer("frameDelay", 13);
-                        else
-                            resetTimer("frameDelay", 17);
-                    }
-                    else if (strcmp(currentMode, "M17") == 0)
-                    {
-                        uint8_t space = getModemSpace(currentMode, 1);
-                        if (space < 30)
-                            resetTimer("frameDelay", 18);
-                        else if (space > 60)
-                            resetTimer("frameDelay", 12);
-                        else
-                            resetTimer("frameDelay", 14);
-                    }
-                    else if (strcmp(currentMode, "P25") == 0)
-                    {
-                        uint8_t space = getModemSpace(currentMode, 1);
-                        if (space < 10)
-                            resetTimer("frameDelay", 19);
-                        else if (space > 12)
-                            resetTimer("frameDelay", 8);
-                        else
-                            resetTimer("frameDelay", 12);
-                    }
-                    else if (strcmp(currentMode, "DMR") == 0)
-                    {
-                        uint8_t space1 = getModemSpace(currentMode, 1);
-                        uint8_t space2 = getModemSpace(currentMode, 2);
-                        uint8_t space  = MIN(space1, space2);
-                        if (space < 5)
-                            resetTimer("frameDelay", 60);
-                        else if (space > 8)
-                            resetTimer("frameDelay", 45);
-                        else
-                            resetTimer("frameDelay", 57);
-                    }
-                }
-                else
-                    resetTimer("frameDelay", 0);
-            }
-
-            if (isTimerTriggered("txTimeout") && txOn)
-            {
-                txOn = false;
-                strcpy(currentMode, "idle");
-                setStatus(modemName, "main", "active_mode", currentMode);
-                if (strncasecmp(modem, "mmdvm", 5) == 0)
-                {
-                    uint8_t buffer[4];
-                    buffer[0] = 0xE0;
-                    buffer[1] = 0x04;
-                    buffer[2] = MODEM_MODE;
-                    buffer[3] = 0x00;  // IDLE_MODE
-                    pthread_mutex_lock(&modemComBufMutex);
-                    RingBuffer_addData(&modemCommandBuffer, buffer, 4);
-                    pthread_mutex_unlock(&modemComBufMutex);
-                }
-                resetTimer("txTimeout", 0);
-                if (debugM)
-                    fprintf(stderr, "TX timeout. Setting mode to idle.\n");
-            }
-            else if (isTimerTriggered("txTimeout") && !txOn)
-                resetTimer("txTimeout", 0);
         }
+        pthread_mutex_unlock(&timerMutex);
+
+    //    if (isTimerTriggered("frameDelay"))
+        {
+            pthread_mutex_lock(&rxBufModeMutex);
+            if (RingBuffer_dataSize(&rxModeBuffer) == 0)
+                bufReady = false;
+            pthread_mutex_unlock(&rxBufModeMutex);
+
+            if (strncasecmp(modem, "mmdvm", 5) == 0)
+            {
+                if (strcmp(currentMode, "DSTAR") == 0)
+                {
+                    uint8_t space = getModemSpace(currentMode, 1);
+                    if (space < 10)
+                        resetTimer("frameDelay", 18);
+                    else if (space > 17)
+                        resetTimer("frameDelay", 13);
+                    else
+                        resetTimer("frameDelay", 17);
+                }
+                else if (strcmp(currentMode, "M17") == 0)
+                {
+                    uint8_t space = getModemSpace(currentMode, 1);
+                    if (space < 30)
+                        resetTimer("frameDelay", 18);
+                    else if (space > 60)
+                        resetTimer("frameDelay", 12);
+                    else
+                        resetTimer("frameDelay", 14);
+                }
+                else if (strcmp(currentMode, "P25") == 0)
+                {
+                    uint8_t space = getModemSpace(currentMode, 1);
+                    if (space < 10)
+                        resetTimer("frameDelay", 19);
+                    else if (space > 12)
+                        resetTimer("frameDelay", 8);
+                    else
+                        resetTimer("frameDelay", 12);
+                }
+                else if (strcmp(currentMode, "DMR") == 0)
+                {
+                    uint8_t space1 = getModemSpace(currentMode, 1);
+                    uint8_t space2 = getModemSpace(currentMode, 2);
+                    uint8_t space  = MIN(space1, space2);
+                    if (space < 5)
+                        resetTimer("frameDelay", 60);
+                    else if (space > 8)
+                        resetTimer("frameDelay", 45);
+                    else
+                        resetTimer("frameDelay", 57);
+                }
+            }
+            else
+                resetTimer("frameDelay", 0);
+        }
+
+        if (isTimerTriggered("txTimeout") && txOn)
+        {
+            txOn = false;
+            strcpy(currentMode, "idle");
+            setStatus(modemName, "main", "active_mode", currentMode);
+            pthread_mutex_lock(&rxBufModeMutex);
+            RingBuffer_clear(&rxModeBuffer);
+            pthread_mutex_unlock(&rxBufModeMutex);
+            if (strncasecmp(modem, "mmdvm", 5) == 0)
+            {
+                uint8_t buffer[4];
+                buffer[0] = 0xE0;
+                buffer[1] = 0x04;
+                buffer[2] = MODEM_MODE;
+                buffer[3] = 0x00;  // IDLE_MODE
+                pthread_mutex_lock(&modemComBufMutex);
+                RingBuffer_addData(&modemCommandBuffer, buffer, 4);
+                pthread_mutex_unlock(&modemComBufMutex);
+            }
+            resetTimer("txTimeout", 0);
+            //       if (debugM)
+            fprintf(stderr, "TX timeout. Setting mode to idle.\n");
+        }
+        else if (!txOn)
+            resetTimer("txTimeout", 0);
 
         if (exitRequested)
         {
@@ -775,15 +776,15 @@ void* modeTxThread(void* arg)
 
         if (isTimerTriggered("status"))
         {
-            if (RingBuffer_freeSpace(&txBuffer) >= 3 && RingBuffer_dataSize(&rxModeBuffer) < 3)
+            if (RingBuffer_freeSpace(&modemTxBuffer) >= 3 && RingBuffer_dataSize(&rxModeBuffer) < 3)
             {
                 uint8_t buf[3];
                 buf[0] = 0x61;
                 buf[1] = 0x03;
                 buf[2] = OPENMT_GET_STATUS;
-                //     pthread_mutex_lock(&txBufMutex);
-                //     RingBuffer_addData(&txBuffer, buf, 3);
-                //     pthread_mutex_unlock(&txBufMutex);
+                //     pthread_mutex_lock(&modemTxBufMutex);
+                //     RingBuffer_addData(&modemTxBuffer, buf, 3);
+                //     pthread_mutex_unlock(&modemTxBufMutex);
             }
             resetTimer("status", 0);
         }
@@ -807,25 +808,25 @@ void* modeTxThread(void* arg)
             uint8_t len = buf[1];
             if (RingBuffer_dataSize(&rxModeBuffer) >= len)
             {
-                if (isModemSpace && RingBuffer_freeSpace(&txBuffer) >= len + 3)
+                if (isModemSpace && RingBuffer_freeSpace(&modemTxBuffer) >= len + 3)
                 {
                     uint8_t buf[len];
                     pthread_mutex_lock(&rxBufModeMutex);
                     RingBuffer_getData(&rxModeBuffer, buf, len);
                     pthread_mutex_unlock(&rxBufModeMutex);
-                    pthread_mutex_lock(&txBufMutex);
-                    RingBuffer_addData(&txBuffer, buf, len);
-                    pthread_mutex_unlock(&txBufMutex);
+                    pthread_mutex_lock(&modemTxBufMutex);
+                    RingBuffer_addData(&modemTxBuffer, buf, len);
+                    pthread_mutex_unlock(&modemTxBufMutex);
                 }
-                if (RingBuffer_freeSpace(&txBuffer) >= 3)
+                if (RingBuffer_freeSpace(&modemTxBuffer) >= 3)
                 {
                     uint8_t buf[3];
                     buf[0] = 0x61;
                     buf[1] = 0x03;
                     buf[2] = OPENMT_GET_STATUS;
-                    //       pthread_mutex_lock(&txBufMutex);
-                    //       RingBuffer_addData(&txBuffer, buf, 3);
-                    //       pthread_mutex_unlock(&txBufMutex);
+                    //       pthread_mutex_lock(&modemTxBufMutex);
+                    //       RingBuffer_addData(&modemTxBuffer, buf, 3);
+                    //       pthread_mutex_unlock(&modemTxBufMutex);
                 }
             }
             resetTimer("frameDelay", 0);
@@ -848,13 +849,13 @@ void* modeTxThread(void* arg)
             uint16_t len = buf[1];
             if (RingBuffer_dataSize(&modemCommandBuffer) >= len)
             {
-                if (RingBuffer_freeSpace(&txBuffer) >= len)
+                if (RingBuffer_freeSpace(&modemTxBuffer) >= len)
                 {
                     uint8_t buf[len];
                     RingBuffer_getData(&modemCommandBuffer, buf, len);
-                    pthread_mutex_lock(&txBufMutex);
-                    RingBuffer_addData(&txBuffer, buf, len);
-                    pthread_mutex_unlock(&txBufMutex);
+                    pthread_mutex_lock(&modemTxBufMutex);
+                    RingBuffer_addData(&modemTxBuffer, buf, len);
+                    pthread_mutex_unlock(&modemTxBufMutex);
                 }
             }
             pthread_mutex_unlock(&modemComBufMutex);
@@ -876,15 +877,15 @@ void* modeMMDVMTxThread(void* arg)
 
         if (isTimerTriggered("status"))
         {
-            if (RingBuffer_freeSpace(&txBuffer) >= 3 && RingBuffer_dataSize(&rxModeBuffer) < 3)
+            if (RingBuffer_freeSpace(&modemTxBuffer) >= 3 && RingBuffer_dataSize(&rxModeBuffer) < 3)
             {
                 uint8_t buf[3];
                 buf[0] = 0xE0;
                 buf[1] = 0x03;
                 buf[2] = MODEM_STATUS;
-                pthread_mutex_lock(&txBufMutex);
-                RingBuffer_addData(&txBuffer, buf, 3);
-                pthread_mutex_unlock(&txBufMutex);
+                pthread_mutex_lock(&modemTxBufMutex);
+                RingBuffer_addData(&modemTxBuffer, buf, 3);
+                pthread_mutex_unlock(&modemTxBufMutex);
             }
             resetTimer("status", 0);
         }
@@ -899,7 +900,7 @@ void* modeMMDVMTxThread(void* arg)
                 uint8_t tmp[1];
                 RingBuffer_getData(&rxModeBuffer, tmp, 1);
                 pthread_mutex_unlock(&rxBufModeMutex);
-                fprintf(stderr, "txBufMutex invalid header [%02X]\n", tmp[0]);
+                fprintf(stderr, "modemTxBufMutex invalid header [%02X]\n", tmp[0]);
                 resetTimer("frameDelay", 0);
                 continue;
             }
@@ -914,25 +915,25 @@ void* modeMMDVMTxThread(void* arg)
                     space = getModemSpace(currentMode, 2);
                 else
                     space = getModemSpace(currentMode, 1);
-                if (space > 1 && RingBuffer_freeSpace(&txBuffer) >= (len + 3))
+                if (space > 1 && RingBuffer_freeSpace(&modemTxBuffer) >= (len + 3))
                 {
                     uint8_t buf[len];
                     pthread_mutex_lock(&rxBufModeMutex);
                     RingBuffer_getData(&rxModeBuffer, buf, len);
                     pthread_mutex_unlock(&rxBufModeMutex);
-                    pthread_mutex_lock(&txBufMutex);
-                    RingBuffer_addData(&txBuffer, buf, len);
-                    pthread_mutex_unlock(&txBufMutex);
+                    pthread_mutex_lock(&modemTxBufMutex);
+                    RingBuffer_addData(&modemTxBuffer, buf, len);
+                    pthread_mutex_unlock(&modemTxBufMutex);
                 }
-                if (RingBuffer_freeSpace(&txBuffer) >= 3)
+                if (RingBuffer_freeSpace(&modemTxBuffer) >= 3)
                 {
                     uint8_t buf[3];
                     buf[0] = 0xE0;
                     buf[1] = 0x03;
                     buf[2] = MODEM_STATUS;
-                    pthread_mutex_lock(&txBufMutex);
-                    RingBuffer_addData(&txBuffer, buf, 3);
-                    pthread_mutex_unlock(&txBufMutex);
+                    pthread_mutex_lock(&modemTxBufMutex);
+                    RingBuffer_addData(&modemTxBuffer, buf, 3);
+                    pthread_mutex_unlock(&modemTxBufMutex);
                 }
             }
             resetTimer("frameDelay", 0);
@@ -953,13 +954,13 @@ void* modeMMDVMTxThread(void* arg)
             uint8_t len = buf[1];
             if (RingBuffer_dataSize(&modemCommandBuffer) >= len)
             {
-                if (RingBuffer_freeSpace(&txBuffer) >= len)
+                if (RingBuffer_freeSpace(&modemTxBuffer) >= len)
                 {
                     uint8_t buf[len];
                     RingBuffer_getData(&modemCommandBuffer, buf, len);
-                    pthread_mutex_lock(&txBufMutex);
-                    RingBuffer_addData(&txBuffer, buf, len);
-                    pthread_mutex_unlock(&txBufMutex);
+                    pthread_mutex_lock(&modemTxBufMutex);
+                    RingBuffer_addData(&modemTxBuffer, buf, len);
+                    pthread_mutex_unlock(&modemTxBufMutex);
                 }
             }
         }
@@ -978,38 +979,38 @@ void* modemMMDVMTxThread(void* arg)
     {
         delay(50);
 
-        if (RingBuffer_dataSize(&txBuffer) >= 3)
+        if (RingBuffer_dataSize(&modemTxBuffer) >= 3)
         {
-            pthread_mutex_lock(&txBufMutex);
+            pthread_mutex_lock(&modemTxBufMutex);
             uint8_t buf[2];
-            RingBuffer_peek(&txBuffer, buf, 1);
+            RingBuffer_peek(&modemTxBuffer, buf, 1);
             if (buf[0] != 0xE0)
             {
                 uint8_t tmp[1];
-                RingBuffer_getData(&txBuffer, tmp, 1);
+                RingBuffer_getData(&modemTxBuffer, tmp, 1);
                 fprintf(stderr, "modem TX invalid header [%02X]  [%02X]\n", buf[0], tmp[0]);
-                pthread_mutex_unlock(&txBufMutex);
+                pthread_mutex_unlock(&modemTxBufMutex);
                 continue;
             }
-            if (!RingBuffer_peek(&txBuffer, buf, 2))
+            if (!RingBuffer_peek(&modemTxBuffer, buf, 2))
                 fprintf(stderr, "npeek failed\n");
-            pthread_mutex_unlock(&txBufMutex);
+            pthread_mutex_unlock(&modemTxBufMutex);
             uint8_t len = buf[1];
             if (len < 1)
             {
                 uint8_t tmp[2];
-                pthread_mutex_lock(&txBufMutex);
-                RingBuffer_getData(&txBuffer, tmp, 2);
+                pthread_mutex_lock(&modemTxBufMutex);
+                RingBuffer_getData(&modemTxBuffer, tmp, 2);
                 fprintf(stderr, "modem length invalid. [%02X]  [%02X]\n", len, tmp[1]);
-                pthread_mutex_unlock(&txBufMutex);
+                pthread_mutex_unlock(&modemTxBufMutex);
                 continue;
             }
-            if (RingBuffer_dataSize(&txBuffer) >= len)
+            if (RingBuffer_dataSize(&modemTxBuffer) >= len)
             {
                 uint8_t buf[len];
-                pthread_mutex_lock(&txBufMutex);
-                RingBuffer_getData(&txBuffer, buf, len);
-                pthread_mutex_unlock(&txBufMutex);
+                pthread_mutex_lock(&modemTxBufMutex);
+                RingBuffer_getData(&modemTxBuffer, buf, len);
+                pthread_mutex_unlock(&modemTxBufMutex);
                 int ret = write(serialModemFd, buf, len);
                 if (ret != len)
                 {
@@ -1033,37 +1034,37 @@ void* modemTxThread(void* arg)
     {
         delay(1000);
 
-        if (RingBuffer_dataSize(&txBuffer) >= 3)
+        if (RingBuffer_dataSize(&modemTxBuffer) >= 3)
         {
-            pthread_mutex_lock(&txBufMutex);
+            pthread_mutex_lock(&modemTxBufMutex);
             uint8_t buf[3];
-            RingBuffer_peek(&txBuffer, buf, 1);
+            RingBuffer_peek(&modemTxBuffer, buf, 1);
             if (buf[0] != 0x61)
             {
                 uint8_t tmp[1];
-                RingBuffer_getData(&txBuffer, tmp, 1);
+                RingBuffer_getData(&modemTxBuffer, tmp, 1);
                 fprintf(stderr, "modem TX invalid header [%02X]  [%02X]\n", buf[0], tmp[0]);
-                pthread_mutex_unlock(&txBufMutex);
+                pthread_mutex_unlock(&modemTxBufMutex);
                 continue;
             }
-            if (!RingBuffer_peek(&txBuffer, buf, 3))
+            if (!RingBuffer_peek(&modemTxBuffer, buf, 3))
                 fprintf(stderr, "peek failed\n");
             uint8_t len = buf[1];
             if (len < 1)
             {
                 fprintf(stderr, "modem length invalid. [%02X]\n", len);
                 uint8_t tmp[1];
-                RingBuffer_getData(&txBuffer, tmp, 1);
-                pthread_mutex_unlock(&txBufMutex);
+                RingBuffer_getData(&modemTxBuffer, tmp, 1);
+                pthread_mutex_unlock(&modemTxBufMutex);
                 continue;
             }
-            pthread_mutex_unlock(&txBufMutex);
-            if (RingBuffer_dataSize(&txBuffer) >= len)
+            pthread_mutex_unlock(&modemTxBufMutex);
+            if (RingBuffer_dataSize(&modemTxBuffer) >= len)
             {
                 uint8_t buf[len];
-                pthread_mutex_lock(&txBufMutex);
-                RingBuffer_getData(&txBuffer, buf, len);
-                pthread_mutex_unlock(&txBufMutex);
+                pthread_mutex_lock(&modemTxBufMutex);
+                RingBuffer_getData(&modemTxBuffer, buf, len);
+                pthread_mutex_unlock(&modemTxBufMutex);
                 int ret = write(serialModemFd, buf, len);
                 if (ret != len)
                 {
@@ -1368,10 +1369,10 @@ void* processClientSocket(void* arg)
         currType = type;
         // This debug statement to be removed after debugging
         //        if (debugM)
-  //      if (currType != lastType || RingBuffer_dataSize(&rxModeBuffer) > 1500)
+     //   if (currType != lastType || RingBuffer_dataSize(&rxModeBuffer) > 1500)
         fprintf(stderr, "TM: %llu  Type: %02X  Mode: %4s  Conn: %2d  Mode Sp: %2d  Modem Sp: %4d  RX buf: %4d  BR: %d\n",
                 (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000, type, currentMode, conn_id,
-                space, RingBuffer_freeSpace(&txBuffer), RingBuffer_dataSize(&rxModeBuffer), bufReady);
+                space, RingBuffer_freeSpace(&modemTxBuffer), RingBuffer_dataSize(&rxModeBuffer), bufReady);
 
         lastType = type;
 
@@ -1912,7 +1913,7 @@ int processMMDVMSerial(void)
         setDMRSpace(buffer[7], buffer[8]);
         setP25Space(buffer[10]);
     }
-    else if (type == TYPE_M17_LSF && respLen == 54)
+    else if (type == TYPE_M17_LSF && (respLen == 54 || respLen == 52))
     {
         if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "M17") == 0))
         {
@@ -1928,7 +1929,7 @@ int processMMDVMSerial(void)
             pthread_mutex_unlock(&txBufModeMutex);
         }
     }
-    else if (type == TYPE_M17_STREAM && respLen == 54)
+    else if (type == TYPE_M17_STREAM && (respLen == 54 || respLen == 52))
     {
         if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "M17") == 0))
         {
@@ -1944,7 +1945,7 @@ int processMMDVMSerial(void)
             pthread_mutex_unlock(&txBufModeMutex);
         }
     }
-    else if (type == TYPE_M17_PACKET && respLen == 54)
+    else if (type == TYPE_M17_PACKET && (respLen == 54 || respLen == 52))
     {
         if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "M17") == 0))
         {
@@ -2038,7 +2039,7 @@ int processMMDVMSerial(void)
             pthread_mutex_unlock(&txBufModeMutex);
         }
     }
-    else if (type == TYPE_P25_LDU && buffer[3] == 1 && respLen == 222)
+    else if (type == TYPE_P25_LDU && buffer[3] == 1 && (respLen == 222 || respLen == 220))
     {
         if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "P25") == 0))
         {
@@ -2343,7 +2344,7 @@ int main(int argc, char** argv)
 
     /* Initialize RingBuffers */
     RingBuffer_Init(&modemCommandBuffer, 300);
-    RingBuffer_Init(&txBuffer, 1000);
+    RingBuffer_Init(&modemTxBuffer, 1000);
     RingBuffer_Init(&rxModeBuffer, 12000);
     RingBuffer_Init(&txModeBuffer, 10000);
 
@@ -2589,7 +2590,7 @@ int main(int argc, char** argv)
 
     /* Cleanup RingBuffers */
     RingBuffer_Destroy(&modemCommandBuffer);
-    RingBuffer_Destroy(&txBuffer);
+    RingBuffer_Destroy(&modemTxBuffer);
     RingBuffer_Destroy(&rxModeBuffer);
     RingBuffer_Destroy(&txModeBuffer);
     for (uint8_t i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
