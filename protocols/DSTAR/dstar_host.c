@@ -2410,12 +2410,12 @@ void processEOT(bool isNet)
             pthread_mutex_unlock(&gwTxBufMutex);
         }
 
-        if ((strcasecmp(rpt1Call, station_rpt1Call) == 0) && modem_duplex && !isNet)
+        if ((strcasecmp(rpt1Call, station_rpt1Call) == 0) && (modem_duplex || isNet))
         {
             write(sockfd, buf, 8);
-            delay(18000);
+            delay(300000);
 
-            // Canned EOT message. This really should be sending BER message.
+            // Canned EOT sending BER message.
             // ***********************************************************************
             uint8_t buf2[49] = {0x61, 0x00, 0x31, 0x04, 'D', 'S', 'T', 'H'};
             memcpy(buf2 + 8, header, 41);
