@@ -1714,22 +1714,17 @@ async function reflConnect(reflType)
     return;
   }
   var tmp = await resp.text();
-  if (tmp != "success")
+  if (tmp == "linked")
   {
-    alert(action + " failed!");
+    document.getElementById(reflType+'link').textContent = "Unlink";
+    document.getElementById(reflType+'_linkstat').innerHTML = "Linked to "+name+" "+mod;
   }
   else
   {
-    if (document.getElementById(reflType+'link').textContent == "Link")
-    {
-        document.getElementById(reflType+'link').textContent = "Unlink";
-        document.getElementById(reflType+'_linkstat').innerHTML = "Linked to "+name+" "+mod;
-    }
-    else
-    {
-        document.getElementById(reflType+'link').textContent = "Link";
-        document.getElementById(reflType+'_linkstat').innerHTML = "Not Linked";
-    }
+    if (tmp == "failed")
+        alert("Reflector link failed.");
+    document.getElementById(reflType+'link').textContent = "Link";
+    document.getElementById(reflType+'_linkstat').innerHTML = "Not Linked";
   }
   document.body.style.cursor = 'default';
 }
