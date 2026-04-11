@@ -43,6 +43,7 @@ machine with network access to host.
 
 Directory Stucture
 ===================================================================
+```
 OpenMT			-- project root
 	docs		-- Documentation
 	db		-- Database schema location. MariaDB
@@ -60,8 +61,10 @@ OpenMT			-- project root
 			gateway	-- M17 gateway program
 		P25		-- P25 protocol service program
 			gateway	-- P25 gateway program
-		...		-- other protocols as needed
+			...	-- other protocols as needed
 
+
+```
 SQL Server (MariaDB)
 ========================================================================
 An SQL database will be used to store configuration and history data.
@@ -70,6 +73,7 @@ passord to access the database.
 
 Modem types
 ===========================================================================
+```
 This software is intended to work with 4 modem types:
     1. MMDVM        // used mostly for repeaters
     2. MMDVM_HS     // used mostly for hotspots
@@ -80,6 +84,8 @@ This software is intended to work with 4 modem types:
     4. OPENMT_HS    // This will be new firmware that will run on MMDVM_HS
                        compatiable hardware with the same intention of
                        creating a protocol agnostic modem.
+
+```
 
 Modem Host (multimode)
 ========================================================================
