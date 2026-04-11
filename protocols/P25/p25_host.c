@@ -1675,7 +1675,7 @@ void *processGatewaySocket(void *arg)
             char tmp[8];
             bzero(tmp, 8);
             memcpy(tmp, buffer + 4 + typeLen, 6);
-            ackDashbCommand(modemName, "reflLinkP25", "success");
+            ackDashbCommand(modemName, "reflLinkP25", "unlinked");
             setReflectorStatus(modemName, "P25", (const char*)tmp, false);
         }
         else if (memcmp(type, TYPE_COMMAND, typeLen) == 0)

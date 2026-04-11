@@ -2270,7 +2270,7 @@ void *processGatewaySocket(void *arg)
             pthread_mutex_lock(&stateMutex);
             m17ReflConnected = true;
             pthread_mutex_unlock(&stateMutex);
-            ackDashbCommand(modemName, "reflLinkM17", "success");
+            ackDashbCommand(modemName, "reflLinkM17", "linked");
             char tmp[9];
             bzero(tmp, 9);
             memcpy(tmp, buffer + 4 + typeLen, 7);
@@ -2288,7 +2288,7 @@ void *processGatewaySocket(void *arg)
             memcpy(tmp, buffer + 4 + typeLen, 7);
             tmp[7] = ' ';
             tmp[8] = buffer[15];
-            ackDashbCommand(modemName, "reflLinkM17", "success");
+            ackDashbCommand(modemName, "reflLinkM17", "unlinked");
             setReflectorStatus(modemName, "M17", (const char*)tmp, false);
         }
         else if (memcmp(type, TYPE_STATUS, typeLen) == 0)

@@ -135,6 +135,7 @@ const uint8_t DSTAR_END_SYNC_BYTES[] = {0x55, 0x55, 0x55, 0x55, 0xC8, 0x7A,
 
 const uint8_t DSTAR_SLOW_DATA_TYPE_TEXT   = 0x40U;
 const uint8_t DSTAR_SLOW_DATA_TYPE_HEADER = 0x50U;
+const uint8_t DSTAR_SLOW_DATA_TYPE_MASK   = 0xf0U;
 
 const uint8_t DSTAR_SCRAMBLER_BYTES[] = {0x70U, 0x4FU, 0x93U};
 
@@ -1824,40 +1825,40 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                     hBuffer[3] = b;
                     hBuffer[4] = c;
 
-                    if (ptr < 45U)
+                    if (ptr < 45U && (hBuffer[0U] & DSTAR_SLOW_DATA_TYPE_MASK) == DSTAR_SLOW_DATA_TYPE_HEADER)
                     {
                      //   if ((a & 0x0f) == 0x05)
                         memcpy(header + ptr, hBuffer, 5U);
                         ptr += 5U;
 
-                        // Clean up the data
-                        header[0U] &= (DSTAR_INTERRUPTED_MASK | DSTAR_URGENT_MASK | DSTAR_REPEATER_MASK);
-                        header[1U] = 0x00U;
-                        header[2U] = 0x00U;
-
-                        for (unsigned int i = 3U; i < 39U; i++)
-                            header[i] &= 0x7FU;
-
-                        // Check the CRC
-                        bool ret = checkCCITT161(header, DSTAR_HEADER_LENGTH_BYTES);
-                        if (!ret)
+                        if (ptr >= 45)
                         {
-                            if (ptr >= 45U)
+                            // Clean up the data
+                            header[0U] &= (DSTAR_INTERRUPTED_MASK | DSTAR_URGENT_MASK | DSTAR_REPEATER_MASK);
+                            header[1U] = 0x00U;
+                            header[2U] = 0x00U;
+
+                            for (unsigned int i = 3U; i < 39U; i++)
+                                header[i] &= 0x7FU;
+
+                            // Check the CRC
+                            bool ret = checkCCITT161(header, DSTAR_HEADER_LENGTH_BYTES);
+                            if (!ret)
                             {
                                 fprintf(stderr, "D-Star, invalid slow data header\n");
-                                ptr = 0;
+                                ptr           = 0;
+                                bHeaderActive = false;
+                                validSSHeader = false;
+                                bFirstSection = false;
+                                return 0;
                             }
-
-                            validSSHeader = false;
-                            bFirstSection = true;
-                            return 0;
+                            //                        dump((char*)"SS Header", header, DSTAR_HEADER_LENGTH_BYTES);
+                            validSSHeader = true;
+                            memcpy(ssHeader, header, DSTAR_HEADER_LENGTH_BYTES);
+                            bHeaderActive = false;
+                            ptr           = 0;
+                            iRet          = 1;
                         }
-//                        dump((char*)"SS Header", header, DSTAR_HEADER_LENGTH_BYTES);
-                        validSSHeader = true;
-                        memcpy(ssHeader, header, DSTAR_HEADER_LENGTH_BYTES);
-                        bHeaderActive = false;
-                        ptr = 0;
-                        iRet = 1;
                     }
                 }
             }
@@ -2809,7 +2810,7 @@ void* processGatewaySocket(void* arg)
         else if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
         {
             dstarReflConnected = true;
-            ackDashbCommand(modemName, "reflLinkDSTAR", "success");
+            ackDashbCommand(modemName, "reflLinkDSTAR", "linked");
             char tmp[10];
             bzero(tmp, 10);
             memcpy(tmp, buffer + 4 + typeLen, 7);
@@ -2826,7 +2827,7 @@ void* processGatewaySocket(void* arg)
             memcpy(tmp, buffer + 4 + typeLen, 7);
             tmp[7] = ' ';
             tmp[8] = buffer[15];
-            ackDashbCommand(modemName, "reflLinkDSTAR", "success");
+            ackDashbCommand(modemName, "reflLinkDSTAR", "unlinked");
             setReflectorStatus(modemName, "DSTAR", (const char*)tmp, false);
         }
         else if (memcmp(type, TYPE_COMMAND, typeLen) == 0)

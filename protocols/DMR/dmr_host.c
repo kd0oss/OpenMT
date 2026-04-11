@@ -1425,7 +1425,7 @@ void* processGatewaySocket(void* arg)
         else if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
         {
             dmrReflConnected = true;
-        //    ackDashbCommand(modemName, "reflLinkDMR", "success");
+            ackDashbCommand(modemName, "reflLinkDMR", "success");
             char tmp[13];
             bzero(tmp, 13);
             strcpy(tmp, "BM ");
@@ -1438,7 +1438,7 @@ void* processGatewaySocket(void* arg)
             char tmp[10];
             bzero(tmp, 10);
             memcpy(tmp, buffer + 4 + typeLen, 9);
-            ackDashbCommand(modemName, "reflLinkDMR", "success");
+            ackDashbCommand(modemName, "reflLinkDMR", "unlinked");
             setReflectorStatus(modemName, "DMR", (const char*)tmp, false);
         }
         else if (memcmp(type, TYPE_COMMAND, typeLen) == 0)

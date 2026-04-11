@@ -459,10 +459,10 @@ void* txThread(void* arg)
 
     while (connected)
     {
-        delay(100);
+        delay(1000);
         loop++;
 
-        if (loop > 50)
+        if (loop > 10)
         {
             pthread_mutex_lock(&txBufMutex);
             if (RingBuffer_dataSize(&txBuffer) >= 5)
@@ -505,6 +505,7 @@ void* txThread(void* arg)
             loop = 0;
         }
     }
+
     fprintf(stderr, "TX thread exited.\n");
     int iRet  = 500;
     connected = false;
@@ -889,7 +890,20 @@ void* connectIRCDDBGateway(void* argv)
         /* Old code removed - now using state machine below */
 
         /* Check for timeout */
-        gwStateCheckTimeout(5000); /* 5 second timeout */
+        if (gwStateCheckTimeout(5000)) /* 5 seconds */
+        {
+            buffer[0] = 0x61;
+            buffer[1] = 0x00;
+            buffer[2] = 0x08;
+            buffer[3] = 0x04;
+            memcpy(buffer + 4, TYPE_EOT, 4);
+            pthread_mutex_lock(&txBufMutex);
+            RingBuffer_addData(&txBuffer, buffer, 8);
+            pthread_mutex_unlock(&txBufMutex);
+            fprintf(stderr, "EOT\n");
+            gwStateEnd("Reflector EOT");
+            continue;
+        }
 
         /* Handle incoming header from reflector (49 bytes, type 0x20) */
         if (n == 49 && cRecvline[4] == 0x20)
