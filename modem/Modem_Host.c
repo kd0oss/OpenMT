@@ -205,7 +205,8 @@ void setProtocol(const char* protocol, bool enabled);
 //  SIGINT handler, so we can gracefully exit when the user hits ctrl+c.
 static void sigintHandler(int signum)
 {
-    signal(SIGINT, SIG_DFL);
+    fprintf(stderr, "Program shutdown requested.\n");
+
     for (uint8_t x = 0; x < MAX_CLIENT_CONNECTIONS; x++)
     {
         if (hostClient[x].active)
@@ -213,6 +214,8 @@ static void sigintHandler(int signum)
     }
     sleep(1);
     exitRequested = true;
+    running = false;
+    signal(SIGINT, SIG_DFL);
 }
 
 uint8_t getModemSpace(const char* protocol, const uint8_t slot)
@@ -528,7 +531,9 @@ void disableTimer(uint8_t id)
 // Each loop through the while statement takes 1 millisecond.
 void* timerThread(void* arg)
 {
-    if (getTimer("frameDelay", 20) < 0)
+    uint8_t currDelay = 19;
+
+    if (getTimer("frameDelay", 19) < 0)
     {
         if (debugM) fprintf(stderr, "Timer thread exited.\n");
         int iRet = 600;
@@ -540,9 +545,9 @@ void* timerThread(void* arg)
     {
         delay(1000);  // 1ms
 
-        pthread_mutex_lock(&timerMutex);
         for (uint8_t i = 0; i < 10; i++)
         {
+            pthread_mutex_lock(&timerMutex);
             if (timer[i].valid && timer[i].enabled)
             {
                 if (timer[i].count >= timer[i].duration)
@@ -555,97 +560,106 @@ void* timerThread(void* arg)
                     timer[i].count++;
                 }
             }
+            pthread_mutex_unlock(&timerMutex);
         }
-        pthread_mutex_unlock(&timerMutex);
 
-    //    if (isTimerTriggered("frameDelay"))
+        pthread_mutex_lock(&rxBufModeMutex);
+        if (RingBuffer_dataSize(&rxModeBuffer) == 0)
+            bufReady = false;
+        pthread_mutex_unlock(&rxBufModeMutex);
+
+        if (strncasecmp(modem, "mmdvm", 5) == 0)
         {
-            pthread_mutex_lock(&rxBufModeMutex);
-            if (RingBuffer_dataSize(&rxModeBuffer) == 0)
-                bufReady = false;
-            pthread_mutex_unlock(&rxBufModeMutex);
+      //      if (strcmp(currentMode, "DSTAR") == 0)
+      //      {
+                uint8_t space1 = getModemSpace(currentMode, 1);
+                uint8_t space2 = getModemSpace(currentMode, 2);
+                uint8_t space  = MIN(space1, space2);
+             //       fprintf(stderr, "***************** Modem space. %u   Delay: %u\n", space, currDelay);
+                if (space < 10)
+                {
+                    if (currDelay > 19)
+                        currDelay = 19;
 
-            if (strncasecmp(modem, "mmdvm", 5) == 0)
-            {
-                if (strcmp(currentMode, "DSTAR") == 0)
-                {
-                    uint8_t space = getModemSpace(currentMode, 1);
-                    if (space < 10)
-                        resetTimer("frameDelay", 18);
-                    else if (space > 17)
-                        resetTimer("frameDelay", 13);
-                    else
-                        resetTimer("frameDelay", 17);
+                    resetTimer("frameDelay", ++currDelay);
                 }
-                else if (strcmp(currentMode, "M17") == 0)
+                else if (space > 12)
                 {
-                    uint8_t space = getModemSpace(currentMode, 1);
-                    if (space < 30)
-                        resetTimer("frameDelay", 18);
-                    else if (space > 60)
-                        resetTimer("frameDelay", 12);
-                    else
-                        resetTimer("frameDelay", 14);
+                    if (currDelay <= 1)
+                        currDelay = 2;
+
+                    resetTimer("frameDelay", --currDelay);
                 }
-                else if (strcmp(currentMode, "P25") == 0)
-                {
-                    uint8_t space = getModemSpace(currentMode, 1);
-                    if (space < 10)
-                        resetTimer("frameDelay", 19);
-                    else if (space > 12)
-                        resetTimer("frameDelay", 8);
-                    else
-                        resetTimer("frameDelay", 12);
-                }
-                else if (strcmp(currentMode, "DMR") == 0)
-                {
-                    uint8_t space1 = getModemSpace(currentMode, 1);
-                    uint8_t space2 = getModemSpace(currentMode, 2);
-                    uint8_t space  = MIN(space1, space2);
-                    if (space < 5)
-                        resetTimer("frameDelay", 60);
-                    else if (space > 8)
-                        resetTimer("frameDelay", 45);
-                    else
-                        resetTimer("frameDelay", 57);
-                }
+                /*
+                if (space < 10)
+                    resetTimer("frameDelay", 18);
+                else if (space > 17)
+                    resetTimer("frameDelay", 12);
+                else
+                    resetTimer("frameDelay", 17);
             }
-            else
-                resetTimer("frameDelay", 0);
-        }
-
-        if (isTimerTriggered("txTimeout") && txOn)
-        {
-            txOn = false;
-            strcpy(currentMode, "idle");
-            setStatus(modemName, "main", "active_mode", currentMode);
-            pthread_mutex_lock(&rxBufModeMutex);
-            RingBuffer_clear(&rxModeBuffer);
-            pthread_mutex_unlock(&rxBufModeMutex);
-            if (strncasecmp(modem, "mmdvm", 5) == 0)
+            else if (strcmp(currentMode, "M17") == 0)
             {
-                uint8_t buffer[4];
-                buffer[0] = 0xE0;
-                buffer[1] = 0x04;
-                buffer[2] = MODEM_MODE;
-                buffer[3] = 0x00;  // IDLE_MODE
-                pthread_mutex_lock(&modemComBufMutex);
-                RingBuffer_addData(&modemCommandBuffer, buffer, 4);
-                pthread_mutex_unlock(&modemComBufMutex);
+                uint8_t space = getModemSpace(currentMode, 1);
+                if (space < 30)
+                    resetTimer("frameDelay", 16);
+                else if (space > 60)
+                    resetTimer("frameDelay", 11);
+                else
+                    resetTimer("frameDelay", 14);
             }
-            resetTimer("txTimeout", 0);
-            //       if (debugM)
-            fprintf(stderr, "TX timeout. Setting mode to idle.\n");
+            else if (strcmp(currentMode, "P25") == 0)
+            {
+                uint8_t space = getModemSpace(currentMode, 1);
+                if (space < 10)
+                    resetTimer("frameDelay", 19);
+                else if (space > 12)
+                    resetTimer("frameDelay", 8);
+                else
+                    resetTimer("frameDelay", 12);
+            }
+            else if (strcmp(currentMode, "DMR") == 0)
+            {
+                uint8_t space1 = getModemSpace(currentMode, 1);
+                uint8_t space2 = getModemSpace(currentMode, 2);
+                uint8_t space  = MIN(space1, space2);
+                if (space < 5)
+                    resetTimer("frameDelay", 60);
+                else if (space > 8)
+                    resetTimer("frameDelay", 45);
+                else
+                    resetTimer("frameDelay", 57);
+            } */
         }
-        else if (!txOn)
-            resetTimer("txTimeout", 0);
-
-        if (exitRequested)
-        {
-            fprintf(stderr, "Program shutdown requested.\n");
-            running = false;
-        }
+        else
+            resetTimer("frameDelay", 0);
     }
+
+    if (isTimerTriggered("txTimeout") && txOn)
+    {
+        txOn = false;
+        strcpy(currentMode, "idle");
+        setStatus(modemName, "main", "active_mode", currentMode);
+        pthread_mutex_lock(&rxBufModeMutex);
+        RingBuffer_clear(&rxModeBuffer);
+        pthread_mutex_unlock(&rxBufModeMutex);
+        if (strncasecmp(modem, "mmdvm", 5) == 0)
+        {
+            uint8_t buffer[4];
+            buffer[0] = 0xE0;
+            buffer[1] = 0x04;
+            buffer[2] = MODEM_MODE;
+            buffer[3] = 0x00;  // IDLE_MODE
+            pthread_mutex_lock(&modemComBufMutex);
+            RingBuffer_addData(&modemCommandBuffer, buffer, 4);
+            pthread_mutex_unlock(&modemComBufMutex);
+        }
+        resetTimer("txTimeout", 0);
+        //       if (debugM)
+        fprintf(stderr, "TX timeout. Setting mode to idle.\n");
+    }
+    else if (!txOn)
+        resetTimer("txTimeout", 0);
 
     fprintf(stderr, "Timer thread exited.\n");
     int iRet = 600;
@@ -663,7 +677,7 @@ void* modeRxThread(void* arg)
 
     while (hostClient[conn_id].active && running)
     {
-        delay(100);
+        delay(500);
 
         pthread_mutex_lock(&txBufModeMutex);
         if (RingBuffer_dataSize(&txModeBuffer) >= 4)
@@ -741,24 +755,18 @@ void* modeRxThread(void* arg)
             {
                 uint8_t buf[len];
                 RingBuffer_getData(&hostClient[conn_id].command, buf, len);
-                pthread_mutex_unlock(&hostClient[conn_id].commandMutex);
 
                 if (write(sockfd, buf, len) < 0)
                 {
+                    pthread_mutex_unlock(&hostClient[conn_id].commandMutex);
                     fprintf(stderr, "ERROR: remote disconnect\n");
                     break;
                 }
             }
-            else
-            {
-                pthread_mutex_unlock(&hostClient[conn_id].commandMutex);
-            }
         }
-        else
-        {
-            pthread_mutex_unlock(&hostClient[conn_id].commandMutex);
-        }
+        pthread_mutex_unlock(&hostClient[conn_id].commandMutex);
     }
+
     hostClient[conn_id].active = false;
     delay(50000);
     fprintf(stderr, "Mode RX thread exited. Connection Id: %d\n", conn_id);
@@ -877,15 +885,17 @@ void* modeMMDVMTxThread(void* arg)
 
         if (isTimerTriggered("status"))
         {
-            if (RingBuffer_freeSpace(&modemTxBuffer) >= 3 && RingBuffer_dataSize(&rxModeBuffer) < 3)
+            if (RingBuffer_dataSize(&rxModeBuffer) < 3)
             {
                 uint8_t buf[3];
                 buf[0] = 0xE0;
                 buf[1] = 0x03;
                 buf[2] = MODEM_STATUS;
-                pthread_mutex_lock(&modemTxBufMutex);
-                RingBuffer_addData(&modemTxBuffer, buf, 3);
-                pthread_mutex_unlock(&modemTxBufMutex);
+                int ret = write(serialModemFd, buf, 3);
+                if (ret != 3)
+                {
+                    fprintf(stderr, "modem TX write failed.\n");
+                }
             }
             resetTimer("status", 0);
         }
@@ -900,12 +910,11 @@ void* modeMMDVMTxThread(void* arg)
                 uint8_t tmp[1];
                 RingBuffer_getData(&rxModeBuffer, tmp, 1);
                 pthread_mutex_unlock(&rxBufModeMutex);
-                fprintf(stderr, "modemTxBufMutex invalid header [%02X]\n", tmp[0]);
+                fprintf(stderr, "rxModeBuffer invalid header [%02X]\n", tmp[0]);
                 resetTimer("frameDelay", 0);
                 continue;
             }
             RingBuffer_peek(&rxModeBuffer, buf, 2);
-            pthread_mutex_unlock(&rxBufModeMutex);
             uint8_t len = buf[1];
             if (RingBuffer_dataSize(&rxModeBuffer) >= len)
             {
@@ -915,27 +924,33 @@ void* modeMMDVMTxThread(void* arg)
                     space = getModemSpace(currentMode, 2);
                 else
                     space = getModemSpace(currentMode, 1);
+
                 if (space > 1 && RingBuffer_freeSpace(&modemTxBuffer) >= (len + 3))
                 {
                     uint8_t buf[len];
-                    pthread_mutex_lock(&rxBufModeMutex);
                     RingBuffer_getData(&rxModeBuffer, buf, len);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                    pthread_mutex_lock(&modemTxBufMutex);
-                    RingBuffer_addData(&modemTxBuffer, buf, len);
-                    pthread_mutex_unlock(&modemTxBufMutex);
+                    int ret = write(serialModemFd, buf, len);
+                    if (ret != len)
+                    {
+                        fprintf(stderr, "modem TX write failed.\n");
+                    }
                 }
-                if (RingBuffer_freeSpace(&modemTxBuffer) >= 3)
+                uint8_t buf[3];
+                buf[0]  = 0xE0;
+                buf[1]  = 0x03;
+                buf[2]  = MODEM_STATUS;
+                int ret = write(serialModemFd, buf, 3);
+                if (ret != 3)
                 {
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = 0x03;
-                    buf[2] = MODEM_STATUS;
-                    pthread_mutex_lock(&modemTxBufMutex);
-                    RingBuffer_addData(&modemTxBuffer, buf, 3);
-                    pthread_mutex_unlock(&modemTxBufMutex);
+                    fprintf(stderr, "modem TX write failed.\n");
                 }
             }
+            else
+            {
+                pthread_mutex_unlock(&rxBufModeMutex);
+                continue;
+            }
+            pthread_mutex_unlock(&rxBufModeMutex);
             resetTimer("frameDelay", 0);
         }
 
@@ -958,71 +973,19 @@ void* modeMMDVMTxThread(void* arg)
                 {
                     uint8_t buf[len];
                     RingBuffer_getData(&modemCommandBuffer, buf, len);
-                    pthread_mutex_lock(&modemTxBufMutex);
-                    RingBuffer_addData(&modemTxBuffer, buf, len);
-                    pthread_mutex_unlock(&modemTxBufMutex);
+                    int ret = write(serialModemFd, buf, len);
+                    if (ret != len)
+                    {
+                        fprintf(stderr, "modem TX write failed.\n");
+                    }
                 }
             }
         }
         pthread_mutex_unlock(&modemComBufMutex);
     }
+
     fprintf(stderr, "Mode TX thread exited.\n");
     int iRet = 400;
-    pthread_exit(&iRet);
-    return NULL;
-}
-
-// Send queued up bytes to MMDVM modem.
-void* modemMMDVMTxThread(void* arg)
-{
-    while (running)
-    {
-        delay(50);
-
-        if (RingBuffer_dataSize(&modemTxBuffer) >= 3)
-        {
-            pthread_mutex_lock(&modemTxBufMutex);
-            uint8_t buf[2];
-            RingBuffer_peek(&modemTxBuffer, buf, 1);
-            if (buf[0] != 0xE0)
-            {
-                uint8_t tmp[1];
-                RingBuffer_getData(&modemTxBuffer, tmp, 1);
-                fprintf(stderr, "modem TX invalid header [%02X]  [%02X]\n", buf[0], tmp[0]);
-                pthread_mutex_unlock(&modemTxBufMutex);
-                continue;
-            }
-            if (!RingBuffer_peek(&modemTxBuffer, buf, 2))
-                fprintf(stderr, "npeek failed\n");
-            pthread_mutex_unlock(&modemTxBufMutex);
-            uint8_t len = buf[1];
-            if (len < 1)
-            {
-                uint8_t tmp[2];
-                pthread_mutex_lock(&modemTxBufMutex);
-                RingBuffer_getData(&modemTxBuffer, tmp, 2);
-                fprintf(stderr, "modem length invalid. [%02X]  [%02X]\n", len, tmp[1]);
-                pthread_mutex_unlock(&modemTxBufMutex);
-                continue;
-            }
-            if (RingBuffer_dataSize(&modemTxBuffer) >= len)
-            {
-                uint8_t buf[len];
-                pthread_mutex_lock(&modemTxBufMutex);
-                RingBuffer_getData(&modemTxBuffer, buf, len);
-                pthread_mutex_unlock(&modemTxBufMutex);
-                int ret = write(serialModemFd, buf, len);
-                if (ret != len)
-                {
-                    fprintf(stderr, "modem TX write failed.\n");
-                }
-        //        if (buf[2] != 0x01)     dump((char*)"Modem", buf, len);
-            }
-        }
-    }
-
-    fprintf(stderr, "Modem TX thread exited.\n");
-    int iRet = 300;
     pthread_exit(&iRet);
     return NULL;
 }
@@ -1370,9 +1333,9 @@ void* processClientSocket(void* arg)
         // This debug statement to be removed after debugging
         //        if (debugM)
      //   if (currType != lastType || RingBuffer_dataSize(&rxModeBuffer) > 1500)
-        fprintf(stderr, "TM: %llu  Type: %02X  Mode: %4s  Conn: %2d  Mode Sp: %2d  Modem Sp: %4d  RX buf: %4d  BR: %d\n",
+        fprintf(stderr, "TM: %llu  Type: %02X  Mode: %4s  Conn: %2d  Mode Sp: %2d  TX Modem: %4d  BR: %d\n",
                 (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000, type, currentMode, conn_id,
-                space, RingBuffer_freeSpace(&modemTxBuffer), RingBuffer_dataSize(&rxModeBuffer), bufReady);
+                space, RingBuffer_dataSize(&rxModeBuffer), bufReady);
 
         lastType = type;
 
@@ -2404,19 +2367,7 @@ int main(int argc, char** argv)
 
     if (strncasecmp(modem, "mmdvm", 5) == 0)
     {
-        int err = pthread_create(&(modemTxid), NULL, &modemMMDVMTxThread, NULL);
-        if (err != 0)
-        {
-            fprintf(stderr, "Can't create MMDVM modem tx thread:[%s]", strerror(err));
-            return 1;
-        }
-        else
-        {
-            if (debugM)
-                fprintf(stderr, "MMDVM modem tx thread created successfully\n");
-        }
-
-        err = pthread_create(&(modetxid), NULL, &modeMMDVMTxThread, NULL);
+        int err = pthread_create(&(modetxid), NULL, &modeMMDVMTxThread, NULL);
         if (err != 0)
         {
             fprintf(stderr, "Can't create MMDVM mode tx thread:[%s]", strerror(err));
