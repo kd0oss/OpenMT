@@ -100,6 +100,9 @@ typedef struct
     GatewayState state;
     uint16_t reflector_stream_id; /* Only for RX direction */
     uint64_t last_packet_time;
+    uint8_t last_frame_seq;   /* Last received frame sequence number (0-20), 0xFF = none yet */
+    uint32_t frames_received; /* Total frames received this stream */
+    uint32_t frames_lost;     /* Total frames lost this stream */
     pthread_mutex_t mutex;
 } GatewayCommState;
 
@@ -108,6 +111,9 @@ GatewayCommState gwState = {
     .state               = GATEWAY_IDLE,
     .reflector_stream_id = 0,
     .last_packet_time    = 0,
+    .last_frame_seq      = 0xFF,
+    .frames_received     = 0,
+    .frames_lost         = 0,
     .mutex               = PTHREAD_MUTEX_INITIALIZER};
 
 // RingBuffer reflTxBuffer;
@@ -207,6 +213,9 @@ static bool gwStateStartRx(uint16_t stream_id)
     gwState.state               = GATEWAY_RX_FROM_REFLECTOR;
     gwState.reflector_stream_id = stream_id;
     gwState.last_packet_time    = getTimeMillis();
+    gwState.last_frame_seq      = 0xFF;
+    gwState.frames_received     = 0;
+    gwState.frames_lost         = 0;
     pthread_mutex_unlock(&gwState.mutex);
 
     fprintf(stderr, "START RX: Reflector→Host (stream %04X)\n", stream_id);
@@ -229,9 +238,22 @@ static void gwStateEnd(const char* reason)
     if (gwState.state != GATEWAY_IDLE)
     {
         fprintf(stderr, "END: %s (reason: %s)\n", gwState.state == GATEWAY_TX_TO_REFLECTOR ? "TX" : "RX", reason);
+
+        /* Report packet loss stats for RX streams */
+        if (gwState.state == GATEWAY_RX_FROM_REFLECTOR && gwState.frames_received > 0)
+        {
+            uint32_t total = gwState.frames_received + gwState.frames_lost;
+            float loss_pct = 100.0f * gwState.frames_lost / total;
+            fprintf(stderr, "LOSS: %u received, %u lost, %.1f%% packet loss\n",
+                    gwState.frames_received, gwState.frames_lost, loss_pct);
+        }
+
         gwState.state               = GATEWAY_IDLE;
         gwState.reflector_stream_id = 0;
         gwState.last_packet_time    = 0;
+        gwState.last_frame_seq      = 0xFF;
+        gwState.frames_received     = 0;
+        gwState.frames_lost         = 0;
     }
 
     pthread_mutex_unlock(&gwState.mutex);
@@ -472,7 +494,7 @@ void* txThread(void* arg)
                 if (buf[0] != 0x61)
                 {
                     pthread_mutex_unlock(&txBufMutex);
-                    fprintf(stderr, "TX EOT invalid header.\n");
+                    fprintf(stderr, "TX invalid header.\n");
                     continue;
                 }
                 uint8_t byte[3];
@@ -484,23 +506,16 @@ void* txThread(void* arg)
                 {
                     uint8_t buf[len];
                     RingBuffer_getData(&txBuffer, buf, len);
-                    pthread_mutex_unlock(&txBufMutex);
 
                     if (write(sockfd, buf, len) < 0)
                     {
+                        pthread_mutex_unlock(&txBufMutex);
                         fprintf(stderr, "ERROR: remote disconnect\n");
                         break;
                     }
                 }
-                else
-                {
-                    pthread_mutex_unlock(&txBufMutex);
-                }
             }
-            else
-            {
-                pthread_mutex_unlock(&txBufMutex);
-            }
+            pthread_mutex_unlock(&txBufMutex);
 
             loop = 0;
         }
@@ -878,7 +893,7 @@ void* connectIRCDDBGateway(void* argv)
         bzero(cRecvline, 50);
 
         socklen_t len = sizeof(cliaddr);
-        n             = recvfrom(sockinfd, cRecvline, 50, 0, (struct sockaddr*)&cliaddr, &len);
+        n = recvfrom(sockinfd, cRecvline, 50, 0, (struct sockaddr*)&cliaddr, &len);
         if (n > 0)
         {
             if (debugM)
@@ -886,8 +901,6 @@ void* connectIRCDDBGateway(void* argv)
         }
         if (n > 0 && (n != 21 && n != 49 && n != 34))
             fprintf(stderr, "n = %d\n", n);
-
-        /* Old code removed - now using state machine below */
 
         /* Check for timeout */
         if (gwStateCheckTimeout(5000)) /* 5 seconds */
@@ -900,9 +913,8 @@ void* connectIRCDDBGateway(void* argv)
             pthread_mutex_lock(&txBufMutex);
             RingBuffer_addData(&txBuffer, buffer, 8);
             pthread_mutex_unlock(&txBufMutex);
-            fprintf(stderr, "EOT\n");
+      //      fprintf(stderr, "EOT\n");
             gwStateEnd("Reflector EOT");
-            continue;
         }
 
         /* Handle incoming header from reflector (49 bytes, type 0x20) */
@@ -912,7 +924,6 @@ void* connectIRCDDBGateway(void* argv)
 
             if (gwStateStartRx(stream_id))
             {
-                //       iStreamId = stream_id;
                 bzero(myCall, 9);
                 bzero(suffix, 5);
                 bzero(urCall, 9);
@@ -942,6 +953,20 @@ void* connectIRCDDBGateway(void* argv)
                 RingBuffer_addData(&txBuffer, buffer, 49);
                 pthread_mutex_unlock(&txBufMutex);
             }
+            else if (!gwStateVerifyStreamId(stream_id))
+            {
+                bzero(myCall, 9);
+                bzero(suffix, 5);
+                bzero(urCall, 9);
+                bzero(rpt1Call, 9);
+                bzero(rpt2Call, 9);
+                memcpy(myCall, cRecvline + 35, 8);
+                memcpy(suffix, cRecvline + 43, 4);
+                memcpy(rpt1Call, cRecvline + 11, 8);
+                memcpy(rpt2Call, cRecvline + 19, 8);
+                memcpy(urCall, cRecvline + 27, 8);
+                fprintf(stderr, "MISMATCH **** UR: %8s  MY: %8s%4s  Rpt1: %8s  Rpt2: %8s\n", urCall, myCall, suffix, rpt1Call, rpt2Call);
+            }
         }
         /* Handle incoming voice/data from reflector (21 bytes, type 0x21) */
         else if (n == 21 && cRecvline[4] == 0x21)
@@ -950,9 +975,9 @@ void* connectIRCDDBGateway(void* argv)
             {
                 uint16_t pkt_stream_id = (cRecvline[5] << 8) | cRecvline[6];
 
+                gwStateUpdateTime();
                 if (gwStateVerifyStreamId(pkt_stream_id))
                 {
-                    gwStateUpdateTime();
                     if ((cRecvline[7] & 0x40) == 0x40)
                     {
                         buffer[0] = 0x61;
@@ -963,11 +988,29 @@ void* connectIRCDDBGateway(void* argv)
                         pthread_mutex_lock(&txBufMutex);
                         RingBuffer_addData(&txBuffer, buffer, 8);
                         pthread_mutex_unlock(&txBufMutex);
-                        fprintf(stderr, "EOT\n");
+                   //     fprintf(stderr, "EOT\n");
                         gwStateEnd("Reflector EOT");
                     }
                     else
                     {
+                        /* Sequence number loss tracking */
+                        uint8_t frame_seq = cRecvline[7] & 0x3F;
+                        pthread_mutex_lock(&gwState.mutex);
+                        if (gwState.last_frame_seq != 0xFF)
+                        {
+                            uint8_t expected = (gwState.last_frame_seq + 1) % 21;
+                            if (frame_seq != expected)
+                            {
+                                uint8_t lost = (frame_seq + 21 - expected) % 21;
+                                gwState.frames_lost += lost;
+                                fprintf(stderr, "LOSS: expected seq %u got %u (%u frame(s) lost)\n",
+                                        expected, frame_seq, lost);
+                            }
+                        }
+                        gwState.last_frame_seq = frame_seq;
+                        gwState.frames_received++;
+                        pthread_mutex_unlock(&gwState.mutex);
+
                         buffer[0] = 0x61;
                         buffer[1] = 0x00;
                         buffer[2] = 0x14;
@@ -992,6 +1035,9 @@ void* connectIRCDDBGateway(void* argv)
             memcpy(buffer, cRecvline + 5, 29);
             fprintf(stderr, "Status: %s\n", buffer);
             gwStateEnd("Status msg");
+
+            uint16_t pkt_stream_id = (cRecvline[5] << 8) | cRecvline[6];
+            gwStateVerifyStreamId(pkt_stream_id);
 
             if (strncasecmp((const char*)cRecvline + 5, "Not", 3) == 0)
             {
@@ -1035,7 +1081,7 @@ void* connectIRCDDBGateway(void* argv)
             DSTARReflConnected = false;
         }
 
-        if (timeout >= 1000000)
+        if (timeout >= 10000000)
         {
             cRxBuffer[0] = 'D';
             cRxBuffer[1] = 'S';
@@ -1052,7 +1098,7 @@ void* connectIRCDDBGateway(void* argv)
         else
             timeout++;
 
-        delay(1000);
+        delay(100);
     }
 
     uint8_t tmp[4];

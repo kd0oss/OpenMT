@@ -318,6 +318,11 @@ pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t stateMutex   = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t txSourceMutex = PTHREAD_MUTEX_INITIALIZER; /* Prevents RF and NET TX overlap */
+
+/* Tracks which source currently owns the transmitter */
+typedef enum { TX_NONE, TX_RF, TX_NET } TxSource;
+TxSource currentTxSource = TX_NONE;
 
 pthread_t modemHostid;
 pthread_t gwHostid;
@@ -502,6 +507,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                 saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, "", true);
             }
             txOn = true;
+            currentTxSource = isNet ? TX_NET : TX_RF;
             validFrame = true;
             pkt_lsf = decoder.getLsf();
             // Retrieve extended callsign data
@@ -616,6 +622,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                 if (!txOn)
                     voiceFrameCnt = 0;
                 txOn = true;
+                currentTxSource = isNet ? TX_NET : TX_RF;
                 meta_t& meta = rx_lsf.metadata();
                 if (!gpsFound && streamType.fields.encSubType == M17_META_TEXT)
                 {
@@ -840,6 +847,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
         bzero(metaText, 53);
         validFrame = false;
         txOn = false;
+        currentTxSource = TX_NONE;
         reflBusy = false;
     }
 }
@@ -959,7 +967,10 @@ void processData(q15_t sample)
 
         //    serial.writeM17EOT();
    //     fprintf(stderr, "Found EOT\n");
-        decodeFrame(TYPE_EOT, NULL, 0, false);
+        pthread_mutex_lock(&txSourceMutex);
+        if (currentTxSource != TX_NET)
+            decodeFrame(TYPE_EOT, NULL, 0, false);
+        pthread_mutex_unlock(&txSourceMutex);
 
         m17state      = M17RXS_NONE;
         m17endPtr     = NOENDPTR;
@@ -1011,7 +1022,10 @@ void processData(q15_t sample)
 
             //      serial.writeM17Lost();
        //     fprintf(stderr, "Found LOST\n");
-            decodeFrame(TYPE_EOT, NULL, 0, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
+                decodeFrame(TYPE_EOT, NULL, 0, false);
+            pthread_mutex_unlock(&txSourceMutex);
 
             m17state      = M17RXS_NONE;
             m17endPtr     = NOENDPTR;
@@ -1024,26 +1038,31 @@ void processData(q15_t sample)
         {
             frame[0U] = m17lostCount == (MAX_SYNC_FRAMES - 1U) ? 0x01U : 0x00U;
 
-            switch (m17state)
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
             {
-                case M17RXS_LINK_SETUP:
+                switch (m17state)
+                {
+                    case M17RXS_LINK_SETUP:
              //       fprintf(stderr, "Found LSF\n");
-                    decodeFrame(TYPE_LSF, frame + 1, 48, false);
-                    //       writeRSSILinkSetup(frame);
-                    break;
-                case M17RXS_STREAM:
+                        decodeFrame(TYPE_LSF, frame + 1, 48, false);
+                        //       writeRSSILinkSetup(frame);
+                        break;
+                    case M17RXS_STREAM:
             //        fprintf(stderr, "Found Stream\n");
-                    decodeFrame(TYPE_STREAM, frame + 1, 48, false);
-                    //       writeRSSIStream(frame);
-                    break;
-                case M17RXS_PACKET:
+                        decodeFrame(TYPE_STREAM, frame + 1, 48, false);
+                        //       writeRSSIStream(frame);
+                        break;
+                    case M17RXS_PACKET:
             //        fprintf(stderr, "Found Packet\n");
-                    decodeFrame(TYPE_PACKET, frame + 1, 48, false);
-                    //       writeRSSIPacket(frame);
-                    break;
-                default:
-                    break;
+                        decodeFrame(TYPE_PACKET, frame + 1, 48, false);
+                        //       writeRSSIPacket(frame);
+                        break;
+                    default:
+                        break;
+                }
             }
+            pthread_mutex_unlock(&txSourceMutex);
 
             m17maxCorr   = 0;
             m17nextState = M17RXS_NONE;
@@ -1521,7 +1540,10 @@ void processBitsData(bool bit)
             //   DEBUG2("M17RX: found eot sync, pos", m17bufferPtr - M17_SYNC_LENGTH_BITS);
             //      serial.writeM17EOT();
             //        uint8_t buf[8] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'E'};
-            decodeFrame(TYPE_EOT, NULL, 0, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
+                decodeFrame(TYPE_EOT, NULL, 0, false);
+            pthread_mutex_unlock(&txSourceMutex);
             reset();
             return;
         }
@@ -1536,7 +1558,10 @@ void processBitsData(bool bit)
         {
             //   DEBUG1("M17RX: sync timed out, lost lock");
             //     uint8_t buf[8] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'E'};
-            decodeFrame(TYPE_EOT, NULL, 0, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
+                decodeFrame(TYPE_EOT, NULL, 0, false);
+            pthread_mutex_unlock(&txSourceMutex);
             //      serial.writeM17Lost();
             reset();
         }
@@ -1545,35 +1570,40 @@ void processBitsData(bool bit)
             // Write data to host
             m17outBuffer[0U] = m17lostCount == (MAX_SYNC_FRAMES - 1U) ? 0x01U : 0x00U;
 
-            switch (m17state)
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
             {
-                case M17RXS_LINK_SETUP:
+                switch (m17state)
                 {
-                    //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'L'};
-                    //    memcpy(buf + 8, m17outBuffer, 48);
-                    decodeFrame(TYPE_LSF, m17outBuffer+1, 48, false);
-                    //   writeRSSILinkSetup(m17outBuffer);
-                    break;
+                    case M17RXS_LINK_SETUP:
+                    {
+                        //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'L'};
+                        //    memcpy(buf + 8, m17outBuffer, 48);
+                        decodeFrame(TYPE_LSF, m17outBuffer+1, 48, false);
+                        //   writeRSSILinkSetup(m17outBuffer);
+                        break;
+                    }
+                    case M17RXS_STREAM:
+                    {
+                        //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'S'};
+                        //    memcpy(buf + 8, m17outBuffer, 48);
+                        decodeFrame(TYPE_STREAM, m17outBuffer+1, 48, false);
+                        //   writeRSSIStream(m17outBuffer);
+                        break;
+                    }
+                    case M17RXS_PACKET:
+                    {
+                        //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'P'};
+                        //    memcpy(buf + 8, m17outBuffer, 48);
+                        decodeFrame(TYPE_PACKET, m17outBuffer+1, 48, false);
+                        //   writeRSSIPacket(m17outBuffer);
+                        break;
+                    }
+                    default:
+                        break;
                 }
-                case M17RXS_STREAM:
-                {
-                    //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'S'};
-                    //    memcpy(buf + 8, m17outBuffer, 48);
-                    decodeFrame(TYPE_STREAM, m17outBuffer+1, 48, false);
-                    //   writeRSSIStream(m17outBuffer);
-                    break;
-                }
-                case M17RXS_PACKET:
-                {
-                    //    uint8_t buf[56] = {0x61, 0x00, 0x08, 0x04, 'M', '1', '7', 'P'};
-                    //    memcpy(buf + 8, m17outBuffer, 48);
-                    decodeFrame(TYPE_PACKET, m17outBuffer+1, 48, false);
-                    //   writeRSSIPacket(m17outBuffer);
-                    break;
-                }
-                default:
-                    break;
             }
+            pthread_mutex_unlock(&txSourceMutex);
 
             // Start the next frame
             memset(m17outBuffer, 0x00U, M17_FRAME_LENGTH_BYTES + 3U);
@@ -2038,10 +2068,21 @@ void* startClient(void *arg)
         else
         {
             packetType = PACKET_TYPE_FRAME;
-            decodeFrame((const char*)type, buffer + 8, respLen - 8, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_NET)
+            {
+                fprintf(stderr, "RF: frame rejected - NET TX active\n");
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                decodeFrame((const char*)type, buffer + 8, respLen - 8, false);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
     }
     txOn = false;
+    currentTxSource = TX_NONE;
     fprintf(stderr, "Disconnected from host.\n");
     // Close socket
     close(sockfd);
@@ -2296,22 +2337,59 @@ void *processGatewaySocket(void *arg)
         }
         else if (memcmp(type, TYPE_LSF, typeLen) == 0 && isActiveMode())
         {
-            pthread_mutex_lock(&stateMutex);
-            reflBusy = true;
-            pthread_mutex_unlock(&stateMutex);
-            decodeFrame(TYPE_LSF, buffer + 8, 48, true);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_RF)
+            {
+                fprintf(stderr, "NET: LSF rejected - RF TX active\n");
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                pthread_mutex_lock(&stateMutex);
+                reflBusy = true;
+                pthread_mutex_unlock(&stateMutex);
+                decodeFrame(TYPE_LSF, buffer + 8, 48, true);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
         else if (memcmp(type, TYPE_STREAM, typeLen) == 0 && isActiveMode())
         {
-            decodeFrame(TYPE_STREAM, buffer + 8, 48, true);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_RF)
+            {
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                decodeFrame(TYPE_STREAM, buffer + 8, 48, true);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
         else if (memcmp(type, TYPE_PACKET, typeLen) == 0 && isActiveMode())
         {
-            decodeFrame(TYPE_PACKET, buffer + 8, 48, true);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_RF)
+            {
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                decodeFrame(TYPE_PACKET, buffer + 8, 48, true);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0 && isActiveMode())
         {
-            decodeFrame(TYPE_EOT, buffer + 8, 48, true);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_RF)
+            {
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                decodeFrame(TYPE_EOT, buffer + 8, 48, true);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
         delay(5);
     }

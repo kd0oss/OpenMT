@@ -655,10 +655,15 @@ RingBuffer rxBuffer;
 RingBuffer gwTxBuffer;
 RingBuffer gwCommand;
 
-pthread_mutex_t timerMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t timerMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;  /* Protects rxBuffer */
 pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;  /* Protects gwTxBuffer */
 pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;  /* Protects gwCommand */
+pthread_mutex_t txSourceMutex = PTHREAD_MUTEX_INITIALIZER; /* Prevents RF and NET TX overlap */
+
+/* Tracks which source currently owns the transmitter */
+typedef enum { TX_NONE, TX_RF, TX_NET } TxSource;
+TxSource currentTxSource = TX_NONE;
 
 pthread_t modemHostid;
 pthread_t gwHostid;
@@ -1021,7 +1026,10 @@ void processBitNone(bool bit)
     if (countBits64((bitBuffer[0] & DATA_SYNC_MASK) ^ DATA_SYNC_DATA) == 0U)
     {
     //    fprintf(stderr, "Detected data sync.\n");
-        processData(rxBitBuffer, DSTAR_DATA_LENGTH_BYTES, false, false);
+        pthread_mutex_lock(&txSourceMutex);
+        if (currentTxSource != TX_NET)
+            processData(rxBitBuffer, DSTAR_DATA_LENGTH_BYTES, false, false);
+        pthread_mutex_unlock(&txSourceMutex);
 
         memset(rxBitBuffer, 0x00U, DSTAR_DATA_LENGTH_BYTES);
         rxBufferBits = 0U;
@@ -1052,7 +1060,10 @@ void decodeBitHeader(bool bit)
         bool ok = rxHeader(rxBitBuffer, header);
         if (ok)
         {
-            processHeader(header, DSTAR_HEADER_LENGTH_BYTES, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
+                processHeader(header, DSTAR_HEADER_LENGTH_BYTES, false);
+            pthread_mutex_unlock(&txSourceMutex);
 
             memset(rxBitBuffer, 0x00U, DSTAR_DATA_LENGTH_BYTES);
             rxBufferBits = 0U;
@@ -1086,7 +1097,10 @@ void decodeBitData(bool bit)
     {
     //    serial.writeDStarEOT();
     //    fprintf(stderr, "EOT dectected.\n");
-        processEOT(false);
+        pthread_mutex_lock(&txSourceMutex);
+        if (currentTxSource != TX_NET)
+            processEOT(false);
+        pthread_mutex_unlock(&txSourceMutex);
 
         rxState = DSRXS_NONE;
         return;
@@ -1126,7 +1140,10 @@ void decodeBitData(bool bit)
     if (dataBits == 0U)
     {
     //    fprintf(stderr, "Signal lost.\n");
-        processEOT(false);
+        pthread_mutex_lock(&txSourceMutex);
+        if (currentTxSource != TX_NET)
+            processEOT(false);
+        pthread_mutex_unlock(&txSourceMutex);
 
         rxState = DSRXS_NONE;
         return;
@@ -1141,11 +1158,17 @@ void decodeBitData(bool bit)
             rxBitBuffer[10U] = DSTAR_DATA_SYNC_BYTES[10U];
             rxBitBuffer[11U] = DSTAR_DATA_SYNC_BYTES[11U];
 
-            processData(rxBitBuffer, DSTAR_DATA_LENGTH_BYTES, false, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
+                processData(rxBitBuffer, DSTAR_DATA_LENGTH_BYTES, false, false);
+            pthread_mutex_unlock(&txSourceMutex);
         }
         else
         {
-            processData(rxBitBuffer, DSTAR_DATA_LENGTH_BYTES, false, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
+                processData(rxBitBuffer, DSTAR_DATA_LENGTH_BYTES, false, false);
+            pthread_mutex_unlock(&txSourceMutex);
         }
 
         // Start the next frame
@@ -1288,7 +1311,10 @@ void decodeHeader(q15_t sample)
         }
         else
         {
-            processHeader(header, 41, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource != TX_NET)
+                processHeader(header, 41, false);
+            pthread_mutex_unlock(&txSourceMutex);
         }
     }
 
@@ -1312,7 +1338,10 @@ void decodeData()
     // Fuzzy matching of the end frame sequences
     if (countBits64((bitBuffer[bitPtr] & DSTAR_END_SYNC_MASK) ^ DSTAR_END_SYNC_DATA) <= END_SYNC_ERRS)
     {
-        processEOT(false);
+        pthread_mutex_lock(&txSourceMutex);
+        if (currentTxSource != TX_NET)
+            processEOT(false);
+        pthread_mutex_unlock(&txSourceMutex);
 
         maxFrameCorr = 0;
         maxDataCorr  = 0;
@@ -1336,7 +1365,10 @@ void decodeData()
     // We've not seen a data sync for too long, signal RXLOST and change to RX_NONE
     if (frameCount >= MAX_FRAMES)
     {
-        processEOT(false);
+        pthread_mutex_lock(&txSourceMutex);
+        if (currentTxSource != TX_NET)
+            processEOT(false);
+        pthread_mutex_unlock(&txSourceMutex);
 
         maxFrameCorr = 0;
         maxDataCorr  = 0;
@@ -1350,7 +1382,10 @@ void decodeData()
     {
         uint8_t buffer[DSTAR_DATA_LENGTH_BYTES];
         samplesToBits(dataBuffer, startPtr, DSTAR_DATA_LENGTH_SYMBOLS, buffer, DSTAR_DATA_LENGTH_SAMPLES);
-        processData(buffer, DSTAR_DATA_LENGTH_BYTES, true, false);
+        pthread_mutex_lock(&txSourceMutex);
+        if (currentTxSource != TX_NET)
+            processData(buffer, DSTAR_DATA_LENGTH_BYTES, true, false);
+        pthread_mutex_unlock(&txSourceMutex);
 
         frameCount++;
 
@@ -2164,6 +2199,7 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet)
             write(sockfd, SETMODE, 5);
 
         txOn = true;
+        currentTxSource = isNet ? TX_NET : TX_RF;
 
         validHeader = true;
         frameCount = 0;
@@ -2210,6 +2246,7 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
     {
         write(sockfd, SETMODE, 5);
         txOn = true;
+        currentTxSource = isNet ? TX_NET : TX_RF;
         frameCount = 0;
     }
 
@@ -2227,6 +2264,7 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
         {
             validFrame  = true;
             txOn        = true;
+            currentTxSource = isNet ? TX_NET : TX_RF;
             memcpy(buffer + 17, DSTAR_DATA_SYNC_BYTES + 9, 3);
         }
         else
@@ -2366,6 +2404,13 @@ void processEOT(bool isNet)
 {
     float loss_BER = 0.0f;
 
+    uint8_t buf[8];
+    buf[0] = 0x61;
+    buf[1] = 0x00;
+    buf[2] = 0x08;
+    buf[3] = 0x04;
+    memcpy(buf + 4, TYPE_EOT, 4);
+
     if (validFrame)
     {
         gps[0] = 0;
@@ -2393,16 +2438,6 @@ void processEOT(bool isNet)
         saveHistory(modemName, "DSTAR", type, myCall, suffix, urCall, loss_BER, metaText, duration);
 
         fprintf(stderr, "Text: %s\n", metaText);
-    }
-
-    if (validFrame)
-    {
-        uint8_t buf[8];
-        buf[0] = 0x61;
-        buf[1] = 0x00;
-        buf[2] = 0x08;
-        buf[3] = 0x04;
-        memcpy(buf + 4, TYPE_EOT, 4);
 
         if (!isNet && dstarGWConnected && RingBuffer_freeSpace(&gwTxBuffer) >= 8 && (strcasecmp(rpt2Call, station_rpt2Call) == 0))
         {
@@ -2414,8 +2449,11 @@ void processEOT(bool isNet)
         if ((strcasecmp(rpt1Call, station_rpt1Call) == 0) && (modem_duplex || isNet))
         {
             write(sockfd, buf, 8);
-            delay(300000);
+        }
 
+        if ((strcasecmp(rpt1Call, station_rpt1Call) == 0) && modem_duplex && !isNet)
+        {
+            delay(300000);
             // Canned EOT sending BER message.
             // ***********************************************************************
             uint8_t buf2[49] = {0x61, 0x00, 0x31, 0x04, 'D', 'S', 'T', 'H'};
@@ -2445,6 +2483,8 @@ void processEOT(bool isNet)
             // ***********************************************************************
         }
     }
+    else
+        write(sockfd, buf, 8);
 
     bzero(myCall, 9);
     bzero(urCall, 9);
@@ -2456,11 +2496,12 @@ void processEOT(bool isNet)
     bzero(ssHeader, 41);
     fLat = 0.0f;
     fLong = 0.0f;
-    txOn          = false;
-    validHeader   = false;
-    validSSHeader = false;
-    validFrame    = false;
-    headerSent    = false;
+    txOn            = false;
+    currentTxSource = TX_NONE;
+    validHeader     = false;
+    validSSHeader   = false;
+    validFrame      = false;
+    headerSent      = false;
 }
 
 void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_tx)
@@ -2837,17 +2878,45 @@ void* processGatewaySocket(void* arg)
         else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
         {
         }
-        else if (memcmp(type, TYPE_HEADER,typeLen) == 0 && isActiveMode())
+        else if (memcmp(type, TYPE_HEADER, typeLen) == 0 && isActiveMode())
         {
-            processHeader(buffer + 8, respLen - 8, true);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_RF)
+            {
+                fprintf(stderr, "NET: header rejected - RF TX active\n");
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                processHeader(buffer + 8, respLen - 8, true);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
         else if (memcmp(type, TYPE_DATA, typeLen) == 0 && isActiveMode())
         {
-            processData(buffer + 8, respLen - 8, false, true);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_RF)
+            {
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                processData(buffer + 8, respLen - 8, false, true);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0 && isActiveMode())
         {
-            processEOT(true);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_RF)
+            {
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                processEOT(true);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
       //  delay(5000);
     }
@@ -3224,15 +3293,43 @@ void* startClient(void* arg)
         }
         else if (memcmp(type, TYPE_HEADER, typeLen) == 0)
         {
-            processHeader(buffer + 8, respLen - 8, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_NET)
+            {
+                fprintf(stderr, "RF: header rejected - NET TX active\n");
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                processHeader(buffer + 8, respLen - 8, false);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
         else if (memcmp(type, TYPE_DATA, typeLen) == 0)
         {
-            processData(buffer + 8, respLen - 8, false, false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_NET)
+            {
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                processData(buffer + 8, respLen - 8, false, false);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
-            processEOT(false);
+            pthread_mutex_lock(&txSourceMutex);
+            if (currentTxSource == TX_NET)
+            {
+                pthread_mutex_unlock(&txSourceMutex);
+            }
+            else
+            {
+                processEOT(false);
+                pthread_mutex_unlock(&txSourceMutex);
+            }
         }
     }
     txOn = false;

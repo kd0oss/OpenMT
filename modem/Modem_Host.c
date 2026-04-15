@@ -23,6 +23,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -130,7 +131,7 @@ typedef struct
     bool active;
     bool isTx;
     RingBuffer command;
-    pthread_mutex_t commandMutex;  /* Protect command buffer access */
+    pthread_mutex_t commandMutex; /* Protect command buffer access */
 } Client;
 
 Client hostClient[MAX_CLIENT_CONNECTIONS];
@@ -148,20 +149,20 @@ typedef struct
 
 Protocol mode[MAX_CLIENT_CONNECTIONS];
 
-int serialModemFd   = 0;           //< File descriptor for modem serial port.
-uint8_t modemId     = 1;           //< Modem Id used to create modem name.
-char modemName[10]  = "modem1";    //< Modem name that this program is associated with.
-char modemtty[50]   = "";          //< Modem serial port.
-uint8_t connections = 0;           //< Number of clients currently connected.
-uint16_t host_port  = 18000;       //< All protocol services connect on this TCP port.
-uint32_t txTimeout  = TX_TIMEOUT;  //< Station TX timeout. FIX-ME: Should be user configurable.
-bool duplex         = false;       //< Indicates station TX operation mode.
-bool debugM         = false;       //< If true print debug info.
-bool txOn           = false;       //< If true we are processing frame data.
-bool running        = true;        //< Set false to kill all processes and exit program.
-bool exitRequested  = false;       //< Set to true with ctrl + c keyboard input.
-bool isModemSpace   = true;        //< Flag indicating that modem buffer space is available.
-bool bufReady       = false;       //< Signal when rxModeBuffer has adequate number of bytes.
+int serialModemFd         = 0;           //< File descriptor for modem serial port.
+uint8_t modemId           = 1;           //< Modem Id used to create modem name.
+char modemName[10]        = "modem1";    //< Modem name that this program is associated with.
+char modemtty[50]         = "";          //< Modem serial port.
+uint8_t connections       = 0;           //< Number of clients currently connected.
+uint16_t host_port        = 18000;       //< All protocol services connect on this TCP port.
+uint32_t txTimeout        = TX_TIMEOUT;  //< Station TX timeout. FIX-ME: Should be user configurable.
+bool duplex               = false;       //< Indicates station TX operation mode.
+bool debugM               = false;       //< If true print debug info.
+atomic_bool txOn          = false;       //< If true we are processing frame data.
+atomic_bool running       = true;        //< Set false to kill all processes and exit program.
+atomic_bool exitRequested = false;       //< Set to true with ctrl + c keyboard input.
+atomic_bool isModemSpace  = true;        //< Flag indicating that modem buffer space is available.
+atomic_bool bufReady      = false;       //< Signal when rxModeBuffer has adequate number of bytes.
 
 unsigned int clientlen;         //< byte size of client's address
 char* hostaddrp;                //< dotted decimal host addr string
@@ -170,18 +171,19 @@ struct sockaddr_in serveraddr;  //< server's addr
 struct sockaddr_in clientaddr;  //< client addr
 
 RingBuffer modemCommandBuffer; /* Modem command buffer */
-RingBuffer modemTxBuffer;           /* Modem TX buffer */
+RingBuffer modemTxBuffer;      /* Modem TX buffer */
 RingBuffer rxModeBuffer;       /* Client RX buffer */
 RingBuffer txModeBuffer;       /* Client TX buffer */
 
-pthread_mutex_t modemTxBufMutex       = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t modemTxBufMutex  = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t modemComBufMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t rxBufModeMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t txBufModeMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t shutDownMutex    = PTHREAD_MUTEX_INITIALIZER;
 
-/* General settings */
-char currentMode[11] = "idle";
+/* Current active radio mode - shared across threads, protected by currentModeMutex */
+char currentMode[11]             = "idle";
+pthread_mutex_t currentModeMutex = PTHREAD_MUTEX_INITIALIZER;
 char commPort[20];
 char modemBaud[10];
 char modem[20];
@@ -202,6 +204,36 @@ TIMERS timer[10];
 
 void setProtocol(const char* protocol, bool enabled);
 
+/* Safe accessors for currentMode string */
+static void getCurrentMode(char* buf, size_t len)
+{
+    pthread_mutex_lock(&currentModeMutex);
+    strncpy(buf, currentMode, len - 1);
+    buf[len - 1] = '\0';
+    pthread_mutex_unlock(&currentModeMutex);
+}
+
+static void setCurrentMode(const char* mode)
+{
+    pthread_mutex_lock(&currentModeMutex);
+    strncpy(currentMode, mode, sizeof(currentMode) - 1);
+    currentMode[sizeof(currentMode) - 1] = '\0';
+    pthread_mutex_unlock(&currentModeMutex);
+}
+
+static bool isCurrentMode(const char* mode)
+{
+    pthread_mutex_lock(&currentModeMutex);
+    bool match = (strcasecmp(currentMode, mode) == 0);
+    pthread_mutex_unlock(&currentModeMutex);
+    return match;
+}
+
+static bool isCurrentModeIdle(void)
+{
+    return isCurrentMode("idle");
+}
+
 //  SIGINT handler, so we can gracefully exit when the user hits ctrl+c.
 static void sigintHandler(int signum)
 {
@@ -213,8 +245,8 @@ static void sigintHandler(int signum)
             setProtocol(mode[x].name, false);
     }
     sleep(1);
-    exitRequested = true;
-    running = false;
+    atomic_store(&exitRequested, true);
+    atomic_store(&running, false);
     signal(SIGINT, SIG_DFL);
 }
 
@@ -222,13 +254,18 @@ uint8_t getModemSpace(const char* protocol, const uint8_t slot)
 {
     if (strncasecmp(modem, "openmt", 6) != 0)
     {
-        if (strcasecmp(protocol, "M17") == 0)
+        char mode[11];
+        if (protocol != NULL)
+            strncpy(mode, protocol, sizeof(mode) - 1);
+        else
+            getCurrentMode(mode, sizeof(mode));
+        if (strcasecmp(mode, "M17") == 0)
             return getM17Space();
-        else if (strcasecmp(protocol, "DSTAR") == 0)
+        else if (strcasecmp(mode, "DSTAR") == 0)
             return getDSTARSpace();
-        else if (strcasecmp(protocol, "P25") == 0)
+        else if (strcasecmp(mode, "P25") == 0)
             return getP25Space();
-        else if (strcasecmp(protocol, "DMR") == 0)
+        else if (strcasecmp(mode, "DMR") == 0)
             return getDMRSpace(slot);
     }
     return 20;  // default
@@ -237,9 +274,9 @@ uint8_t getModemSpace(const char* protocol, const uint8_t slot)
 void setSpace(uint8_t space)
 {
     if (space == 0)
-        isModemSpace = true;
+        atomic_store(&isModemSpace, false); /* no space in modem buffer */
     else
-        isModemSpace = false;
+        atomic_store(&isModemSpace, true); /* space available */
 }
 
 void setProtocol(const char* protocol, bool enabled)
@@ -494,6 +531,21 @@ bool isTimerTriggered(const char* name)
     return false;
 }
 
+uint32_t getTimerDuration(const char* name)
+{
+    for (uint8_t i = 0; i < 10; i++)
+    {
+        pthread_mutex_lock(&timerMutex);
+        if (strcasecmp(timer[i].name, name) == 0)
+        {
+            pthread_mutex_unlock(&timerMutex);
+            return timer[i].duration;
+        }
+        pthread_mutex_unlock(&timerMutex);
+    }
+    return 0;
+}
+
 void resetTimer(const char* name, const uint32_t duration)
 {
     pthread_mutex_lock(&timerMutex);
@@ -541,7 +593,7 @@ void* timerThread(void* arg)
         return NULL;
     }
 
-    while (running)
+    while (atomic_load(&running))
     {
         delay(1000);  // 1ms
 
@@ -565,81 +617,86 @@ void* timerThread(void* arg)
 
         pthread_mutex_lock(&rxBufModeMutex);
         if (RingBuffer_dataSize(&rxModeBuffer) == 0)
-            bufReady = false;
+            atomic_store(&bufReady, false);
         pthread_mutex_unlock(&rxBufModeMutex);
 
-        if (strncasecmp(modem, "mmdvm", 5) == 0)
+        if (strncasecmp(modem, "mmdvm", 5) == 0 && RingBuffer_dataSize(&rxModeBuffer) != 0)
         {
-      //      if (strcmp(currentMode, "DSTAR") == 0)
-      //      {
-                uint8_t space1 = getModemSpace(currentMode, 1);
-                uint8_t space2 = getModemSpace(currentMode, 2);
-                uint8_t space  = MIN(space1, space2);
-             //       fprintf(stderr, "***************** Modem space. %u   Delay: %u\n", space, currDelay);
-                if (space < 10)
-                {
-                    if (currDelay > 19)
-                        currDelay = 19;
+            //      if (strcmp(currentMode, "DSTAR") == 0)
+            //      {
+            uint8_t space1 = getModemSpace(NULL, 1);
+            uint8_t space2 = getModemSpace(NULL, 2);
+            uint8_t space  = MIN(space1, space2);
+            //       fprintf(stderr, "***************** Modem space. %u   Delay: %u\n", space, currDelay);
+            if (space < 10)
+            {
+                if (currDelay > 19)
+                    currDelay = 19;
 
-                    resetTimer("frameDelay", ++currDelay);
-                }
-                else if (space > 12)
-                {
-                    if (currDelay <= 1)
-                        currDelay = 2;
+                resetTimer("frameDelay", ++currDelay);
+            }
+            else if (space > 12)
+            {
+                if (currDelay <= 1)
+                    currDelay = 2;
 
-                    resetTimer("frameDelay", --currDelay);
-                }
-                /*
-                if (space < 10)
-                    resetTimer("frameDelay", 18);
-                else if (space > 17)
-                    resetTimer("frameDelay", 12);
-                else
-                    resetTimer("frameDelay", 17);
+                resetTimer("frameDelay", --currDelay);
             }
-            else if (strcmp(currentMode, "M17") == 0)
-            {
-                uint8_t space = getModemSpace(currentMode, 1);
-                if (space < 30)
-                    resetTimer("frameDelay", 16);
-                else if (space > 60)
-                    resetTimer("frameDelay", 11);
-                else
-                    resetTimer("frameDelay", 14);
-            }
-            else if (strcmp(currentMode, "P25") == 0)
-            {
-                uint8_t space = getModemSpace(currentMode, 1);
-                if (space < 10)
-                    resetTimer("frameDelay", 19);
-                else if (space > 12)
-                    resetTimer("frameDelay", 8);
-                else
-                    resetTimer("frameDelay", 12);
-            }
-            else if (strcmp(currentMode, "DMR") == 0)
-            {
-                uint8_t space1 = getModemSpace(currentMode, 1);
-                uint8_t space2 = getModemSpace(currentMode, 2);
-                uint8_t space  = MIN(space1, space2);
-                if (space < 5)
-                    resetTimer("frameDelay", 60);
-                else if (space > 8)
-                    resetTimer("frameDelay", 45);
-                else
-                    resetTimer("frameDelay", 57);
-            } */
+            /*
+            if (space < 10)
+                resetTimer("frameDelay", 18);
+            else if (space > 17)
+                resetTimer("frameDelay", 12);
+            else
+                resetTimer("frameDelay", 17);
+        }
+        else if (isCurrentMode("M17"))
+        {
+            uint8_t space = getModemSpace(NULL, 1);
+            if (space < 30)
+                resetTimer("frameDelay", 16);
+            else if (space > 60)
+                resetTimer("frameDelay", 11);
+            else
+                resetTimer("frameDelay", 14);
+        }
+        else if (isCurrentMode("P25"))
+        {
+            uint8_t space = getModemSpace(NULL, 1);
+            if (space < 10)
+                resetTimer("frameDelay", 19);
+            else if (space > 12)
+                resetTimer("frameDelay", 8);
+            else
+                resetTimer("frameDelay", 12);
+        }
+        else if (isCurrentMode("DMR"))
+        {
+            uint8_t space1 = getModemSpace(NULL, 1);
+            uint8_t space2 = getModemSpace(NULL, 2);
+            uint8_t space  = MIN(space1, space2);
+            if (space < 5)
+                resetTimer("frameDelay", 60);
+            else if (space > 8)
+                resetTimer("frameDelay", 45);
+            else
+                resetTimer("frameDelay", 57);
+        } */
         }
         else
+        {
+            if (getTimerDuration("frameDelay") != 19)
+                resetTimer("frameDelay", 19);
+
             resetTimer("frameDelay", 0);
+        }
     }
 
-    if (isTimerTriggered("txTimeout") && txOn)
+    if (isTimerTriggered("txTimeout") && atomic_load(&txOn))
     {
-        txOn = false;
-        strcpy(currentMode, "idle");
-        setStatus(modemName, "main", "active_mode", currentMode);
+        atomic_store(&txOn, false);
+        setCurrentMode("idle");
+        setStatus(modemName, "main", "active_mode", "idle");
         pthread_mutex_lock(&rxBufModeMutex);
         RingBuffer_clear(&rxModeBuffer);
         pthread_mutex_unlock(&rxBufModeMutex);
@@ -658,7 +715,7 @@ void* timerThread(void* arg)
         //       if (debugM)
         fprintf(stderr, "TX timeout. Setting mode to idle.\n");
     }
-    else if (!txOn)
+    else if (!atomic_load(&txOn))
         resetTimer("txTimeout", 0);
 
     fprintf(stderr, "Timer thread exited.\n");
@@ -778,7 +835,7 @@ void* modeRxThread(void* arg)
 // Queue up out going bytes for modem.
 void* modeTxThread(void* arg)
 {
-    while (running)
+    while (atomic_load(&running))
     {
         delay(100);
 
@@ -816,7 +873,7 @@ void* modeTxThread(void* arg)
             uint8_t len = buf[1];
             if (RingBuffer_dataSize(&rxModeBuffer) >= len)
             {
-                if (isModemSpace && RingBuffer_freeSpace(&modemTxBuffer) >= len + 3)
+                if (atomic_load(&isModemSpace) && RingBuffer_freeSpace(&modemTxBuffer) >= len + 3)
                 {
                     uint8_t buf[len];
                     pthread_mutex_lock(&rxBufModeMutex);
@@ -879,7 +936,7 @@ void* modeTxThread(void* arg)
 // Queue up out going bytes for modem.
 void* modeMMDVMTxThread(void* arg)
 {
-    while (running)
+    while (atomic_load(&running))
     {
         delay(200);
 
@@ -888,9 +945,9 @@ void* modeMMDVMTxThread(void* arg)
             if (RingBuffer_dataSize(&rxModeBuffer) < 3)
             {
                 uint8_t buf[3];
-                buf[0] = 0xE0;
-                buf[1] = 0x03;
-                buf[2] = MODEM_STATUS;
+                buf[0]  = 0xE0;
+                buf[1]  = 0x03;
+                buf[2]  = MODEM_STATUS;
                 int ret = write(serialModemFd, buf, 3);
                 if (ret != 3)
                 {
@@ -900,7 +957,7 @@ void* modeMMDVMTxThread(void* arg)
             resetTimer("status", 0);
         }
 
-        if (RingBuffer_dataSize(&rxModeBuffer) >= 3 && isTimerTriggered("frameDelay") && bufReady)
+        if (RingBuffer_dataSize(&rxModeBuffer) >= 3 && isTimerTriggered("frameDelay") && atomic_load(&bufReady))
         {
             uint8_t buf[3];
             pthread_mutex_lock(&rxBufModeMutex);
@@ -921,9 +978,9 @@ void* modeMMDVMTxThread(void* arg)
                 uint8_t space = 0;
                 RingBuffer_peek(&rxModeBuffer, buf, 3);
                 if (buf[2] == TYPE_DMR_DATA2)
-                    space = getModemSpace(currentMode, 2);
+                    space = getModemSpace(NULL, 2);
                 else
-                    space = getModemSpace(currentMode, 1);
+                    space = getModemSpace(NULL, 1);
 
                 if (space > 1 && RingBuffer_freeSpace(&modemTxBuffer) >= (len + 3))
                 {
@@ -993,7 +1050,7 @@ void* modeMMDVMTxThread(void* arg)
 // Send queued up bytes to modem.
 void* modemTxThread(void* arg)
 {
-    while (running)
+    while (atomic_load(&running))
     {
         delay(1000);
 
@@ -1047,7 +1104,7 @@ void* modemTxThread(void* arg)
 // Read commands queued up in database from dashboard.
 void* commandThread(void* arg)
 {
-    while (running)
+    while (atomic_load(&running))
     {
         delay(50000);
 
@@ -1212,11 +1269,13 @@ void* processClientSocket(void* arg)
                     else
                         buffer[8] = COMM_SET_SIMPLEX;
                     //    RingBuffer_addData(&rxModeBuffer, buffer, 9);
-                    strcpy(currentMode, "idle");
+                    setCurrentMode("idle");
                     pthread_mutex_lock(&hostClient[conn_id].commandMutex);
                     RingBuffer_addData(&hostClient[conn_id].command, buffer, 9);
                     pthread_mutex_unlock(&hostClient[conn_id].commandMutex);
-                    setStatus(modemName, "main", "active_mode", currentMode);
+                    char curMode[11];
+                    getCurrentMode(curMode, sizeof(curMode));
+                    setStatus(modemName, "main", "active_mode", curMode);
                 }
             }
             else
@@ -1296,7 +1355,7 @@ void* processClientSocket(void* arg)
         if (debugM)
             dump((char*)"Protocol service data:", (unsigned char*)buffer, respLen);
 
-        uint8_t space = getModemSpace(currentMode, 1);
+        uint8_t space = getModemSpace(NULL, 1);
 
         if (RingBuffer_freeSpace(&rxModeBuffer) < respLen)
         {
@@ -1306,36 +1365,43 @@ void* processClientSocket(void* arg)
             pthread_mutex_unlock(&rxBufModeMutex);
         }
 
-        if (strcmp(currentMode, "DSTAR") == 0)
+        if (isCurrentMode("DSTAR"))
         {
-            if (RingBuffer_dataSize(&rxModeBuffer) >= 200)
-                bufReady = true;
+            if (RingBuffer_dataSize(&rxModeBuffer) >= 200 || type == TYPE_DSTAR_EOT)
+                atomic_store(&bufReady, true);
         }
-        else if (strcmp(currentMode, "M17") == 0)
+        else if (isCurrentMode("M17"))
         {
-            if (RingBuffer_dataSize(&rxModeBuffer) >= 500)
-                bufReady = true;
+            if (RingBuffer_dataSize(&rxModeBuffer) >= 500 || type == TYPE_M17_EOT)
+                atomic_store(&bufReady, true);
         }
-        else if (strcmp(currentMode, "P25") == 0)
+        else if (isCurrentMode("P25"))
         {
             //    if (RingBuffer_dataSize(&rxModeBuffer) >= 2400)
-            bufReady = true;
+            atomic_store(&bufReady, true);
         }
-        else if (strcmp(currentMode, "DMR") == 0)
+        else if (isCurrentMode("DMR"))
         {
             //    if (RingBuffer_dataSize(&rxModeBuffer) >= 2400)
-            bufReady = true;
+            atomic_store(&bufReady, true);
             if (type == TYPE_DMR_DATA2)
-                space = getModemSpace(currentMode, 2);
+                space = getModemSpace(NULL, 2);
         }
 
         currType = type;
         // This debug statement to be removed after debugging
         //        if (debugM)
-     //   if (currType != lastType || RingBuffer_dataSize(&rxModeBuffer) > 1500)
-        fprintf(stderr, "TM: %llu  Type: %02X  Mode: %4s  Conn: %2d  Mode Sp: %2d  TX Modem: %4d  BR: %d\n",
-                (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000, type, currentMode, conn_id,
-                space, RingBuffer_dataSize(&rxModeBuffer), bufReady);
+        if (type != lastType || RingBuffer_dataSize(&rxModeBuffer) > 1500)
+        {
+            char curMode[11];
+            getCurrentMode(curMode, sizeof(curMode));
+            fprintf(stderr, "TM: %llu  Type: %02X  Mode: %4s  Conn: %2d  Modem Sp: %2d  TX Modem: %4d  BR: %d  TXON: %1d  FD: %u\n",
+                    (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000, type,
+                    curMode, conn_id,
+                    space, RingBuffer_dataSize(&rxModeBuffer),
+                    (int)atomic_load(&bufReady), (int)atomic_load(&txOn),
+                    getTimerDuration("frameDelay"));
+        }
 
         lastType = type;
 
@@ -1364,23 +1430,23 @@ void* processClientSocket(void* arg)
             break;
 
             case COMM_SET_MODE:
-                if (strcmp(currentMode, "idle") == 0)
+                if (isCurrentModeIdle())
                 {
-                    strcpy(currentMode, hostClient[conn_id].mode);
-                    setProtocol(currentMode, true);
+                    setCurrentMode(hostClient[conn_id].mode);
+                    setProtocol(hostClient[conn_id].mode, true);
                     if (strncasecmp(modem, "mmdvm", 5) != 0)
                         setMode(conn_id);
                     //           if (debugM)
-                    fprintf(stderr, "Current mode set to %s.\n", currentMode);
-                    setStatus(modemName, "main", "active_mode", currentMode);
+                    fprintf(stderr, "Current mode set to %s.\n", hostClient[conn_id].mode);
+                    setStatus(modemName, "main", "active_mode", hostClient[conn_id].mode);
                 }
                 break;
 
             case COMM_SET_IDLE:
-                if (strcmp(currentMode, "idle") != 0 && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (!isCurrentModeIdle() && isCurrentMode(hostClient[conn_id].mode))
                 {
-                    txOn = false;
-                    strcpy(currentMode, "idle");
+                    atomic_store(&txOn, false);
+                    setCurrentMode("idle");
                     pthread_mutex_lock(&rxBufModeMutex);
                     RingBuffer_clear(&rxModeBuffer);
                     pthread_mutex_unlock(&rxBufModeMutex);
@@ -1390,7 +1456,7 @@ void* processClientSocket(void* arg)
                         setMode(0x0f);
                     //           if (debugM)
                     fprintf(stderr, "Current mode set to IDLE.\n");
-                    setStatus(modemName, "main", "active_mode", currentMode);
+                    setStatus(modemName, "main", "active_mode", "idle");
                 }
                 break;
 
@@ -1435,9 +1501,9 @@ void* processClientSocket(void* arg)
             case TYPE_M17_PACKET:
             case TYPE_M17_EOT:
             {
-                if (hostClient[conn_id].active && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
                 {
-                    txOn = true;
+                    atomic_store(&txOn, true);
                     uint8_t buf[4];
                     buf[0] = 0xE0;
                     buf[1] = 0x34;
@@ -1450,16 +1516,16 @@ void* processClientSocket(void* arg)
                 }
                 if (type == TYPE_M17_EOT)
                 {
-                    txOn = false;
+                    atomic_store(&txOn, false);
                 }
             }
             break;
 
             case TYPE_DSTAR_HEADER:
             {
-                if (hostClient[conn_id].active && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
                 {
-                    txOn = true;
+                    atomic_store(&txOn, true);
                     uint8_t buf[3];
                     buf[0] = 0xE0;
                     buf[1] = 0x2C;
@@ -1474,9 +1540,9 @@ void* processClientSocket(void* arg)
 
             case TYPE_DSTAR_DATA:
             {
-                if (hostClient[conn_id].active && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
                 {
-                    txOn = true;
+                    atomic_store(&txOn, true);
                     uint8_t buf[3];
                     buf[0] = 0xE0;
                     buf[1] = 0x0F;
@@ -1491,7 +1557,7 @@ void* processClientSocket(void* arg)
 
             case TYPE_DSTAR_EOT:
             {
-                if (hostClient[conn_id].active && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
                 {
                     uint8_t buf[3];
                     buf[0] = 0xE0;
@@ -1500,16 +1566,16 @@ void* processClientSocket(void* arg)
                     pthread_mutex_lock(&rxBufModeMutex);
                     RingBuffer_addData(&rxModeBuffer, buf, 3);
                     pthread_mutex_unlock(&rxBufModeMutex);
-                    txOn = false;
+                    atomic_store(&txOn, false);
                 }
             }
             break;
 
             case TYPE_P25_HDR:
             {
-                if (hostClient[conn_id].active && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
                 {
-                    txOn = true;
+                    atomic_store(&txOn, true);
                     uint8_t buf[3];
                     buf[0] = 0xE0;
                     buf[1] = respLen - 8 + 3;
@@ -1524,9 +1590,9 @@ void* processClientSocket(void* arg)
 
             case TYPE_P25_LDU:
             {
-                if (hostClient[conn_id].active && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
                 {
-                    txOn = true;
+                    atomic_store(&txOn, true);
                     uint8_t buf[3];
                     buf[0] = 0xE0;
                     buf[1] = 216 + 3;
@@ -1541,7 +1607,7 @@ void* processClientSocket(void* arg)
 
             case TYPE_P25_LOST:
             {
-                if (hostClient[conn_id].active && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
                 {
                     uint8_t buf[3];
                     buf[0] = 0xE0;
@@ -1550,7 +1616,7 @@ void* processClientSocket(void* arg)
                     pthread_mutex_lock(&rxBufModeMutex);
                     RingBuffer_addData(&rxModeBuffer, buf, 3);
                     pthread_mutex_unlock(&rxBufModeMutex);
-                    txOn = false;
+                    atomic_store(&txOn, false);
                 }
             }
             break;
@@ -1560,9 +1626,9 @@ void* processClientSocket(void* arg)
             case TYPE_DMR_LOST1:
             case TYPE_DMR_LOST2:
             {
-                if (hostClient[conn_id].active && strcasecmp(currentMode, hostClient[conn_id].mode) == 0)
+                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
                 {
-                    txOn = true;
+                    atomic_store(&txOn, true);
                     uint8_t buf[3];
                     buf[0] = 0xE0;
                     buf[1] = respLen - 8 + 2;
@@ -1573,7 +1639,7 @@ void* processClientSocket(void* arg)
                     pthread_mutex_unlock(&rxBufModeMutex);
 
                     if (buffer[8] == 0x42 || type == TYPE_DMR_LOST1 || type == TYPE_DMR_LOST2)
-                        txOn = false;
+                        atomic_store(&txOn, false);
                 }
             }
             break;
@@ -1583,6 +1649,7 @@ void* processClientSocket(void* arg)
 
     if (connections > 0)
         connections--;
+
     hostClient[conn_id].active = false;
     setProtocol(mode[conn_id].name, false);
 
@@ -1674,7 +1741,7 @@ void* startTCPServer(void* arg)
         exit(1);
     }
 
-    while (running)
+    while (atomic_load(&running))
     {
         /*
          * accept: wait for a connection request
@@ -1762,7 +1829,7 @@ void* startTCPServer(void* arg)
     int iRet = 100;
     delay(500000);
     pthread_mutex_unlock(&shutDownMutex);
-    running = false;
+    atomic_store(&running, false);
     pthread_exit(&iRet);
     return NULL;
 }
@@ -1878,7 +1945,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_M17_LSF && (respLen == 54 || respLen == 52))
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "M17") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("M17")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -1894,7 +1961,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_M17_STREAM && (respLen == 54 || respLen == 52))
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "M17") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("M17")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -1910,7 +1977,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_M17_PACKET && (respLen == 54 || respLen == 52))
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "M17") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("M17")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -1926,7 +1993,7 @@ int processMMDVMSerial(void)
     }
     else if ((type == TYPE_M17_EOT || type == TYPE_M17_LOST) && respLen == 3)
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "M17") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("M17")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -1941,7 +2008,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_DSTAR_HEADER && respLen == 46)
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "DSTAR") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DSTAR")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -1957,7 +2024,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_DSTAR_DATA && (respLen == 15 || respLen == 17))
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "DSTAR") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DSTAR")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -1973,7 +2040,7 @@ int processMMDVMSerial(void)
     }
     else if ((type == TYPE_DSTAR_EOT || type == TYPE_DSTAR_LOST) && respLen == 3)
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "DSTAR") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DSTAR")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -1988,7 +2055,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_P25_HDR && buffer[3] == 1 && (respLen >= 21 && respLen <= 105))
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "P25") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("P25")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -2004,7 +2071,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_P25_LDU && buffer[3] == 1 && (respLen == 222 || respLen == 220))
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "P25") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("P25")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -2020,7 +2087,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_P25_LOST && respLen == 3)
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "P25") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("P25")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -2035,7 +2102,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_DMR_DATA1 && (respLen == 0x25 || respLen == 0x27))
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "DMR") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DMR")))
         {
             /*     uint8_t buf[10] = {0xE0, 0x04, 0x03, 0x02, 0x00};
                  setProtocol("DMR", true);
@@ -2059,7 +2126,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_DMR_LOST1)
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "DMR") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DMR")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -2075,7 +2142,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_DMR_DATA2 && (respLen == 0x25 || respLen == 0x27))
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "DMR") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DMR")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -2091,7 +2158,7 @@ int processMMDVMSerial(void)
     }
     else if (type == TYPE_DMR_LOST2)
     {
-        if (connections > 0 && (strcmp(currentMode, "idle") == 0 || strcmp(currentMode, "DMR") == 0))
+        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DMR")))
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -2460,7 +2527,7 @@ int main(int argc, char** argv)
         buf[0] = 0xE0;
         buf[1] = 0x03;
         buf[2] = 0x00;
-        //write(serialModemFd, buf, 3);
+        // write(serialModemFd, buf, 3);
         RingBuffer_addData(&modemCommandBuffer, buf, 3);
     }
     else if (strcasecmp(modem, "mmdvm") == 0)
@@ -2521,7 +2588,7 @@ int main(int argc, char** argv)
         write(serialModemFd, buf, 196);
     }
 
-    while (running)
+    while (atomic_load(&running))
     {
         if (strncasecmp(modem, "mmdvm", 5) == 0)
             ret = processMMDVMSerial();
