@@ -1028,6 +1028,8 @@ async function updateGatewayStatus()
       stat = "Not Linked";
       if (document.getElementById(tmp[i]+'_linkstat'))
         document.getElementById(tmp[i]+'_linkstat').innerHTML = stat;
+      if (document.getElementById(tmp[i]+'link'))
+        document.getElementById(tmp[i]+'link').textContent = "Link";
     }
   }
 }
@@ -1463,7 +1465,7 @@ async function buildHistoryTable()
     lines = line.split('\x1E');
 
     var table = "<table id='lastheard' class='lastheard'>";
-    table += "<thead><tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER</th><th>Len(secs)</th></tr></thead><tbody>";
+    table += "<thead><tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER (%)</th><th>Len(secs)</th></tr></thead><tbody>";
     for (var i=0;i<lines.length;i++)
     {
       tmp = lines[i].split('\x1C');
@@ -1858,7 +1860,7 @@ function addMessage(source, message)
 
     <div id='lastheardDiv' class='lastheardDiv'>
         <table id='lastheard' class='lastheard'>
-          <tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER</th><th>Len(secs)</th></tr>
+          <tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER (%)</th><th>Len(secs)</th></tr>
           <tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
         </table>
     </div>
