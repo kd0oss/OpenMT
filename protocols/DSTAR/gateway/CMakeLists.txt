@@ -6,16 +6,16 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(mariadb REQUIRED IMPORTED_TARGET "mariadb")
 
 # Project name and language
-project(DSTAR_Gateway C)
+project(dstar_gateway C)
 
 # Define an executable target (sources will be added later)
-add_executable(DSTAR_Gateway)
+add_executable(dstar_gateway)
 
 # Link the MariaDB library to your executable
-target_link_libraries(DSTAR_Gateway PUBLIC PkgConfig::mariadb)
+target_link_libraries(dstar_gateway PUBLIC PkgConfig::mariadb)
 
 # Link the source files from the src/ directory to the target
-target_sources(DSTAR_Gateway PRIVATE
+target_sources(dstar_gateway PRIVATE
     ./dstargateway.c
     ../dstar_gps.c
     ../../../tools/tools.c
@@ -25,10 +25,10 @@ target_sources(DSTAR_Gateway PRIVATE
 )
 
 # Specify the directory where header files are located
-target_include_directories(DSTAR_Gateway PRIVATE
+target_include_directories(dstar_gateway PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ../../../tools
 )
 
 # Optional: Change the output directory for the executable
-set_target_properties(DSTAR_Gateway PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+set_target_properties(dstar_gateway PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")

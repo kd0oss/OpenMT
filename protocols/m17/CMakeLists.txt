@@ -6,14 +6,14 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(mariadb REQUIRED IMPORTED_TARGET "mariadb")
 
 # Project name and language
-project(M17_Service CXX C)
+project(m17_host CXX C)
 
 # Define an executable target (sources will be added later)
-add_executable(M17_Service)
+add_executable(m17_host)
 
 # Link the MariaDB library to your executable
-target_link_libraries(M17_Service PUBLIC PkgConfig::mariadb)
-target_link_libraries(M17_Service PRIVATE VendorLib)
+target_link_libraries(m17_host PUBLIC PkgConfig::mariadb)
+target_link_libraries(m17_host PRIVATE VendorLib)
 
 # 1. Define the imported library target
 # The type (STATIC or SHARED) should match the precompiled library type
@@ -28,7 +28,7 @@ set_target_properties(VendorLib PROPERTIES
 )
 
 # Link the source files from the src/ directory to the target
-target_sources(M17_Service PRIVATE
+target_sources(m17_host PRIVATE
     ./m17_host.cpp
     ../../tools/tools.c
     ../../tools/string_builder.c
@@ -43,10 +43,10 @@ target_sources(M17_Service PRIVATE
 )
 
 # Specify the directory where header files are located
-target_include_directories(M17_Service PRIVATE
+target_include_directories(m17_host PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ../../tools
 )
 
 # Optional: Change the output directory for the executable
-set_target_properties(M17_Service PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+set_target_properties(m17_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")

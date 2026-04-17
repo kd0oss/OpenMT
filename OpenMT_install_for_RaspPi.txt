@@ -160,15 +160,15 @@ cd ..
 cd protocols/m17
 
 # Start M17 host service. Same start up flags apply as modem host.
-./M17_Service
+./m17_host
 
 # If no errors stop and run as daemon.
 ctrl+c to exit service
-./M17_Service -d
+./m17_host -d
 
 # Start gateway if desired. Save start up flags apply.
 cd gateway
-./M17_Gateway -d
+./m17_gateway -d
 
 # M17 mode should now appear in the Dashboard.
 # If reflectors have be loaded into database you can go to Settings/Mode for link/unlink.

@@ -6,16 +6,16 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(mariadb REQUIRED IMPORTED_TARGET "mariadb")
 
 # Project name and language
-project(DMR_Service C)
+project(dmr_host C)
 
 #file(GLOB SOURCE_FILES "./DMR/*.cpp")
 
 # Define an executable target (sources will be added later)
-add_executable(DMR_Service ${SOURCE_FILES})
+add_executable(dmr_host ${SOURCE_FILES})
 
 # Link the MariaDB library to your executable
-target_link_libraries(DMR_Service PUBLIC PkgConfig::mariadb)
-target_link_libraries(DMR_Service PRIVATE VendorLib m)
+target_link_libraries(dmr_host PUBLIC PkgConfig::mariadb)
+target_link_libraries(dmr_host PRIVATE VendorLib m)
 
 # 1. Define the imported library target
 # The type (STATIC or SHARED) should match the precompiled library type
@@ -30,7 +30,7 @@ set_target_properties(VendorLib PROPERTIES
 )
 
 # Link the source files from the src/ directory to the target
-target_sources(DMR_Service PRIVATE
+target_sources(dmr_host PRIVATE
     ./dmr_host.c
     ./dmr_func.c
     ../../tools/string_builder.c
@@ -41,10 +41,10 @@ target_sources(DMR_Service PRIVATE
 )
 
 # Specify the directory where header files are located
-target_include_directories(DMR_Service PRIVATE
+target_include_directories(dmr_host PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ../../tools
 )
 
 # Optional: Change the output directory for the executable
-set_target_properties(DMR_Service PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+set_target_properties(dmr_host PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
