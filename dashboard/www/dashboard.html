@@ -1,20 +1,20 @@
 <!-- /***************************************************************************
- *   Copyright (C) 2025 by Rick KD0OSS             *
- *                                                                         *
- *   This program is free software; you can redistribute it and/or modify  *
- *   it under the terms of the GNU General Public License as published by  *
- *   the Free Software Foundation; either version 3 of the License, or     *
- *   (at your option) any later version.                                   *
- *                                                                         *
- *   This program is distributed in the hope that it will be useful,       *
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
- *   GNU General Public License for more details.                          *
- *                                                                         *
- *   You should have received a copy of the GNU General Public License     *
- *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
- *                                                                         *
- ***************************************************************************/
+*   Copyright (C) 2025 by Rick KD0OSS             *
+*                                                                         *
+*   This program is free software; you can redistribute it and/or modify  *
+*   it under the terms of the GNU General Public License as published by  *
+*   the Free Software Foundation; either version 3 of the License, or     *
+*   (at your option) any later version.                                   *
+*                                                                         *
+*   This program is distributed in the hope that it will be useful,       *
+*   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+*   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+*   GNU General Public License for more details.                          *
+*                                                                         *
+*   You should have received a copy of the GNU General Public License     *
+*   along with this program; if not, see <http://www.gnu.org/licenses/>   *
+*                                                                         *
+***************************************************************************/
 -->
 <html style='height:100%' xmlns='http://www.w3.org/1999/xhtml'>
 <head>
@@ -22,678 +22,678 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <title id='windowTitle'>Modem Dashboard</title>
 <style>
-   * {box-sizing: border-box}
-   html
-   {
-      height: 100%;
-      margin: 0;
-      font-family: Arial, Helvetica, sans-serif;
-      font-size: 18px;
-      background-color: #000000;
-      overflow: hidden;
-   }
+* {box-sizing: border-box}
+html
+{
+  height: 100%;
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 18px;
+  background-color: #000000;
+  overflow: hidden;
+}
 
-   #wrap
-   {
-      padding: 10px;
-      min-height: -webkit-calc(100% - 100px);  /* Chrome  */
-      min-height: -moz-calc(100% - 100px);     /* Firefox */
-      min-height:  calc(100% - 100px);         /* native  */
-   }
+#wrap
+{
+  padding: 10px;
+  min-height: -webkit-calc(100% - 100px);  /* Chrome  */
+  min-height: -moz-calc(100% - 100px);     /* Firefox */
+  min-height:  calc(100% - 100px);         /* native  */
+}
 
-   header, section, footer, aside, nav, article, figure
-   {
-      display: block;
-      background-color: #000000;
-   }
+header, section, footer, aside, nav, article, figure
+{
+  display: block;
+  background-color: #000000;
+}
 
-   .dashb
-   {
-      background-color: #000000;
-      overflow: hidden;
-   }
+.dashb
+{
+  background-color: #000000;
+  overflow: hidden;
+}
 
-   /* Set a style for all buttons */
-   .login
-   {
-     background-color: #04AA6D;
-     color: white;
-     padding: 14px 20px;
-     margin: 8px 0;
-     border: none;
-     cursor: pointer;
-     width: 100%;
-   }
+/* Set a style for all buttons */
+.login
+{
+  background-color: #04AA6D;
+  color: white;
+  padding: 14px 20px;
+  margin: 8px 0;
+  border: none;
+  cursor: pointer;
+  width: 100%;
+}
 
-   .login:hover, .cancelbtn:hover
-   {
-     opacity: 0.8;
-   }
+.login:hover, .cancelbtn:hover
+{
+  opacity: 0.8;
+}
 
-   .cancelbtn
-   {
-     width: auto;
-     padding: 10px 18px;
-     background-color: #f44336;
-   }
+.cancelbtn
+{
+  width: auto;
+  padding: 10px 18px;
+  background-color: #f44336;
+}
 
-   .container
-   {
-     padding: 16px;
-   }
+.container
+{
+  padding: 16px;
+}
 
-   span.psw
-   {
-     float: right;
-     padding-top: 16px;
-   }
+span.psw
+{
+  float: right;
+  padding-top: 16px;
+}
 
-   /* Center the image and position the close button */
-   .imgcontainer
-   {
-     text-align: center;
-     margin: 24px 0 12px 0;
-     position: relative;
-   }
+/* Center the image and position the close button */
+.imgcontainer
+{
+  text-align: center;
+  margin: 24px 0 12px 0;
+  position: relative;
+}
 
-   /* The Modal (background) */
-   .modal
-   {
-     display: none; /* Hidden by default */
-     position: fixed; /* Stay in place */
-     z-index: 4; /* Sit on top */
-     left: 400px;
-     top: 0;
-     width: 400px; /* Full width */
-     height: 400px; /* Full height */
-     overflow: auto; /* Enable scroll if needed */
-     background-color: rgb(0,0,0); /* Fallback color */
-     background-color: rgba(0,0,0,0.4); /* Black w/ opacity */
-     padding-top: 60px;
-   }
+/* The Modal (background) */
+.modal
+{
+  display: none; /* Hidden by default */
+  position: fixed; /* Stay in place */
+  z-index: 4; /* Sit on top */
+  left: 400px;
+  top: 0;
+  width: 400px; /* Full width */
+  height: 400px; /* Full height */
+  overflow: auto; /* Enable scroll if needed */
+  background-color: rgb(0,0,0); /* Fallback color */
+  background-color: rgba(0,0,0,0.4); /* Black w/ opacity */
+  padding-top: 60px;
+}
 
-   /* Modal Content/Box */
-   .modal-content
-   {
-     background-color: #fefefe;
-     margin: 5% auto 15% auto; /* 5% from the top, 15% from the bottom and centered */
-     border: 1px solid #888;
-     width: 80%; /* Could be more or less, depending on screen size */
-   }
+/* Modal Content/Box */
+.modal-content
+{
+  background-color: #fefefe;
+  margin: 5% auto 15% auto; /* 5% from the top, 15% from the bottom and centered */
+  border: 1px solid #888;
+  width: 80%; /* Could be more or less, depending on screen size */
+}
 
-   /* The Close Button (x) */
-   .close
-   {
-     position: absolute;
-     right: 25px;
-     top: 0;
-     z-index: 5; /* Sit on top */
-     color: #000;
-     font-size: 35px;
-     font-weight: bold;
-   }
+/* The Close Button (x) */
+.close
+{
+  position: absolute;
+  right: 25px;
+  top: 0;
+  z-index: 5; /* Sit on top */
+  color: #000;
+  font-size: 35px;
+  font-weight: bold;
+}
 
-   .close:hover,
-   .close:focus
-   {
-     color: red;
-     cursor: pointer;
-   }
+.close:hover,
+.close:focus
+{
+  color: red;
+  cursor: pointer;
+}
 
-   /* Add Zoom Animation */
-   .animate
-   {
-     -webkit-animation: animatezoom 0.6s;
-     animation: animatezoom 0.6s
-   }
+/* Add Zoom Animation */
+.animate
+{
+  -webkit-animation: animatezoom 0.6s;
+  animation: animatezoom 0.6s
+}
 
-   @-webkit-keyframes animatezoom
-   {
-     from {-webkit-transform: scale(0)}
-     to {-webkit-transform: scale(1)}
-   }
+@-webkit-keyframes animatezoom
+{
+  from {-webkit-transform: scale(0)}
+  to {-webkit-transform: scale(1)}
+}
 
-   @keyframes animatezoom
-   {
-     from {transform: scale(0)}
-     to {transform: scale(1)}
-   }
+@keyframes animatezoom
+{
+  from {transform: scale(0)}
+  to {transform: scale(1)}
+}
 
-   /* Change styles for span and cancel button on extra small screens */
-   @media screen and (max-width: 300px)
-   {
-     span.psw
-     {
-       display: block;
-       float: none;
-     }
-
-     .cancelbtn
-     {
-       width: 100%;
-     }
-   }
-
-   .main
-   {
-     margin-top: 70px;
-     margin-left: 291px;
-     margin-right: -8px;
-     padding: 5px 5px 5px 5px;
-     border: 2px solid #ccc;
-     overflow: hidden;
-   }
-
-   .tabs
-   {
-      overflow: hidden;
-      background-color: #000000;
-   }
-
-   .tablink
-   {
-      background-color: #555;
-      color: white;
-      float: left;
-      border: none;
-      outline: none;
-      cursor: pointer;
-      font-size: 30px;
-      width: 50%;
-      height: 50px;
-      overflow: hidden;
-   }
-
-   .tablink:hover, .stablink:hover
-   {
-      background-color: #777;
-   }
-
-   .tabcontent
-    {
-      top: 1px;
-      color: white;
-      display: none;
-      height: 100%;
-      overflow: hidden;
-      background-color: #000000;
-      z-index: 3;
-    }
-
-   #maintab
-   {
-      overflow: auto;
-      background-color: #000000;
-   }
-
-   .stablink
-   {
-      background-color: #666;
-      color: #37AD83;
-      float: left;
-      border: none;
-      outline: none;
-      cursor: pointer;
-      height: 40px;
-      font-size: 20px;
-      font-weight: bold;
-      width: 15%;
-      overflow: hidden;
-   }
-
-   .stabs
-   {
-      margin-top: 1px;
-      margin-left: 0px;
-      overflow: hidden;
-      background-color: #000000;
-   }
-
-   #settingtab
-   {
-      background-color: green;
-   }
-
-   .genset
-   {
-      top: 1px;
-      margin-left: 0px;
-      color: black;
-      display: none;
-      height: 100%;
-      overflow: hidden;
-      background-color: #000000;
-      font-size: 20px;
-      font-family: "Lucida Console", "Courier New", monospace;
-   }
-
-   .genset select, input
-   {
-      font-size: 20px;
-      font-family: "Lucida Console", "Courier New", monospace;
-   }
-
-   .settingsauth
-   {
-      position: absolute;
-      top:  200px;
-      left: 1px;
-      width: 500px;
-      display: inline-block;
-   }
-
-   .settingsauth input
-   {
-      position: absolute;
-      left: 210px;
-   }
-
-   .authSaveButton
-   {
-      position: relative;
-      top: 40px;
-      left: -205px;
-      font-size: 20px;
-      background-color: lightgreen;
-   }
-
-   #generaltab
-   {
-      background-color: orange;
-   }
-
-   #modemtab
-   {
-     background-color: yellow;
-   }
-
-   #modetab
-   {
-     background-color: lightblue;
-   }
-
-   .settingsLocation
-   {
-      position: absolute;
-      top: 50px;
-      left: 1px;
-      width: 300px;
-      display: inline-block;
-   }
-
-   .settingsLocation input
-   {
-      position: absolute;
-      left: 150px;
-      width: 170px;
-   }
-
-   .genSettings
-   {
-      position: relative;
-      top: 10px;
-      left: 10px;
-      height: 400px;
-      display: inline-block;
-   }
-
-   .genSaveButton
-   {
-      position: absolute;
-      top: 130px;
-      font-size: 20px;
-      background-color: lightgreen;
-   }
-
-   .modemSettings
-   {
-      position: relative;
-      top: 10px;
-      left: 10px;
-      height: 100%;
-      display: inline-block;
-   }
-
-   .mExtrasSettings
-   {
-      position: fixed;
-      top: 230px;
-      bottom: 80px;
-      width: 500px;
-      overflow: auto;
-      background-color: lightyellow;
-      display: inline-block;
-   }
-
-   .currentComm
-   {
-      position: relative;
-      top: 1px;
-      height: 350px;
-      width: 100%;
-      overflow: hidden;
-      border: 2px solid #ccc;
-      background-color: #000000;
-      z-index: 3;
-   }
-
-   .status
-   {
-      position: fixed;
-      top: 70px;
-      left: 0px;
-      height: 100%;
-      width: 300px;
-      padding: 5px 5px 5px 5px;
-      overflow: hidden;
-      border: 2px solid #ccc;
-      background-color: #000000;
-   }
-
-   .banner
-   {
-      position: fixed;
-      top: 0;
-      left: 0px;
-      height: 70px;
-      width: 100%;
-      overflow: hidden;
-      text-align: center;
-      font-size: 25px;
-      color: yellow;
-      border: 2px solid #ccc;
-      background-color: #000000;
-      z-index: 3;
-   }
-
-   .creator
-   {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      height: 25px;
-      width: 100%;
-      overflow: hidden;
-      text-align: center;
-      font-size: 15px;
-      color: yellow;
-      border: 2px solid #ccc;
-      background-color: #000000;
-      z-index: 3;
-   }
-
-   .smsText
-   {
-      position: relative;
-      top: 0;
-      left: 1px;
-      width: 100%;
-      height: 100px;
-      font-size: 18px;
-      color: black;
-      border-collapse: collapse;
-      background-color: white;
-      z-index: 3;
-   }
-
-   .smsText textarea
-   {
-      position: relative;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      font-size: 18px;
-      color: black;
-      border-collapse: collapse;
-      background-color: white;
-      z-index: 3;
-   }
-
-   .currentCall
-   {
-      position: relative;
-      top: 0;
-      left: 1px;
-      width: 100%;
-      text-align: center;
-      font-size: 18px;
-      color: #eeeeee;
-      border-collapse: collapse;
-      background-color: #528dea;
-      z-index: 3;
-   }
-
-   .currentCall td
-   {
-      width: 25%;
-      height: 25px;
-      border: 2px solid #aaa;
-      border-collapse: collapse;
-   }
-
-   .currentCall th
-   {
-      color: #eeeeee;
-   }
-
-   .currentCall tr
-   {
-      color: #528dea;
-   }
-
-   .currentCall tr:nth-child(even)
-   {
-      border: 2px solid #aaa;
-      background-color: #D6EEEE;
-   }
-
-   .activeModes
-   {
-      position: relative;
-      top: 0;
-      left: 0;
-      width: 100%;
-      text-align: center;
-      font-size: 15px;
-      border: 2px solid #aaa;
-      border-collapse: collapse;
-      background-color: #f5f386;
-      z-index: 3;
-   }
-
-   .activeModes td
-   {
-      width: 50%;
-      border: 2px solid #aaa;
-      border-collapse: collapse;
-   }
-
-   .activeGW
-   {
-      position: relative;
-      top: 0;
-      left: 0;
-      width: 100%;
-      text-align: center;
-      font-size: 15px;
-      border: 2px solid #aaa;
-      border-collapse: collapse;
-      background-color: #078EA6;
-      z-index: 3;
-   }
-
-   .activeGW td
-   {
-      width: 50%;
-      border: 2px solid #aaa;
-      border-collapse: collapse;
-   }
-
-   .lastheardDiv
-   {
-     position: relative;
-     top: 1px;
-     width: 100%;
-     height: calc(100vh - 530px);  /* viewport minus banner+tabs+currentComm+creator+padding */
-     overflow-y: auto;
-     overflow-x: auto;
-     background-color: #000000;
-     z-index: 3;
-     -webkit-overflow-scrolling: touch;
+/* Change styles for span and cancel button on extra small screens */
+@media screen and (max-width: 300px)
+{
+  span.psw
+  {
+    display: block;
+    float: none;
   }
 
-   .lastheard
-   {
-     position: relative;
-     top: 1px;
-     width: 100%;
-     min-width: 600px;
-     left: 1px;
-     text-align: center;
-     font-size: 15px;
-     border-collapse: separate;
-     border-spacing: 0;
-     z-index: 3;
-   }
+  .cancelbtn
+  {
+    width: 100%;
+  }
+}
 
-   .lastheard thead th
-   {
-      position: sticky; /* Make the header sticky */
-      top: 0; /* Stick to the top of the scrollable container */
-      z-index: 4;
-      background-color: green;   /* must be set explicitly or thead becomes transparent when scrolling */
-   }
+.main
+{
+  margin-top: 70px;
+  margin-left: 291px;
+  margin-right: -8px;
+  padding: 5px 5px 5px 5px;
+  border: 2px solid #ccc;
+  overflow: hidden;
+}
 
-   .lastheard tr:nth-child(even)
-   {
-      border: 2px solid #aaa;
-      background-color: #BFFFED;
-   }
+.tabs
+{
+  overflow: hidden;
+  background-color: #000000;
+}
 
-   .lastheard tr:nth-child(odd)
-   {
-      border: 2px solid #aaa;
-      background-color: #FFBFD1;
-   }
+.tablink
+{
+  background-color: #555;
+  color: white;
+  float: left;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  font-size: 30px;
+  width: 50%;
+  height: 50px;
+  overflow: hidden;
+}
 
-   .lastheard td, th
-   {
-      width: 20%;
-      border: 2px solid #aaa;
-      border-collapse: collapse;
-      white-space: nowrap;
-      padding: 0px 5px 0px 5px; /* Top, Right, Bottom, Left padding */
-   }
+.tablink:hover, .stablink:hover
+{
+  background-color: #777;
+}
 
-   .clock
-   {
-      position: absolute;
-      top: 45px;
-      left: 20px;
-      width: 200px;
-      text-align: left;
-      font-size: 16px;
-      color: #999999;
-      background-color: black;
-      z-index: 3;
-   }
+.tabcontent
+{
+  top: 1px;
+  color: white;
+  display: none;
+  height: 100%;
+  overflow: hidden;
+  background-color: #000000;
+  z-index: 3;
+}
 
-   .lclock
-   {
-      position: absolute;
-      top: 25px;
-      left: 20px;
-      width: 200px;
-      text-align: left;
-      font-size: 16px;
-      color: #999999;
-      background-color: black;
-      z-index: 3;
-   }
+#maintab
+{
+  overflow: auto;
+  background-color: #000000;
+}
 
-   .modemSaveButton
-   {
-      position: absolute;
-      bottom: 200px;
-      font-size: 20px;
-      background-color: lightgreen;
-   }
+.stablink
+{
+  background-color: #666;
+  color: #37AD83;
+  float: left;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  height: 40px;
+  font-size: 20px;
+  font-weight: bold;
+  width: 15%;
+  overflow: hidden;
+}
 
-   .linkTo
-   {
-      font-size: 18px;
-      background-color: lightyellow;
-   }
+.stabs
+{
+  margin-top: 1px;
+  margin-left: 0px;
+  overflow: hidden;
+  background-color: #000000;
+}
 
-   .modeData
-   {
-      position: relative;
-      width: 100%;
-      height: 295px;
-      top: 1px;
-   }
+#settingtab
+{
+  background-color: green;
+}
 
-   .messages
-   {
-      width: 50%;
-   }
+.genset
+{
+  top: 1px;
+  margin-left: 0px;
+  color: black;
+  display: none;
+  height: 100%;
+  overflow: hidden;
+  background-color: #000000;
+  font-size: 20px;
+  font-family: "Lucida Console", "Courier New", monospace;
+}
 
-   .messageTable
-   {
-      position: relative;
-      width: 100%;
-      color: white;
-   }
+.genset select, input
+{
+  font-size: 20px;
+  font-family: "Lucida Console", "Courier New", monospace;
+}
 
-   .messageTable tr
-   {
-      height: 20px;
-   }
+.settingsauth
+{
+  position: absolute;
+  top:  200px;
+  left: 1px;
+  width: 500px;
+  display: inline-block;
+}
 
-   .messageSpan
-   {
-      position: relative;
-      display: inline-block;
-      width: 100%;
-      color: yellow;
-      font-weight: bold;
-      height: 290px;
-      max-height: 290px;
-      overflow-y: auto;
-      scrollbar-color: red yellow;
-   }
+.settingsauth input
+{
+  position: absolute;
+  left: 210px;
+}
 
-   .refl_dropdown
-   {
-      position: relative;
-   }
+.authSaveButton
+{
+  position: relative;
+  top: 40px;
+  left: -205px;
+  font-size: 20px;
+  background-color: lightgreen;
+}
 
-   .mode_options
-   {
-      position: relative;
-   }
+#generaltab
+{
+  background-color: orange;
+}
 
-   .mode_options input
-   {
-      width: 150px;
-   }
+#modemtab
+{
+  background-color: yellow;
+}
 
-   .mode_options button
-   {
-      font-size: 18px;
-      background-color: lightyellow;
-   }
+#modetab
+{
+  background-color: lightblue;
+}
 
-   .mode_section
-   {
-      position: relative;
-      background-color: #a9ec9799;
-      border-style: solid;
-      border-color: yellow;
-      border-width: 3px;
-   }
-   </style>
+.settingsLocation
+{
+  position: absolute;
+  top: 50px;
+  left: 1px;
+  width: 300px;
+  display: inline-block;
+}
+
+.settingsLocation input
+{
+  position: absolute;
+  left: 150px;
+  width: 170px;
+}
+
+.genSettings
+{
+  position: relative;
+  top: 10px;
+  left: 10px;
+  height: 400px;
+  display: inline-block;
+}
+
+.genSaveButton
+{
+  position: absolute;
+  top: 130px;
+  font-size: 20px;
+  background-color: lightgreen;
+}
+
+.modemSettings
+{
+  position: relative;
+  top: 10px;
+  left: 10px;
+  height: 100%;
+  display: inline-block;
+}
+
+.mExtrasSettings
+{
+  position: fixed;
+  top: 230px;
+  bottom: 80px;
+  width: 500px;
+  overflow: auto;
+  background-color: lightyellow;
+  display: inline-block;
+}
+
+.currentComm
+{
+  position: relative;
+  top: 1px;
+  height: 350px;
+  width: 100%;
+  overflow: hidden;
+  border: 2px solid #ccc;
+  background-color: #000000;
+  z-index: 3;
+}
+
+.status
+{
+  position: fixed;
+  top: 70px;
+  left: 0px;
+  height: 100%;
+  width: 300px;
+  padding: 5px 5px 5px 5px;
+  overflow: hidden;
+  border: 2px solid #ccc;
+  background-color: #000000;
+}
+
+.banner
+{
+  position: fixed;
+  top: 0;
+  left: 0px;
+  height: 70px;
+  width: 100%;
+  overflow: hidden;
+  text-align: center;
+  font-size: 25px;
+  color: yellow;
+  border: 2px solid #ccc;
+  background-color: #000000;
+  z-index: 3;
+}
+
+.creator
+{
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  height: 25px;
+  width: 100%;
+  overflow: hidden;
+  text-align: center;
+  font-size: 15px;
+  color: yellow;
+  border: 2px solid #ccc;
+  background-color: #000000;
+  z-index: 3;
+}
+
+.smsText
+{
+  position: relative;
+  top: 0;
+  left: 1px;
+  width: 100%;
+  height: 100px;
+  font-size: 18px;
+  color: black;
+  border-collapse: collapse;
+  background-color: white;
+  z-index: 3;
+}
+
+.smsText textarea
+{
+  position: relative;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  font-size: 18px;
+  color: black;
+  border-collapse: collapse;
+  background-color: white;
+  z-index: 3;
+}
+
+.currentCall
+{
+  position: relative;
+  top: 0;
+  left: 1px;
+  width: 100%;
+  text-align: center;
+  font-size: 18px;
+  color: #eeeeee;
+  border-collapse: collapse;
+  background-color: #528dea;
+  z-index: 3;
+}
+
+.currentCall td
+{
+  width: 25%;
+  height: 25px;
+  border: 2px solid #aaa;
+  border-collapse: collapse;
+}
+
+.currentCall th
+{
+  color: #eeeeee;
+}
+
+.currentCall tr
+{
+  color: #528dea;
+}
+
+.currentCall tr:nth-child(even)
+{
+  border: 2px solid #aaa;
+  background-color: #D6EEEE;
+}
+
+.activeModes
+{
+  position: relative;
+  top: 0;
+  left: 0;
+  width: 100%;
+  text-align: center;
+  font-size: 15px;
+  border: 2px solid #aaa;
+  border-collapse: collapse;
+  background-color: #f5f386;
+  z-index: 3;
+}
+
+.activeModes td
+{
+  width: 50%;
+  border: 2px solid #aaa;
+  border-collapse: collapse;
+}
+
+.activeGW
+{
+  position: relative;
+  top: 0;
+  left: 0;
+  width: 100%;
+  text-align: center;
+  font-size: 15px;
+  border: 2px solid #aaa;
+  border-collapse: collapse;
+  background-color: #078EA6;
+  z-index: 3;
+}
+
+.activeGW td
+{
+  width: 50%;
+  border: 2px solid #aaa;
+  border-collapse: collapse;
+}
+
+.lastheardDiv
+{
+  position: relative;
+  top: 1px;
+  width: 100%;
+  height: calc(100vh - 530px);  /* viewport minus banner+tabs+currentComm+creator+padding */
+  overflow-y: auto;
+  overflow-x: auto;
+  background-color: #000000;
+  z-index: 3;
+  -webkit-overflow-scrolling: touch;
+}
+
+.lastheard
+{
+  position: relative;
+  top: 1px;
+  width: 100%;
+  min-width: 600px;
+  left: 1px;
+  text-align: center;
+  font-size: 15px;
+  border-collapse: separate;
+  border-spacing: 0;
+  z-index: 3;
+}
+
+.lastheard thead th
+{
+  position: sticky; /* Make the header sticky */
+  top: 0; /* Stick to the top of the scrollable container */
+  z-index: 4;
+  background-color: green;   /* must be set explicitly or thead becomes transparent when scrolling */
+}
+
+.lastheard tr:nth-child(even)
+{
+  border: 2px solid #aaa;
+  background-color: #BFFFED;
+}
+
+.lastheard tr:nth-child(odd)
+{
+  border: 2px solid #aaa;
+  background-color: #FFBFD1;
+}
+
+.lastheard td, th
+{
+  width: 20%;
+  border: 2px solid #aaa;
+  border-collapse: collapse;
+  white-space: nowrap;
+  padding: 0px 5px 0px 5px; /* Top, Right, Bottom, Left padding */
+}
+
+.clock
+{
+  position: absolute;
+  top: 45px;
+  left: 20px;
+  width: 200px;
+  text-align: left;
+  font-size: 16px;
+  color: #999999;
+  background-color: black;
+  z-index: 3;
+}
+
+.lclock
+{
+  position: absolute;
+  top: 25px;
+  left: 20px;
+  width: 200px;
+  text-align: left;
+  font-size: 16px;
+  color: #999999;
+  background-color: black;
+  z-index: 3;
+}
+
+.modemSaveButton
+{
+  position: absolute;
+  bottom: 200px;
+  font-size: 20px;
+  background-color: lightgreen;
+}
+
+.linkTo
+{
+  font-size: 18px;
+  background-color: lightyellow;
+}
+
+.modeData
+{
+  position: relative;
+  width: 100%;
+  height: 295px;
+  top: 1px;
+}
+
+.messages
+{
+  width: 50%;
+}
+
+.messageTable
+{
+  position: relative;
+  width: 100%;
+  color: white;
+}
+
+.messageTable tr
+{
+  height: 20px;
+}
+
+.messageSpan
+{
+  position: relative;
+  display: inline-block;
+  width: 100%;
+  color: yellow;
+  font-weight: bold;
+  height: 290px;
+  max-height: 290px;
+  overflow-y: auto;
+  scrollbar-color: red yellow;
+}
+
+.refl_dropdown
+{
+  position: relative;
+}
+
+.mode_options
+{
+  position: relative;
+}
+
+.mode_options input
+{
+  width: 150px;
+}
+
+.mode_options button
+{
+  font-size: 18px;
+  background-color: lightyellow;
+}
+
+.mode_section
+{
+  position: relative;
+  background-color: #a9ec9799;
+  border-style: solid;
+  border-color: yellow;
+  border-width: 3px;
+}
+</style>
 </head>
 
 <body id='dashb' onload="setTimeout(initDashBd, 2000)">
@@ -862,8 +862,8 @@ function displayModeOptions(mode, dtype, id, value)
   {
     var content = document.getElementById(mode+"_section").innerHTML;
     var table = document.getElementById("modeTable_"+mode);
-  //  var html = "<span class='mode_options' id='span_"+mode+"_"+id+"'>";
-  //  html += "<label>"+id+"</label>";
+    //  var html = "<span class='mode_options' id='span_"+mode+"_"+id+"'>";
+    //  html += "<label>"+id+"</label>";
     var row = table.insertRow(-1);
     var cell1 = row.insertCell(0);
     var cell2 = row.insertCell(1);
@@ -872,17 +872,17 @@ function displayModeOptions(mode, dtype, id, value)
     if (dtype == "input")
     {
       cell2.innerHTML = "<input id='"+mode+"_"+id+"' type='text' value='"+value+"'>";
-   //   html += "&nbsp;<input id='"+mode+"_"+id+"' type='text' value='"+value+"'>";
+      //   html += "&nbsp;<input id='"+mode+"_"+id+"' type='text' value='"+value+"'>";
       cell3.innerHTML = "<button onclick='saveModeOption(\""+mode+"\", \""+id+"\")'>Save</button>";
-   //   html += "&nbsp;<button onclick='saveModeOption(\""+mode+"\", \""+id+"\")'>Save</button>";
+      //   html += "&nbsp;<button onclick='saveModeOption(\""+mode+"\", \""+id+"\")'>Save</button>";
     }
     else
     {
       cell2.innerText = value;
       cell3.innerText = "Read-Only";
     }
- //   html += "<br></span>";
-  //  document.getElementById(mode+"_section").innerHTML = content;//+html;
+    //   html += "<br></span>";
+    //  document.getElementById(mode+"_section").innerHTML = content;//+html;
   }
 }
 
@@ -1037,15 +1037,15 @@ async function updateGatewayStatus()
 /* Display and update clocks */
 function updateClock()
 {
-    const date = new Date();
-    var tmp = date.toUTCString().split(' ');
-    var dt = tmp[2] + " " + tmp[1] + " " + tmp[4] + " UTC";
-    document.getElementById('clock').innerHTML = dt;
-    tmp = date.toString().split(' ');
-    dt = tmp[0] + " " + tmp[1] + " " + tmp[2] + " " + tmp[3] + " " + tmp[4];
-    document.getElementById('lclock').innerHTML = dt;
+  const date = new Date();
+  var tmp = date.toUTCString().split(' ');
+  var dt = tmp[2] + " " + tmp[1] + " " + tmp[4] + " UTC";
+  document.getElementById('clock').innerHTML = dt;
+  tmp = date.toString().split(' ');
+  dt = tmp[0] + " " + tmp[1] + " " + tmp[2] + " " + tmp[3] + " " + tmp[4];
+  document.getElementById('lclock').innerHTML = dt;
 
-    setTimeout(updateClock, 1000);
+  setTimeout(updateClock, 1000);
 }
 
 /* Load general configuraion from database */
@@ -1176,12 +1176,12 @@ function configGateways(prevGateways)
     var modes = prevGateways.split(',');
     for (var i=0;i<modes.length;i++)
     {
-       var ele = document.getElementById(modes[i]+'_refl');
-       if (ele)
-         ele.remove();
-       ele = document.getElementById(modes[i]+'_gateway');
-       if (ele)
-         ele.remove();
+      var ele = document.getElementById(modes[i]+'_refl');
+      if (ele)
+        ele.remove();
+      ele = document.getElementById(modes[i]+'_gateway');
+      if (ele)
+        ele.remove();
     }
   }
   if (activeGateways == "none")
@@ -1231,7 +1231,7 @@ async function fetchStatus()
       setTimeout(fetchStatus, 1000);
       return;
     }
-  //alert(tmp);
+    //alert(tmp);
     var rtx2 = document.getElementById('rtx2');
     rtx2.style.display = "none";
     txEnabled[1] = false;
@@ -1519,8 +1519,8 @@ function checkAuth()
 {
   if (!authenticated)
   {
-     document.getElementById('id01').style.display='block';
-     setTimeout("document.getElementById('fpassword').focus()", 500);
+    document.getElementById('id01').style.display='block';
+    setTimeout("document.getElementById('fpassword').focus()", 500);
   }
   else
     openPage('tablink', 'tabcontent', 'settingstab', document.getElementById('Settings'), 'green');
@@ -1532,7 +1532,7 @@ async function doAuthentication()
   var formData = new FormData();
   formData.append('username', document.getElementById('fusername').value);
   formData.append('passwd', document.getElementById('fpassword').value);
- // formData.append('command', 'auth');
+  // formData.append('command', 'auth');
 
   var resp = await fetch("data_query.php?command=auth", {
     method: 'POST',
@@ -1680,15 +1680,15 @@ async function getReflList(reflType)
   tmp = tmp.split('\x1E')
   for (var i=0;i<tmp.length;i++)
   {
-      var fields = tmp[i].split('\x1C');
-      var value = fields[0].split('\x1D');
-      var newOpt = document.createElement('option');
-      newOpt.value = value[1];
-      newOpt.text = value[1];
-      list.add(newOpt);
-      value = fields[7].split('\x1D');
-      if (value[1] == "yes")
-        showModules = true;
+    var fields = tmp[i].split('\x1C');
+    var value = fields[0].split('\x1D');
+    var newOpt = document.createElement('option');
+    newOpt.value = value[1];
+    newOpt.text = value[1];
+    list.add(newOpt);
+    value = fields[7].split('\x1D');
+    if (value[1] == "yes")
+      showModules = true;
   }
   if (showModules)
     document.getElementById(reflType+'netmod').style.visibility = 'visible';
@@ -1724,7 +1724,7 @@ async function reflConnect(reflType)
   else
   {
     if (tmp == "failed")
-        alert("Reflector link failed.");
+      alert("Reflector link failed.");
     document.getElementById(reflType+'link').textContent = "Link";
     document.getElementById(reflType+'_linkstat').innerHTML = "Not Linked";
   }
@@ -1753,16 +1753,16 @@ function createMap(lat, long)
   if (lat == 0.0 && long == 0.0)
   {
     mapOptions = {
-                   center: [lat, long],
-                   zoom: 1
-                 }
+      center: [lat, long],
+      zoom: 1
+    }
   }
   else
   {
     mapOptions = {
-                   center: [lat, long],
-                   zoom: 10
-                 }
+      center: [lat, long],
+      zoom: 10
+    }
   }
 
   if (map)
@@ -1803,158 +1803,226 @@ function addMessage(source, message)
 
 <!-- login dialog -->
 <div id="id01" class="modal">
-  <form class="modal-content animate" action="" method="post">
-    <div class="imgcontainer">
-      <span onclick="document.getElementById('id01').style.display='none'" class="close" title="Close Modal">&times;</span>
-    </div>
-    <div class="container">
-      <label for="uname"><b>Username</b></label>
-      <input id="fusername" type="text" placeholder="Enter Username" name="uname" required>
+<form class="modal-content animate" action="" method="post">
+<div class="imgcontainer">
+<span onclick="document.getElementById('id01').style.display='none'" class="close" title="Close Modal">&times;</span>
+</div>
+<div class="container">
+<label for="uname"><b>Username</b></label>
+<input id="fusername" type="text" placeholder="Enter Username" name="uname" required>
 
-      <label for="psw"><b>Password</b></label>
-      <input id="fpassword" type="password" placeholder="Enter Password" name="psw" required>
+<label for="psw"><b>Password</b></label>
+<input id="fpassword" type="password" placeholder="Enter Password" name="psw" required>
 
-      <button id="loginButton" class="login" type="button" onclick="doAuthentication()">Login</button>
+<button id="loginButton" class="login" type="button" onclick="doAuthentication()">Login</button>
 <!--  <label>
-      <input type="checkbox" checked="checked" name="remember"> Remember me
-      </label> -->
-    </div>
+<input type="checkbox" checked="checked" name="remember"> Remember me
+</label> -->
+</div>
 
-    <div class="container" style="background-color:#f1f1f1">
-      <button type="button" onclick="document.getElementById('id01').style.display='none'" class="cancelbtn">Cancel</button>
-    </div>
-  </form>
+<div class="container" style="background-color:#f1f1f1">
+<button type="button" onclick="document.getElementById('id01').style.display='none'" class="cancelbtn">Cancel</button>
+</div>
+</form>
 </div>
 <!-- end login dialog -->
 
-<div class='banner'>
-  <span id='banner'>
-    <span id=dashTitle>Modem Dashboard</span><br>
-    <span id=dashTitle2 style='font-size:14px;'>OpenMT Version 1.0 beta</span>
-  </span>
+<div id='titleBar' class='banner'>
+<span id='banner'>
+<span id=dashTitle>Modem Dashboard</span><br>
+<span id=dashTitle2 style='font-size:14px;'>OpenMT Version 1.0 beta</span>
+</span>
 
-  <span class='lclock' id='lclock'></span>
-  <span class='clock' id='clock'></span>
+<span class='lclock' id='lclock'></span>
+<span class='clock' id='clock'></span>
+
+<!-- OpenMT Logo -->
+<div style="position:absolute; top:0; right:12px; height:70px; display:flex; align-items:center;">
+<svg width="210" height="64" viewBox="123 90 434 148">
+<defs>
+<style>
+.lg-ring  { fill: none; stroke-linecap: round; }
+.lg-wave  { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.lg-bt    { font-family: sans-serif; font-weight: 500; }
+.lg-sub   { font-family: sans-serif; font-weight: 400; fill: #aaaaaa; }
+.lg-tag   { font-family: sans-serif; font-weight: 400; fill: #777777; }
+.lg-div   { stroke: rgba(255,255,255,0.18); }
+.lg-ro    { stroke: #74b8ff; }
+.lg-rm    { stroke: #5eebd4; }
+.lg-ri    { stroke: #ffbf3f; }
+.lg-wm    { stroke: #74b8ff; }
+.lg-we    { stroke: #5eebd4; }
+.lg-wa    { stroke: #ffbf3f; }
+.lg-dot   { fill: #74b8ff; }
+.lg-tick  { stroke: #74b8ff; }
+</style>
+</defs>
+
+<!-- Mark (O) at x=175,y=148 -->
+<g transform="translate(175,148)">
+<circle cx="0" cy="0" r="52" class="lg-ring lg-ro" stroke-width="2.8" stroke-dasharray="4 3"/>
+<path d="M 0 -42 A 42 42 0 1 1 -36 21" class="lg-ring lg-rm" stroke-width="2.2"/>
+<path d="M 0 -30 A 30 30 0 1 1 -26 15" class="lg-ring lg-ri" stroke-width="1.8"/>
+
+<g class="lg-tick" stroke-width="1.8">
+<line x1="0"   y1="-56" x2="0"   y2="-48"/>
+<line x1="0"   y1="48"  x2="0"   y2="56"/>
+<line x1="-56" y1="0"   x2="-48" y2="0"/>
+<line x1="48"  y1="0"   x2="56"  y2="0"/>
+<line x1="-40" y1="-40" x2="-34" y2="-34"/>
+<line x1="40"  y1="-40" x2="34"  y2="-34"/>
+<line x1="-40" y1="40"  x2="-34" y2="34"/>
+<line x1="40"  y1="40"  x2="34"  y2="34"/>
+</g>
+
+<path d="M -48 0 C -38 0 -30 -22 -18 -22 C -6 -22 0 22 12 22 C 24 22 30 -22 42 -22 C 46 -22 48 0 48 0"
+class="lg-wave lg-wm" stroke-width="2.8"/>
+<path d="M -44 -5 C -34 -5 -26 -24 -16 -25 C -6 -26 2 18 12 19 C 22 20 30 -24 42 -26 C 46 -26 47 -5 48 -5"
+class="lg-wave lg-we" stroke-width="1.4" stroke-dasharray="3 2"/>
+<path d="M -44 5 C -34 5 -26 24 -16 25 C -6 26 2 -18 12 -19 C 22 -20 30 24 42 26 C 46 26 47 5 48 5"
+class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
+
+<circle cx="0" cy="0" r="4.5" class="lg-dot"/>
+<line x1="-10" y1="0"   x2="-5"  y2="0"   class="lg-tick" stroke-width="1.2"/>
+<line x1="5"   y1="0"   x2="10"  y2="0"   class="lg-tick" stroke-width="1.2"/>
+<line x1="0"   y1="-10" x2="0"   y2="-5"  class="lg-tick" stroke-width="1.2"/>
+<line x1="0"   y1="5"   x2="0"   y2="10"  class="lg-tick" stroke-width="1.2"/>
+</g>
+
+<!-- p=blue  e=teal  n=amber  MT=white -->
+<text x="237" y="198" class="lg-bt" font-size="78" fill="#74b8ff">p</text>
+<text x="284" y="198" class="lg-bt" font-size="78" fill="#5eebd4">e</text>
+<text x="334" y="198" class="lg-bt" font-size="78" fill="#ffbf3f">n</text>
+<text x="388" y="198" class="lg-bt" font-size="78" fill="#ffffff">MT</text>
+
+<!-- Subtitle lines -->
+<line x1="123" y1="232" x2="557" y2="232" class="lg-div" stroke-width="0.5"/>
+<text x="340" y="262" class="lg-sub" font-size="21" text-anchor="middle">Open Modem Tools</text>
+<line x1="123" y1="276" x2="557" y2="276" class="lg-div" stroke-width="0.5"/>
+<text x="340" y="298" class="lg-tag" font-size="16" text-anchor="middle">For the Digital HAM</text>
+</svg>
+</div>
+
 </div>
 
 <div class='main'>
-  <div class='tabs'>
-    <button id='Dashboard' class="tablink" onclick="openPage('tablink', 'tabcontent', 'maintab', this, 'blue')">Dashboard</button>
-    <button id='Settings' class="tablink" onclick="checkAuth()">Settings</button>
-  </div>
+<div class='tabs'>
+<button id='Dashboard' class="tablink" onclick="openPage('tablink', 'tabcontent', 'maintab', this, 'blue')">Dashboard</button>
+<button id='Settings' class="tablink" onclick="checkAuth()">Settings</button>
+</div>
 
-  <div id='maintab' class='tabcontent'>
-    <div class='currentComm'>
-      <table class='currentCall' id='currentCall'>
-        <tr><th>Call</th><th>Text</th><th>Mode</th><th>Destination</th></tr>
-        <tr id='rtx1'><td id='srcCall1'></td><td id='metaText1'></td><td id='cmode1'></td><td id='dstCall1'></td></tr>
-        <tr id='rtx2' style="display: none;"><td id='srcCall2'></td><td id='metaText2'></td><td id='cmode2'></td><td id='dstCall2'></td></tr>
-        </table>
-      <table id='modeData' class='modeData'>
-        <tr>
-          <td id='messages' class='messages'><span class='messageSpan'>Messages:<br><table id='messageTable' class='messageTable'></table></span></td>
-          <td id='mapLoc'></td>
-        </tr>
-      </table>
-    </div>
+<div id='maintab' class='tabcontent'>
+<div class='currentComm'>
+<table class='currentCall' id='currentCall'>
+<tr><th>Call</th><th>Text</th><th>Mode</th><th>Destination</th></tr>
+<tr id='rtx1'><td id='srcCall1'></td><td id='metaText1'></td><td id='cmode1'></td><td id='dstCall1'></td></tr>
+<tr id='rtx2' style="display: none;"><td id='srcCall2'></td><td id='metaText2'></td><td id='cmode2'></td><td id='dstCall2'></td></tr>
+</table>
+<table id='modeData' class='modeData'>
+<tr>
+<td id='messages' class='messages'><span class='messageSpan'>Messages:<br><table id='messageTable' class='messageTable'></table></span></td>
+<td id='mapLoc'></td>
+</tr>
+</table>
+</div>
 
-    <div id='lastheardDiv' class='lastheardDiv'>
-        <table id='lastheard' class='lastheard'>
-          <tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER (%)</th><th>Len(secs)</th></tr>
-          <tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-        </table>
-    </div>
-  </div>
+<div id='lastheardDiv' class='lastheardDiv'>
+<table id='lastheard' class='lastheard'>
+<tr style='background:green;color:yellow;'><th>Date/Time</th><th>Call</th><th>Text</th><th>Destination</th><th>Mode</th><th>Loss/BER (%)</th><th>Len(secs)</th></tr>
+<tr><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+</table>
+</div>
+</div>
 
-  <div id='settingstab' class='tabcontent'>
-    <div class='stabs'>
-      <button id='General' class="stablink" onclick="openPage('stablink', 'genset', 'generaltab', this, 'orange')">General</button>
-      <button class='stablink' onclick="openPage('stablink', 'genset', 'modemtab', this, 'yellow')">Modem</button>
-      <button class='stablink' onclick="openPage('stablink', 'genset', 'modetab', this, 'lightblue')">Modes</button>
-    </div>
-    <div id='generaltab' class='genset'>
-      <span class='genSettings'>
-        <label for='title'>Title:</label>
-        <input id='title' type='text' value='Modem Dashboard' size='40' maxlength='40' autofocus>
-        <label for='callsign'>Callsign:</label>
-        <input id='callsign' type='text' size='8' maxlength='8'>
-        <span class='settingsLocation'>
-          <label for='station_latitude'>Latitude:</label>
-          <input id='station_latitude' type='number' step='any' value='0.0'><br><br>
-          <label for='station_longitude'>Longitude:</label>
-          <input id='station_longitude' type='number' step='any' value='0.0'>
-        </span>
-        <button class='genSaveButton' onclick='saveGeneral()'>Save</button>
-        <span class='settingsauth'>
-          <label for='username'>User:</label>
-          <input id='username' type='text' value='admin' size='20' minlength='4' maxlength='20'>
-          <br><br>
-          <label for='password'>Password:</label>
-          <input id='password' type='password' size='20' minlength='8' maxlength='40'>
-          <br><br>
-          <label for='rpassword'>Retype Password:</label>
-          <input id='rpassword' type='password' size='20' minlength='8' maxlength='40'>
-          <button class='authSaveButton' onclick='saveAuth()'>Save</button>
-        </span>
-      </span>
-    </div>
-    <div id='modemtab' class='genset'>
-     <span class='modemSettings'>
-        <label for='deviceType'>Device Type:</label>
-        <select id='deviceType' name='devtype'>
-          <option value="openmt">OpenMT</option>
-          <option value="openmths">OpenMT_HS</option>
-          <option value="mmdvm">MMDVM</option>
-          <option value="mmdvmhs">MMDVM_HS</option>
-          </select>
-        <label for='commPort'>Comm Port:</label>
-        <select id='commPort' name='commPort'>
-          <option value="ttyACM0">ttyACM0</option>
-          <option value="ttyACM1">ttyACM1</option>
-          <option value="ttyACM2">ttyACM2</option>
-          <option value="ttyAMA0">ttyAMA0</option>
-          <option value="ttyAMA1">ttyAMA1</option>
-          <option value="ttyAMA2">ttyAMA2</option>
-          <option value="ttyUSB0">ttyUSB0</option>
-          <option value="ttyUSB1">ttyUSB1</option>
-          <option value="ttyUSB2">ttyUSB2</option>
-          <option value="ttyS0">ttyS0</option>
-          <option value="ttyS1">ttyS1</option>
-          <option value="ttyS2">ttyS2</option>
-          <option value="serial0">serial0</option>
-          </select>
-        <label for='baud'>Baud:</label>
-        <select id='baud' name='baud'>
-          <option value="115200">115200</option>
-          <option value="230400">230400</option>
-          <option value="460800">460800</option>
-          <option value="921600">921600</option>
-          </select>
-        <label for='mode'>Mode:</label>
-        <select id='mode' name='mode'>
-          <option value="simplex">Simplex</option>
-          <option value="duplex">Duplex</option>
-        </select><br><br>
-        <span id='modemExtras' class='mExtrasSettings'>
-        </span>
-        <br><br><button class='modemSaveButton' onclick='saveModem()'>Save</button>
-      </span>
-    </div>
-    <div id='modetab' class='genset'>
-    </div>
-  </div>
+<div id='settingstab' class='tabcontent'>
+<div class='stabs'>
+<button id='General' class="stablink" onclick="openPage('stablink', 'genset', 'generaltab', this, 'orange')">General</button>
+<button class='stablink' onclick="openPage('stablink', 'genset', 'modemtab', this, 'yellow')">Modem</button>
+<button class='stablink' onclick="openPage('stablink', 'genset', 'modetab', this, 'lightblue')">Modes</button>
+</div>
+<div id='generaltab' class='genset'>
+<span class='genSettings'>
+<label for='title'>Title:</label>
+<input id='title' type='text' value='Modem Dashboard' size='40' maxlength='40' autofocus>
+<label for='callsign'>Callsign:</label>
+<input id='callsign' type='text' size='8' maxlength='8'>
+<span class='settingsLocation'>
+<label for='station_latitude'>Latitude:</label>
+<input id='station_latitude' type='number' step='any' value='0.0'><br><br>
+<label for='station_longitude'>Longitude:</label>
+<input id='station_longitude' type='number' step='any' value='0.0'>
+</span>
+<button class='genSaveButton' onclick='saveGeneral()'>Save</button>
+<span class='settingsauth'>
+<label for='username'>User:</label>
+<input id='username' type='text' value='admin' size='20' minlength='4' maxlength='20'>
+<br><br>
+<label for='password'>Password:</label>
+<input id='password' type='password' size='20' minlength='8' maxlength='40'>
+<br><br>
+<label for='rpassword'>Retype Password:</label>
+<input id='rpassword' type='password' size='20' minlength='8' maxlength='40'>
+<button class='authSaveButton' onclick='saveAuth()'>Save</button>
+</span>
+</span>
+</div>
+<div id='modemtab' class='genset'>
+<span class='modemSettings'>
+<label for='deviceType'>Device Type:</label>
+<select id='deviceType' name='devtype'>
+<option value="openmt">OpenMT</option>
+<option value="openmths">OpenMT_HS</option>
+<option value="mmdvm">MMDVM</option>
+<option value="mmdvmhs">MMDVM_HS</option>
+</select>
+<label for='commPort'>Comm Port:</label>
+<select id='commPort' name='commPort'>
+<option value="ttyACM0">ttyACM0</option>
+<option value="ttyACM1">ttyACM1</option>
+<option value="ttyACM2">ttyACM2</option>
+<option value="ttyAMA0">ttyAMA0</option>
+<option value="ttyAMA1">ttyAMA1</option>
+<option value="ttyAMA2">ttyAMA2</option>
+<option value="ttyUSB0">ttyUSB0</option>
+<option value="ttyUSB1">ttyUSB1</option>
+<option value="ttyUSB2">ttyUSB2</option>
+<option value="ttyS0">ttyS0</option>
+<option value="ttyS1">ttyS1</option>
+<option value="ttyS2">ttyS2</option>
+<option value="serial0">serial0</option>
+</select>
+<label for='baud'>Baud:</label>
+<select id='baud' name='baud'>
+<option value="115200">115200</option>
+<option value="230400">230400</option>
+<option value="460800">460800</option>
+<option value="921600">921600</option>
+</select>
+<label for='mode'>Mode:</label>
+<select id='mode' name='mode'>
+<option value="simplex">Simplex</option>
+<option value="duplex">Duplex</option>
+</select><br><br>
+<span id='modemExtras' class='mExtrasSettings'>
+</span>
+<br><br><button class='modemSaveButton' onclick='saveModem()'>Save</button>
+</span>
+</div>
+<div id='modetab' class='genset'>
+</div>
+</div>
 </div>
 
 <div class='status'>
-  <span class='subStatus' id='status'>
-    <span id='activeModes'></span>
-    <br>
-    <span id='activeGW'></span>
-  </span>
+<span class='subStatus' id='status'>
+<span id='activeModes'></span>
+<br>
+<span id='activeGW'></span>
+</span>
 </div>
 
 <div class='creator'>
-  <span  id='creator'>Created by: Rick KD0OSS (c)2025</span>
+<span  id='creator'>Created by: Rick KD0OSS (c)2025</span>
 </div>
 
 <script type='text/javascript' charset='utf-8'>
@@ -1966,4 +2034,3 @@ createMap(Number(station_latitude), Number(station_longitude));
 
 </body>
 </html>
-
