@@ -1,0 +1,18 @@
+# /etc/systemd/system/dmr-gateway.service
+[Unit]
+Description=DMR Gateway
+After=dmr-host.service
+Requires=dmr-host.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/DMR/gateway
+ExecStart=/home/pi/OpenMT/protocols/DMR/gateway/build/dmr_gateway
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

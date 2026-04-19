@@ -1,0 +1,18 @@
+# /etc/systemd/system/dstar-host.service
+[Unit]
+Description=DSTAR Service
+After=modem-host.service
+Requires=modem-host.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/DSTAR
+ExecStart=/home/pi/OpenMT/protocols/DSTAR/build/dstar_host
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

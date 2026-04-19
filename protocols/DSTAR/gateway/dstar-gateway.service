@@ -1,0 +1,20 @@
+# /etc/systemd/system/dstar-gateway.service
+[Unit]
+Description=DSTAR Gateway
+After=dstar-host.service
+Requires=dstar-host.service
+After=ircddbgateway.service
+Requires=ircddbgateway.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/DSTAR/gateway
+ExecStart=/home/pi/OpenMT/protocols/DSTAR/gateway/build/dstar_gateway
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

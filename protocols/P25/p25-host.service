@@ -1,0 +1,18 @@
+# /etc/systemd/system/p25-host.service
+[Unit]
+Description=P25 Service
+After=modem-host.service
+Requires=modem-host.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/P25
+ExecStart=/home/pi/OpenMT/protocols/P25/build/p25_host
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

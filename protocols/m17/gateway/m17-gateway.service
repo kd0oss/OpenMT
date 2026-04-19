@@ -1,0 +1,18 @@
+# /etc/systemd/system/m17-gateway.service
+[Unit]
+Description=M17 Gateway
+After=m17-host.service
+Requires=m17-host.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/m17/gateway
+ExecStart=/home/pi/OpenMT/protocols/m17/gateway/build/m17_gateway
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

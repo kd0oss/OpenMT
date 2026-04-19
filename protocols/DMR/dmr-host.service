@@ -1,0 +1,18 @@
+# /etc/systemd/system/dmr-host.service
+[Unit]
+Description=DMR Service
+After=modem-host.service
+Requires=modem-host.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/DMR
+ExecStart=/home/pi/OpenMT/protocols/DMR/build/dmr_host
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

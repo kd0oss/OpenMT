@@ -1,0 +1,19 @@
+# /etc/systemd/system/modem-host.service
+[Unit]
+Description=MMDVM Modem Host
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT
+ExecStart=/home/pi/OpenMT/modem/build/Modem_Host
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

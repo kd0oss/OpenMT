@@ -1,0 +1,18 @@
+# /etc/systemd/system/m17-host.service
+[Unit]
+Description=M17 Service
+After=modem-host.service
+Requires=modem-host.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/m17
+ExecStart=/home/pi/OpenMT/protocols/m17/build/m17_host
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
