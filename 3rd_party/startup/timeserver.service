@@ -1,0 +1,18 @@
+# /etc/systemd/system/timeserver.service
+[Unit]
+Description=DSTAR Timeserver Service
+After=ircddbgateway.service
+Requires=ircddbgateway.service
+
+[Service]
+Type=forking
+User=root
+WorkingDirectory=/home/pi/ircDDBGateway/TimeServer
+ExecStart=/home/pi/ircDDBGateway/TimeServer/timeserverd -daemon
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

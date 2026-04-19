@@ -1,0 +1,18 @@
+# /etc/systemd/system/ircddbgateway.service
+[Unit]
+Description=IRCDDBGateway Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=forking
+User=root
+WorkingDirectory=/home/pi/ircDDBGateway
+ExecStart=/home/pi/ircDDBGateway/ircDDBGateway/ircddbgatewayd -daemon
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
