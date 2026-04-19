@@ -17,6 +17,7 @@ Description and status:
 - [ ] NXDN gateway for NXDN service. **(TODO)**
 - [x] HTML based Dashboard for status and configuration. **(beta)**
 - [x] SQL database for logging, status and configuration. **(beta)**
+- [ ] Update IRCDDBGateway to use database instead of config file. **(TODO)**
 - [ ] System startup and monitoring using systemd. **(in progress)**
 - [ ] Firmware configure and build via dashboard. **(TODO)**
 - [ ] Monitor multiple modems with one dashboard. **(in progress)**
