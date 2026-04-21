@@ -173,6 +173,6 @@ cd gateway
 # M17 mode should now appear in the Dashboard.
 # If reflectors have be loaded into database you can go to Settings/Mode for link/unlink.
 
-# The only other protocol avaiable at the moment is DSTAR.
+# The only other protocols avaiable at the moment are DSTAR, P25 and DMR.
 # NOTE: DSTAR gateway requires IRCDDBGateway package from G4KLX GitHub.
 # Protocols and gateways can be run concurrently.
