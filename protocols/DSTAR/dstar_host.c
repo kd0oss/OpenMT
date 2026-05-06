@@ -1792,10 +1792,9 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
         bHeaderActive = false;
         bzero(cText, 30);
         memset(cText, 0x20, 29);
-        ptr = 0;
         ucType = 0x00;
         memset(hBuffer, 0x00U, 5);
-        memset(header, 0x00U, DSTAR_HEADER_LENGTH_BYTES);
+  //      memset(header, 0x00U, DSTAR_HEADER_LENGTH_BYTES);
         return 20;
     }
 
@@ -1859,45 +1858,41 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                     hBuffer[2] = a;
                     hBuffer[3] = b;
                     hBuffer[4] = c;
+                    memcpy(header + ptr, hBuffer, 5U);
+                    ptr += 5U;
+                    fprintf(stderr, "SS Header bytes: %d.\n", ptr);
 
-                    if (ptr < 45U && (hBuffer[0U] & DSTAR_SLOW_DATA_TYPE_MASK) == DSTAR_SLOW_DATA_TYPE_HEADER)
+                    if (ptr >= 45 && (hBuffer[0U] & DSTAR_SLOW_DATA_TYPE_MASK) == DSTAR_SLOW_DATA_TYPE_HEADER)
                     {
-                     //   if ((a & 0x0f) == 0x05)
-                        memcpy(header + ptr, hBuffer, 5U);
-                        ptr += 5U;
+                        // Clean up the data
+                        header[0U] &= (DSTAR_INTERRUPTED_MASK | DSTAR_URGENT_MASK | DSTAR_REPEATER_MASK);
+                        header[1U] = 0x00U;
+                        header[2U] = 0x00U;
 
-                        if (ptr >= 45)
+                        for (unsigned int i = 3U; i < 39U; i++)
+                            header[i] &= 0x7FU;
+
+                        // Check the CRC
+                        bool ret = checkCCITT161(header, DSTAR_HEADER_LENGTH_BYTES);
+                        if (!ret)
                         {
-                            // Clean up the data
-                            header[0U] &= (DSTAR_INTERRUPTED_MASK | DSTAR_URGENT_MASK | DSTAR_REPEATER_MASK);
-                            header[1U] = 0x00U;
-                            header[2U] = 0x00U;
-
-                            for (unsigned int i = 3U; i < 39U; i++)
-                                header[i] &= 0x7FU;
-
-                            // Check the CRC
-                            bool ret = checkCCITT161(header, DSTAR_HEADER_LENGTH_BYTES);
-                            if (!ret)
-                            {
-                                fprintf(stderr, "D-Star, invalid slow data header\n");
-                                ptr           = 0;
-                                bHeaderActive = false;
-                                validSSHeader = false;
-                                bFirstSection = false;
-                                return 0;
-                            }
-                            //                        dump((char*)"SS Header", header, DSTAR_HEADER_LENGTH_BYTES);
-                            validSSHeader = true;
-                            memcpy(ssHeader, header, DSTAR_HEADER_LENGTH_BYTES);
-                            bHeaderActive = false;
+                            fprintf(stderr, "D-Star, invalid slow data header\n");
                             ptr           = 0;
-                            iRet          = 1;
+                            bHeaderActive = false;
+                            validSSHeader = false;
+                            bFirstSection = false;
+                            return 0;
                         }
+                        //                        dump((char*)"SS Header", header, DSTAR_HEADER_LENGTH_BYTES);
+                        validSSHeader = true;
+                        memcpy(ssHeader, header, DSTAR_HEADER_LENGTH_BYTES);
+                        bHeaderActive = false;
+                        ptr           = 0;
+                        iRet          = 1;
                     }
                 }
             }
-                break;
+            break;
 
             case 0x30:  // GPS
                 if (decodeGPS(a))
@@ -2437,7 +2432,7 @@ void processEOT(bool isNet)
         saveLastCall(1, modemName, "DSTAR", type, myCall, suffix, urCall, metaText, NULL, gps, false);
         saveHistory(modemName, "DSTAR", type, myCall, suffix, urCall, loss_BER, metaText, duration);
 
-        fprintf(stderr, "Text: %s\n", metaText);
+        fprintf(stderr, "Text: [%s]\n", metaText);
 
         if (!isNet && dstarGWConnected && RingBuffer_freeSpace(&gwTxBuffer) >= 8 && (strcasecmp(rpt2Call, station_rpt2Call) == 0))
         {
