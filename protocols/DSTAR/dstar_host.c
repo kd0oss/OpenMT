@@ -1772,12 +1772,12 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
     static bool bSyncFound;
     static bool bFirstSection;
     static bool bHeaderActive;
-    static int iSection;
+    static uint8_t iSection;
     static unsigned char ucType;
     int iRet = 0;
     static char cText[30];
     static uint8_t header[50];
-    static uint8_t ptr = 0;
+    static uint8_t ptr;
     static uint8_t hBuffer[5];
 
     // Unscramble
@@ -1834,6 +1834,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                 iSection = a & 0x0f;
                 if (iSection >= 4)
                 {
+                    iSection = 0;
                     break;
                 }
                 cText[iSection * 5 + 0] = b & 0x7FU;
@@ -1860,7 +1861,6 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                     hBuffer[4] = c;
                     memcpy(header + ptr, hBuffer, 5U);
                     ptr += 5U;
-                    fprintf(stderr, "SS Header bytes: %d.\n", ptr);
 
                     if (ptr >= 45 && (hBuffer[0U] & DSTAR_SLOW_DATA_TYPE_MASK) == DSTAR_SLOW_DATA_TYPE_HEADER)
                     {
@@ -2315,7 +2315,7 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
         memcpy(urCall, ssHeader + 19, 8);
         memcpy(myCall, ssHeader + 27, 8);
         memcpy(suffix, ssHeader + 35, 4);
-        memcpy(header, ssHeader, 41);
+        memcpy(header + 8, ssHeader, 41);
 
         if (strcasecmp(rpt1Call, "DIRECT") == 0 ||
             strcasecmp(rpt2Call, "DIRECT") == 0 ||
@@ -2329,7 +2329,7 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
     {
         if (RingBuffer_freeSpace(&gwTxBuffer) >= 20 && (strcasecmp(rpt1Call, station_rpt1Call) == 0))
         {
-            if (validHeader && !headerSent && header[0] != 0)
+            if (validHeader && !headerSent && header[8] != 0)
             {
                 uint8_t buf[49];
                 buf[0] = 0x61;
@@ -2337,7 +2337,7 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
                 buf[2] = 0x31;
                 buf[3] = 0x04;
                 memcpy(buf + 4, TYPE_HEADER, 4);
-                memcpy(buf + 8, header, 41);
+                memcpy(buf + 8, header + 8, 41);
 
                 if (dstarGWConnected && RingBuffer_freeSpace(&gwTxBuffer) >= 49 && (strcasecmp(rpt2Call, station_rpt2Call) == 0) && !isNet)
                 {
@@ -2399,7 +2399,7 @@ void processEOT(bool isNet)
 {
     float loss_BER = 0.0f;
 
-    uint8_t buf[8];
+    uint8_t buf[21];
     buf[0] = 0x61;
     buf[1] = 0x00;
     buf[2] = 0x08;
@@ -2448,28 +2448,31 @@ void processEOT(bool isNet)
 
         if ((strcasecmp(rpt1Call, station_rpt1Call) == 0) && modem_duplex && !isNet)
         {
-            delay(300000);
+            delay(100000);
             // Canned EOT sending BER message.
             // ***********************************************************************
             uint8_t buf2[49] = {0x61, 0x00, 0x31, 0x04, 'D', 'S', 'T', 'H'};
-            memcpy(buf2 + 8, header, 41);
+            memcpy(buf2 + 8, header + 8, 41);
             write(sockfd, buf2, 49);
-            delay(18000);
+            delay(22000);
 
             buf2[2] = 0x14;
             buf2[7] = 'D';
             memcpy(buf2 + 8, AMBE_SILENCE, 9);
-            write(sockfd, buf2, 20);
-            delay(18000);
+            slowSpeedDataEncode(metaText, buf2 + 17, 10);
+            //   write(sockfd, buf2, 20);
+         //   delay(18000);
 
             //strcpy(metaText, "Have a nice day.   ");
             bzero(metaText, 23);
-            sprintf(metaText, "Your BER: %2.1f      ", loss_BER);
+            memset(metaText, ' ', 20);
+            sprintf(buf, "Your BER: %2.1f", loss_BER);
+            memcpy(metaText, buf, strlen(buf));
             for (uint8_t i = 0; i < 19; i++)
             {
                 slowSpeedDataEncode(metaText, buf2 + 17, 1);
                 write(sockfd, buf2, 20);
-                delay(18000);
+                delay(22000);
             }
 
             memcpy(buf2 + 4, TYPE_EOT, 4);
