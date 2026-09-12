@@ -152,11 +152,6 @@ pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t stateMutex   = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t txSourceMutex = PTHREAD_MUTEX_INITIALIZER; /* Prevents RF and NET TX overlap */
-
-/* Tracks which source currently owns the transmitter */
-typedef enum { TX_NONE, TX_RF, TX_NET } TxSource;
-TxSource currentTxSource = TX_NONE;
 
 pthread_t modemHostid;
 pthread_t gwHostid;
@@ -391,7 +386,6 @@ void decodeP25(uint8_t* data, bool isNet)
 
             pthread_mutex_lock(&stateMutex);
             txOn = true;
-            currentTxSource = isNet ? TX_NET : TX_RF;
             pthread_mutex_unlock(&stateMutex);
         }
         return;
@@ -419,7 +413,6 @@ void decodeP25(uint8_t* data, bool isNet)
                     write(sockfd, SETMODE, 5);
                     start_time = time(NULL);
                     txOn = true;
-                    currentTxSource = isNet ? TX_NET : TX_RF;
                 }
                 pthread_mutex_unlock(&stateMutex);
 
@@ -492,10 +485,9 @@ void decodeP25(uint8_t* data, bool isNet)
             pthread_mutex_lock(&stateMutex);
             if (txOn)
             {
-                duration        = difftime(time(NULL), start_time);
-                txOn            = false;
-                currentTxSource = TX_NONE;
-                rx_started      = false;
+                duration   = difftime(time(NULL), start_time);
+                txOn       = false;
+                rx_started = false;
             }
             pthread_mutex_unlock(&stateMutex);
 
@@ -953,6 +945,8 @@ void processLdu(q15_t sample)
 
 void setEndPtr(const uint8_t duid)
 {
+    fprintf(stderr, "EOT.\n");
+
     switch (duid)
     {
         case P25_DUID_HDU:
@@ -985,6 +979,7 @@ void processBitNone(bool bit)
     // Fuzzy matching of the data sync bit sequence
     if (countBits64((p25_64BitBuffer & P25_SYNC_BITS_MASK) ^ P25_SYNC_BITS) <= SYNC_BIT_START_ERRS)
     {
+        fprintf(stderr, "First sync.\n");
         for (uint8_t i = 0U; i < P25_SYNC_LENGTH_BYTES; i++)
             p25buffer[i] = P25_SYNC_BYTES[i];
 
@@ -996,6 +991,8 @@ void processBitNone(bool bit)
 
 void processBitHdr(bool bit)
 {
+    fprintf(stderr, "Process header.\n");
+
     p25_64BitBuffer <<= 1;
     if (bit)
         p25_64BitBuffer |= 0x01U;
@@ -1029,10 +1026,7 @@ void processBitHdr(bool bit)
         buf[2] = (p25endPtr / 8U) + 8;
         memcpy(buf + 8, p25buffer, (p25endPtr / 8U));
 
-        pthread_mutex_lock(&txSourceMutex);
-        if (currentTxSource != TX_NET)
-            decodeFrame(buf, (p25endPtr / 8U), false);
-        pthread_mutex_unlock(&txSourceMutex);
+        decodeFrame(buf, (p25endPtr / 8U), false);
 
         p25lostCount = MAX_SYNC_FRAMES;
         p25bufferPtr = 0U;
@@ -1078,10 +1072,7 @@ void processBitLdu(bool bit)
             uint8_t buf[(p25endPtr / 8U) + 8];
             buf[0] = 0x61; buf[1] = 0x00; buf[2] = 0x08; buf[3] = 0x04;
             buf[4] = 'P'; buf[5] = '2'; buf[6] = '5'; buf[7] = 'E';
-            pthread_mutex_lock(&txSourceMutex);
-            if (currentTxSource != TX_NET)
-                decodeFrame(buf, 8U, false);
-            pthread_mutex_unlock(&txSourceMutex);
+            decodeFrame(buf, 8U, false);
             reset();
         }
         else
@@ -1091,10 +1082,7 @@ void processBitLdu(bool bit)
             buf[4] = 'P'; buf[5] = '2'; buf[6] = '5'; buf[7] = 'L';
             buf[2] = (p25endPtr / 8U) + 8;
             memcpy(buf + 8, p25buffer, (p25endPtr / 8U));
-            pthread_mutex_lock(&txSourceMutex);
-            if (currentTxSource != TX_NET)
-                decodeFrame(buf, (p25endPtr / 8U), false);
-            pthread_mutex_unlock(&txSourceMutex);
+            decodeFrame(buf, (p25endPtr / 8U), false);
 
             p25bufferPtr = 0U;
         }
@@ -1107,19 +1095,32 @@ void processBitLdu(bool bit)
     }
 }
 
-void processBits(bool bit)
+void processBits(uint8_t* bytes, uint8_t length)
 {
-    switch (p25state)
+    bool bit;
+
+    for (uint8_t i = 0; i < length; i++)
     {
-        case P25RXS_HDR:
-            processHdr(bit);
-            break;
-        case P25RXS_LDU:
-            processLdu(bit);
-            break;
-        default:
-            processNone(bit);
-            break;
+        for (int8_t j = 7; j >= 0; j--)
+        {
+            if ((bytes[i] & (0x01 << j)) > 0)
+                bit = true;
+            else
+                bit = false;
+
+            switch (p25state)
+            {
+                case P25RXS_HDR:
+                    processBitHdr(bit);
+                    break;
+                case P25RXS_LDU:
+                    processBitLdu(bit);
+                    break;
+                default:
+                    processBitNone(bit);
+                    break;
+            }
+        }
     }
 }
 
@@ -1522,6 +1523,8 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
 {
     uint8_t typeLen = 4;
 
+    fprintf(stderr, "Process frame.\n");
+
     char cType[4] = "RF";
     if (isNet)
         strcpy(cType, "NET");
@@ -1543,10 +1546,9 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
         bool wasOn = txOn && (rf_state == RS_RF_AUDIO);
         if (wasOn)
         {
-            rf_state        = RS_RF_LISTENING;
-            txOn            = false;
-            currentTxSource = TX_NONE;
-            rx_started      = false;
+            rf_state   = RS_RF_LISTENING;
+            txOn       = false;
+            rx_started = false;
         }
         pthread_mutex_unlock(&stateMutex);
 
@@ -1587,7 +1589,6 @@ void *processGatewaySocket(void *arg)
 
     addGateway(modemName, "main", "P25");
     txOn = false;
-    currentTxSource = TX_NONE;
 
     fprintf(stderr, "Gateway connected.\n");
 
@@ -1706,20 +1707,11 @@ void *processGatewaySocket(void *arg)
         }
         else if (memcmp(type, "P25", 3) == 0 && isActiveMode())
         {
-            pthread_mutex_lock(&txSourceMutex);
-            if (currentTxSource == TX_RF)
-            {
-                fprintf(stderr, "NET: P25 frame rejected - RF TX active\n");
-                pthread_mutex_unlock(&txSourceMutex);
-            }
-            else
-            {
-                pthread_mutex_lock(&stateMutex);
-                reflBusy = true;
-                pthread_mutex_unlock(&stateMutex);
-                decodeFrame(buffer, respLen, true);
-                pthread_mutex_unlock(&txSourceMutex);
-            }
+            pthread_mutex_lock(&stateMutex);
+            reflBusy = true;
+            pthread_mutex_unlock(&stateMutex);
+
+            decodeFrame(buffer, respLen, true);
         }
         delay(5);
     }
@@ -1973,21 +1965,11 @@ void* startClient(void *arg)
         }
         else if (memcmp(type, TYPE_BITS, typeLen) == 0 && packetType == PACKET_TYPE_BIT)
         {
-//            processBits(buffer + 8, respLen - 8);
+            processBits(buffer + 8, respLen - 8);
         }
         else if (memcmp(type, TYPE_HEADER, 3) == 0 && packetType == PACKET_TYPE_FRAME)
         {
-            pthread_mutex_lock(&txSourceMutex);
-            if (currentTxSource == TX_NET)
-            {
-                fprintf(stderr, "RF: P25 frame rejected - NET TX active\n");
-                pthread_mutex_unlock(&txSourceMutex);
-            }
-            else
-            {
-                decodeFrame(buffer, respLen, false);
-                pthread_mutex_unlock(&txSourceMutex);
-            }
+            decodeFrame(buffer, respLen, false);
         }
     }
 

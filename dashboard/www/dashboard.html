@@ -1353,11 +1353,13 @@ async function fetchStatus()
     {
       if (document.getElementById(currentMode+'_stat'))
         document.getElementById(currentMode+'_stat').innerHTML = "TX";
+      document.getElementById('windowTitle').innerHTML = "RX: " + srcCall;
     }
     else
     {
       if (document.getElementById(currentMode+'_stat') && mode.includes(currentMode))
-        document.getElementById(currentMode+'_stat').innerHTML = "RX";
+        document.getElementById(currentMode+'_stat').innerHTML = "TX";
+      document.getElementById('windowTitle').innerHTML = dashboardTitle
     }
 
     setTimeout(fetchStatus, 1000);
