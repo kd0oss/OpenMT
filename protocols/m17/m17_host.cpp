@@ -92,7 +92,7 @@ uint8_t        TX_RRC_FILTER_STATE_LEN     = 16;
 uint8_t        TX_SYMBOL_LENGTH            = 5;
 char           MODE_NAME[11]               = "M17";
 char           MODEM_TYPE[6]               = "4FSK";
-bool           USE_DC_FILTER               = true;
+bool           USE_DC_FILTER               = false;
 bool           USE_LP_FILTER               = false;
 //================================================================================================================================
 const q15_t SCALING_FACTOR = 18750;      // Q15(0.55)
@@ -220,7 +220,7 @@ q15_t       m17threshold[16U];
 q15_t       m17thresholdVal;
 uint8_t     m17averagePtr;
 uint8_t     m17outBuffer[M17_FRAME_LENGTH_BYTES + 3U];
-uint8_t*    m17outBufPtr;
+uint8_t*    m17outBufPtr = m17outBuffer + 1;
 uint16_t    m17txDelay;  // In bytes
 
 //================================================================================================================================
@@ -571,7 +571,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
 
             if (ftype == M17FrameType::LINK_SETUP && validFrame)
             {
-                if (modem_duplex || isNet)
+                 if (modem_duplex || isNet)
                 {
                     uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04, 'M', '1', '7', 'L'};
                     memcpy(buf + 8, buffer, length);
@@ -604,7 +604,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                 }
                 M17StreamFrame sf = decoder.getStreamFrame();
                 uint16_t diff = (sf.getFrameNumber() & 0x7fff) - (lastFrameNum & 0x7fff);
-                if ((sf.getFrameNumber() && 0x8000) != 0x8000)
+                if ((sf.getFrameNumber() & 0x8000) != 0x8000)
                 {
                     if (diff > 2 || sf.getFrameNumber() == 0)
                     {
@@ -616,6 +616,9 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                 else
                 {
                     fprintf(stderr, "Last frame detected.\n");
+              //      txOn = false;
+             //       currentTxSource = TX_NONE;
+             //       return;
                 }
                 lastFrameNum = sf.getFrameNumber();
                 frameCnt++;
@@ -1313,8 +1316,13 @@ void writeSamples(uint8_t c, bool isEOT)
 
     arm_fir_interpolate_q15(&m17modFilter, inBuffer, outBuffer, 4U);
 
+    bytes[5] = 'A';
+    bytes[6] = 'M';
+    bytes[7] = 'P';
+
     for (uint8_t i = 0U; i < M17_RADIO_SYMBOL_LENGTH * 4U; i++)
     {
+        outBuffer[i] *= 1.0f;
         bytes[bytePos++] = (outBuffer[i] & 0x00ff);
         bytes[bytePos++] = (outBuffer[i] & 0xff00) >> 8;
         if (bytePos == 200)
@@ -1325,8 +1333,11 @@ void writeSamples(uint8_t c, bool isEOT)
         }
     }
 
-    if (bytePos > 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
+    if (bytePos == 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
     {
+        bytes[5] = 'E';
+        bytes[6] = 'O';
+        bytes[7] = 'T';
         memset(bytes+bytePos, 0, 200 - bytePos);
         write(sockfd, bytes, 200);
         bytePos = 8;
@@ -1358,7 +1369,7 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
             symBuffer[symLen++] = data[i];
 
         symPtr = 0U;
-        fprintf(stderr, "Stream\n");
+//        fprintf(stderr, "Stream\n");
     }
 
     if (type == M17_PACKET && symLen == 0U)
@@ -2028,14 +2039,19 @@ void* startClient(void *arg)
         {
             packetType = PACKET_TYPE_SAMP;
             q15_t smp[2];
-            q15_t in[2];
+            int16_t in[2];
             for (uint16_t i = 8; i < respLen; i = i + 4)
             {
                 memcpy(in, buffer + i, 4);
+                q31_t res1 = in[0] * (128 * 128);
+                in[0] = int16_t(__SSAT((res1 >> 15), 16));
+                res1 = in[1] * (128 * 128);
+                in[1] = int16_t(__SSAT((res1 >> 15), 16));
+
                 if (USE_DC_FILTER)
                 {
                     q31_t q31Samples[2];
-                    arm_q15_to_q31(in, q31Samples, 2);
+                    arm_q15_to_q31((q15_t*)in, q31Samples, 2);
 
                     q31_t dcValues[2];
                     arm_biquad_cascade_df1_q31(&dcFilter, q31Samples, dcValues, 2);
@@ -2050,12 +2066,12 @@ void* startClient(void *arg)
 
                     q15_t dcSamples[2];
                     for (uint8_t i = 0U; i < 2; i++)
-                        dcSamples[i] = in[i] - offset;
+                        dcSamples[i] = (q15_t)in[i] - offset;
 
                     arm_fir_fast_q15(&m17rrc05Filter, dcSamples, smp, 2);
                 }
                 else
-                    arm_fir_fast_q15(&m17rrc05Filter, in, smp, 2);
+                    arm_fir_fast_q15(&m17rrc05Filter, (q15_t*)in, smp, 2);
 
                 samples(smp, 2);
             }

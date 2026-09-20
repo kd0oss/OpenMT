@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2025 by Rick KD0OSS                                     *
+ *   Copyright (C) 2025,2026 by Rick KD0OSS                                *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -43,7 +43,7 @@
 #include "RingBuffer.h"
 #include "mmdvm.h"
 
-#define VERSION "2025-10-12"
+#define VERSION "2026-09-13"
 #define MAX_LINE_LENGTH 256
 #define BUFFER_LENGTH 5000
 #define MAX_CLIENT_CONNECTIONS 14
@@ -70,10 +70,12 @@ const char* TYPE_SHORTLC_DMR  = "DMLC";
 const char* TYPE_START_DMR    = "DMST";
 const char* TYPE_ABORT_DMR    = "DMAB";
 
-const char* TYPE_TO_MODEM = "2MOD";
-const char* TYPE_COMMAND  = "COMM";
-const char* TYPE_SAMPLE   = "SAMP";
-const char* TYPE_BITS     = "BITS";
+const char* TYPE_TO_MODEM     = "2MOD";
+const char* TYPE_COMMAND      = "COMM";
+const char* TYPE_SAMPLE       = "SAMP";
+const char* TYPE_SAMPLE_EOT   = "SEOT";
+const char* TYPE_BITS         = "BITS";
+const char* TYPE_BITS_EOT     = "BEOT";
 
 #define NET_ACK 0xF0
 #define NET_NACK 0xF1
@@ -87,6 +89,8 @@ const char* TYPE_BITS     = "BITS";
 #define OPENMT_BIT_DATA 0x60U
 #define OPENMT_SAMP_DATA 0x70U
 #define OPENMT_TO_MODEM 0x80U
+#define OPENMT_SAMP_EOT 0x90U
+#define OPENMT_BIT_EOT 0xA0U
 #define OPENMT_ACK 0xE0U
 #define OPENMT_NAK 0xF0U
 
@@ -471,7 +475,7 @@ void setMode(const uint8_t mode)
         RingBuffer_addData(&modemCommandBuffer, buffer, 4);
         pthread_mutex_unlock(&modemComBufMutex);
     }
-    else if (strcasecmp(modem, "OPENMTHS") == 0)
+    else if (strcasecmp(modem, "OPENMTHS") == 0 || strcasecmp(modem, "OPENMTSX") == 0)
     {
         buffer[0] = 0x61;
         buffer[1] = 0x03;
@@ -837,7 +841,7 @@ void* modeTxThread(void* arg)
 {
     while (atomic_load(&running))
     {
-        delay(100);
+        delay(10);
 
         if (isTimerTriggered("status"))
         {
@@ -1052,7 +1056,7 @@ void* modemTxThread(void* arg)
 {
     while (atomic_load(&running))
     {
-        delay(1000);
+        delay(100);
 
         if (RingBuffer_dataSize(&modemTxBuffer) >= 3)
         {
@@ -1068,7 +1072,10 @@ void* modemTxThread(void* arg)
                 continue;
             }
             if (!RingBuffer_peek(&modemTxBuffer, buf, 3))
+            {
                 fprintf(stderr, "peek failed\n");
+                continue;
+            }
             uint8_t len = buf[1];
             if (len < 1)
             {
@@ -1280,7 +1287,7 @@ void* processClientSocket(void* arg)
             }
             else
             {
-                if (strcasecmp(modem, "openmths") == 0)
+                if (strcasecmp(modem, "openmths") == 0 || strcasecmp(modem, "openmtsx") == 0)
                 {
                     buffer[0] = 0x61;
                     buffer[1] = 0x3e;
@@ -1347,8 +1354,12 @@ void* processClientSocket(void* arg)
             type = NET_NACK;
         else if (memcmp(buffer + 4, TYPE_SAMPLE, typeLen) == 0)
             type = OPENMT_SAMP_DATA;
+        else if (memcmp(buffer + 4, TYPE_SAMPLE_EOT, typeLen) == 0)
+            type = OPENMT_SAMP_EOT;
         else if (memcmp(buffer + 4, TYPE_BITS, typeLen) == 0)
             type = OPENMT_BIT_DATA;
+        else if (memcmp(buffer + 4, TYPE_BITS_EOT, typeLen) == 0)
+            type = OPENMT_BIT_EOT;
         else if (memcmp(buffer + 4, TYPE_TO_MODEM, typeLen) == 0)
             type = OPENMT_TO_MODEM;
 
@@ -1468,6 +1479,22 @@ void* processClientSocket(void* arg)
                 {
                     RingBuffer_addData(&rxModeBuffer, buf, 4);
                     RingBuffer_addData(&rxModeBuffer, buffer + 8, respLen - 8);
+                }
+                else
+                {
+                    fprintf(stderr, "rxModeBuffer out of space. [%d]\n", RingBuffer_freeSpace(&rxModeBuffer));
+                }
+                pthread_mutex_unlock(&rxBufModeMutex);
+            }
+            break;
+
+            case OPENMT_SAMP_EOT:
+            {
+                uint8_t buf[3] = {0x61, 0x03, 0x0};
+                pthread_mutex_lock(&rxBufModeMutex);
+                if (RingBuffer_freeSpace(&rxModeBuffer) >= 0x03)
+                {
+                    RingBuffer_addData(&rxModeBuffer, buf, 3);
                 }
                 else
                 {
@@ -1656,7 +1683,7 @@ void* processClientSocket(void* arg)
     pthread_mutex_lock(&shutDownMutex);
     delGateway(modemName, "main", mode[conn_id].name);
     delMode(modemName, "main", mode[conn_id].name);
-    if (strcasecmp(modem, "openmths") == 0)
+    if (strcasecmp(modem, "openmths") == 0 || strcasecmp(modem, "openmtsx") == 0)
     {
         uint8_t buf[3] = {0x61, 0x03, (uint8_t)(OPENMT_DEL_MODE | (conn_id & 0x0f))};
         pthread_mutex_lock(&modemComBufMutex);
@@ -2548,6 +2575,86 @@ int main(int argc, char** argv)
         buf[2] = OPENMT_SET_CONFIG;
         buf[3] = 0x81;
         write(serialModemFd, buf, 4);
+        char tmp[10];
+        readHostConfig(modemName, "config", "mode", tmp);
+        if (strcasecmp(tmp, "duplex") == 0)
+            modem_duplex = true;
+        else
+            modem_duplex = false;
+        readHostConfig(modemName, "config", "rxLevel", tmp);
+        modem_rxLevel = atoi(tmp);
+    }
+    else if (strcasecmp(modem, "openmtsx") == 0)
+    {
+        /* Richer SET_CONFIG payload for the sx1255-openmt-bridge project
+         * specifically: plain SX1255 hardware parameters (frequency,
+         * gains, PLL bandwidth, RX/TX invert), overriding that bridge's
+         * own command-line defaults, rather than the single-byte
+         * "openmths" handshake above. Needs these additional keys under
+         * this modem's "config" section: rxFrequency, txFrequency,
+         * rxInvert, txInvert (already used by other modem types, see
+         * the "openmt" branch below), plus rxLnaGain, rxPgaGain,
+         * txMixerGain, txDacGain, rxPllBw, txPllBw (new, SX1255-
+         * specific). See sx1255-openmt-bridge's own README for the
+         * exact payload format and valid ranges for each field. */
+        char tmp[16];
+        uint32_t rx_freq_hz, tx_freq_hz;
+        uint8_t lna_gain_db, pga_gain_db;
+        int8_t mixer_gain_x2, dac_gain_db;
+        uint16_t rx_pll_bw_khz, tx_pll_bw_khz;
+        uint8_t invert_flags = 0;
+        uint8_t buf[21];
+
+        readHostConfig(modemName, "config", "rxFrequency", tmp);
+        rx_freq_hz = (uint32_t)strtoul(tmp, NULL, 10);
+        readHostConfig(modemName, "config", "txFrequency", tmp);
+        tx_freq_hz = (uint32_t)strtoul(tmp, NULL, 10);
+        readHostConfig(modemName, "config", "rxLnaGain", tmp);
+        lna_gain_db = (uint8_t)atoi(tmp);
+        readHostConfig(modemName, "config", "rxPgaGain", tmp);
+        pga_gain_db = (uint8_t)atoi(tmp);
+        readHostConfig(modemName, "config", "txMixerGain", tmp);
+        mixer_gain_x2 = (int8_t)(atof(tmp) * 2.0); /* 2dB steps */
+        readHostConfig(modemName, "config", "txDacGain", tmp);
+        dac_gain_db = (int8_t)atoi(tmp);
+        readHostConfig(modemName, "config", "rxPllBw", tmp);
+        rx_pll_bw_khz = (uint16_t)atoi(tmp);
+        readHostConfig(modemName, "config", "txPllBw", tmp);
+        tx_pll_bw_khz = (uint16_t)atoi(tmp);
+        readHostConfig(modemName, "config", "rxInvert", tmp);
+        if (strcasecmp(tmp, "true") == 0)
+            invert_flags |= 0x01U;
+        readHostConfig(modemName, "config", "txInvert", tmp);
+        if (strcasecmp(tmp, "true") == 0)
+            invert_flags |= 0x02U;
+        readHostConfig(modemName, "config", "mode", tmp);
+        if (strcasecmp(tmp, "duplex") == 0)
+            modem_duplex = true;
+        else
+            modem_duplex = false;
+
+        buf[0] = 0x61;
+        buf[1] = 21; /* total frame length, including 0x61 itself */
+        buf[2] = OPENMT_SET_CONFIG;
+        buf[3] = 1; /* payload version */
+        buf[4] = (uint8_t)(rx_freq_hz >> 24);
+        buf[5] = (uint8_t)(rx_freq_hz >> 16);
+        buf[6] = (uint8_t)(rx_freq_hz >> 8);
+        buf[7] = (uint8_t)rx_freq_hz;
+        buf[8] = (uint8_t)(tx_freq_hz >> 24);
+        buf[9] = (uint8_t)(tx_freq_hz >> 16);
+        buf[10] = (uint8_t)(tx_freq_hz >> 8);
+        buf[11] = (uint8_t)tx_freq_hz;
+        buf[12] = lna_gain_db;
+        buf[13] = pga_gain_db;
+        buf[14] = (uint8_t)mixer_gain_x2;
+        buf[15] = (uint8_t)dac_gain_db;
+        buf[16] = (uint8_t)(rx_pll_bw_khz >> 8);
+        buf[17] = (uint8_t)rx_pll_bw_khz;
+        buf[18] = (uint8_t)(tx_pll_bw_khz >> 8);
+        buf[19] = (uint8_t)tx_pll_bw_khz;
+        buf[20] = invert_flags;
+        write(serialModemFd, buf, 21);
     }
     else if (strcasecmp(modem, "openmt") == 0)
     {
