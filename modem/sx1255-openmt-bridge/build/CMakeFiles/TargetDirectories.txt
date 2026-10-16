@@ -1,0 +1,3 @@
+/home/pi/OpenMT/modem/sx1255-openmt-bridge/build/CMakeFiles/sx1255_bridge.dir
+/home/pi/OpenMT/modem/sx1255-openmt-bridge/build/CMakeFiles/edit_cache.dir
+/home/pi/OpenMT/modem/sx1255-openmt-bridge/build/CMakeFiles/rebuild_cache.dir
