@@ -1,5 +1,5 @@
 /***************************************************************************
- *   Copyright (C) 2025 by Rick KD0OSS                                     *
+ *   Copyright (C) 2025,2026 by Rick KD0OSS                                *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -47,11 +47,23 @@
 #include <tools.h>
 #include <unistd.h>
 #include "dstar_gps.h"
+#include "dstar_fec.h"
+#include <netinet/tcp.h>
+/* Disable Nagle: these programs talk over loopback TCP in small frames
+ * (200 bytes of samples, 3 byte requests).  With Nagle on, a small write
+ * waits for the ACK of the previous one, and the peer delays that ACK for
+ * ~40 ms, so the stream arrives in bursts with 40 ms gaps. */
+static void setNoDelay(int fd)
+{
+    int one = 1;
+
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+}
 
 /* External modemCommandBuffer from Modem_Host */
 extern RingBuffer modemCommandBuffer;
 
-#define VERSION "2025-09-13"
+#define VERSION "2026-09-26"
 #define BUFFER_SIZE 500
 
 q31_t DC_FILTER[]               = {3367972, 0, 3367972, 0, 2140747704, 0};  // {b0, 0, b1, b2, -a1, -a2}
@@ -609,6 +621,7 @@ bool txOn                = false;
 bool validSSHeader       = false;
 bool slowSpeedUpdate     = false;
 bool validFrame          = false;
+uint32_t netHeaderRepeats = 0;  /* repeated net headers ignored this stream */
 bool validHeader         = false;
 bool headerSent          = false;
 bool debugM              = false;
@@ -620,6 +633,7 @@ uint8_t duration         = 0;
 uint8_t dstar_space      = 0;
 uint16_t streamId        = 0;
 uint16_t modeHang        = 30000;
+uint8_t rxLevel          = 50;
 uint8_t txLevel          = 50;
 uint8_t rfPower          = 128;
 uint8_t header[49]       = "";
@@ -627,6 +641,56 @@ time_t start_time;
 char modem_rxFrequency[11] = "435000000";
 char modem_txFrequency[11] = "435000000";
 uint32_t syncErrors        = 0;
+
+/* --- AGC (automatic gain control) on RX samples -----------------------
+ * rxLevel above is a fixed, manually-set preamp; it cannot track changes
+ * in received signal strength (fading, a different station's audio level,
+ * temperature drift in the front end, etc.) without a restart. This AGC
+ * trims the *filtered* RX sample stream in real time toward a target peak
+ * so the sync correlators (correlateFrameSync()/correlateDataSync()) see
+ * a consistent amplitude without clipping. See agcProcess(). */
+bool USE_AGC          = true;
+q31_t AGC_TARGET_PEAK = 24000;  // target peak sample magnitude, q15 counts (~73% of full scale)
+q31_t AGC_MIN_GAIN_Q8 = 16;     // gain floor,   Q8 fixed point (16  = 0.0625x)
+q31_t AGC_MAX_GAIN_Q8 = 4096;   // gain ceiling, Q8 fixed point (4096 = 16x)
+q31_t agcGainQ8       = 256;    // current gain, Q8 fixed point (256 = 1.0x, unity at startup)
+q31_t agcEnvelope     = 0;      // smoothed peak envelope, q15 counts
+
+#define AGC_ATTACK_Q15    6554U // ~0.20/sample: envelope rises quickly onto a bigger peak (avoids clipping)
+#define AGC_DECAY_Q15       33U // ~0.001/sample: envelope falls slowly (avoids pumping between symbol edges)
+#define AGC_GAIN_SLEW_SHIFT  6U // gain itself is smoothed over ~2^6 updates so it can't step abruptly
+#define AGC_MIN_ENVELOPE   200U // below this, treat as noise floor: hold gain rather than let it blow up
+
+/* --- Minimum absolute sync-correlation threshold -----------------------
+ * correlateFrameSync()/correlateDataSync() only ever compared a candidate
+ * correlation against the best one seen so far *this window*
+ * (maxFrameCorr/maxDataCorr, both reset to 0 every window) -- there was no
+ * floor on how strong that "best" actually had to be. On a noisy/marginal
+ * channel, a weak correlation produced by nothing but noise can still be
+ * the best of a weak field and gets accepted as a real sync. Every accept
+ * of correlateDataSync() also resets frameCount to 0 (see the function),
+ * so this was firing far more often than just "lost signal, re-acquire" --
+ * it was corrupting frame-position tracking on every falsely-accepted
+ * "win", which is consistent with chance-level Sync BER (~12/24) and
+ * "invalid slow data header" spam even on an otherwise-working channel.
+ *
+ * Each sync pattern is DSTAR_FRAME_SYNC_LENGTH_SYMBOLS /
+ * DSTAR_DATA_SYNC_LENGTH_SYMBOLS (24) symbols long, so a perfect match at
+ * the AGC's target amplitude correlates to ~24 * AGC_TARGET_PEAK. The
+ * *_SYNC_MIN_PCT knobs require a candidate to reach that percentage of the
+ * ideal correlation before it can win, on top of remaining the best
+ * candidate this window. Set either to 0 to fully restore the old
+ * (no-floor) behavior. */
+q31_t FRAME_SYNC_MIN_PCT = 10;  // 0-100, minimum % of ideal correlation required to accept a frame sync
+q31_t DATA_SYNC_MIN_PCT  = 10;  // 0-100, minimum % of ideal correlation required to accept a data sync
+
+/* 1 = also write the FEC-corrected AMBE bits into the relayed frame (what
+ * MMDVMHost does: cleaner audio to the radio/network).  Frames with more
+ * errors than DSTAR_FEC_MAX_ERRORS (dstar_fec.h) are relayed unchanged.
+ * 0 = only count. */
+#ifndef DSTAR_FEC_REGENERATE
+#define DSTAR_FEC_REGENERATE 1
+#endif
 
 // BER tracking variables
 uint32_t totalBitsDecoded = 0;
@@ -820,6 +884,46 @@ void reset()
     validSSHeader = false;
 }
 
+/* Peak-following AGC applied to the fully-filtered RX sample stream (the
+ * same samples that feed the sync correlators and the bit slicer). A fast
+ * attack lets the envelope jump up onto a stronger signal immediately, so
+ * a sudden loud station can't clip; a slow decay keeps the envelope from
+ * chasing the sample-to-sample swings of the FSK waveform itself, which
+ * would otherwise fight the very correlation it's meant to help. The gain
+ * derived from the envelope is itself smoothed (AGC_GAIN_SLEW_SHIFT) so it
+ * settles rather than stepping. Below AGC_MIN_ENVELOPE (silence/noise
+ * floor) the gain is held at its last value instead of being driven up
+ * toward AGC_MAX_GAIN_Q8, which would otherwise slam the very next real
+ * symbol into saturation.
+ */
+q15_t agcProcess(q15_t sample)
+{
+    if (!USE_AGC)
+        return sample;
+
+    int32_t absVal = (sample < 0) ? -(int32_t)sample : (int32_t)sample;
+
+    if (absVal > agcEnvelope)
+        agcEnvelope += ((absVal - agcEnvelope) * (int32_t)AGC_ATTACK_Q15) >> 15;
+    else
+        agcEnvelope += ((absVal - agcEnvelope) * (int32_t)AGC_DECAY_Q15) >> 15;
+
+    if (agcEnvelope > (int32_t)AGC_MIN_ENVELOPE)
+    {
+        int32_t desiredGainQ8 = (AGC_TARGET_PEAK * 256) / agcEnvelope;
+
+        if (desiredGainQ8 < AGC_MIN_GAIN_Q8)
+            desiredGainQ8 = AGC_MIN_GAIN_Q8;
+        else if (desiredGainQ8 > AGC_MAX_GAIN_Q8)
+            desiredGainQ8 = AGC_MAX_GAIN_Q8;
+
+        agcGainQ8 += (desiredGainQ8 - agcGainQ8) >> AGC_GAIN_SLEW_SHIFT;
+    }
+
+    q31_t scaled = ((q31_t)sample * agcGainQ8) >> 8;
+    return (q15_t)__SSAT(scaled, 16);
+}
+
 uint32_t calcRawBERFromSync(const uint8_t *rxBits)
 {
     uint32_t errors = 0;
@@ -830,9 +934,8 @@ uint32_t calcRawBERFromSync(const uint8_t *rxBits)
         errors += __builtin_popcount(diff);
     }
 
-    totalBitErrors   += errors;
-    totalBitsDecoded += 24U;
-
+    /* Diagnostic only: 24 bits every 21 frames is too few samples to be a
+     * useful BER, so this no longer feeds the call BER (see dstarFecErrors). */
     return errors;
 }
 
@@ -1095,8 +1198,7 @@ void decodeBitData(bool bit)
     // Fuzzy matching of the end frame sequences
     if (countBits64((bitBuffer[0] & END_SYNC_MASK) ^ END_SYNC_DATA) <= END_SYNC_ERRS)
     {
-    //    serial.writeDStarEOT();
-    //    fprintf(stderr, "EOT dectected.\n");
+        fprintf(stderr, "DSTAR RX end: terminator detected\n");
         pthread_mutex_lock(&txSourceMutex);
         if (currentTxSource != TX_NET)
             processEOT(false);
@@ -1139,7 +1241,7 @@ void decodeBitData(bool bit)
     // We've not seen a data sync for too long, signal RXLOST and change to RX_NONE
     if (dataBits == 0U)
     {
-    //    fprintf(stderr, "Signal lost.\n");
+        fprintf(stderr, "DSTAR RX end: no terminator, data sync lost (timeout)\n");
         pthread_mutex_lock(&txSourceMutex);
         if (currentTxSource != TX_NET)
             processEOT(false);
@@ -1198,6 +1300,10 @@ void writeSamples(uint8_t c, bool isEOT)
 
     arm_fir_interpolate_q15(&txModFilter, inBuffer, outBuffer, 8U);
 
+    bytes[5] = 'A';
+    bytes[6] = 'M';
+    bytes[7] = 'P';
+
     for (uint16_t i = 0U; i < DSTAR_RADIO_SYMBOL_LENGTH * 8U; i++)
     {
         bytes[bytePos++] = (outBuffer[i] & 0x00ff);
@@ -1206,12 +1312,15 @@ void writeSamples(uint8_t c, bool isEOT)
         {
             write(sockfd, bytes, 200);
             bytePos = 8;
-            delay(650);
+  //          delay(100);
         }
     }
 
-    if (bytePos > 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
+    if (bytePos >= 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
     {
+        bytes[5] = 'E';
+        bytes[6] = 'O';
+        bytes[7] = 'T';
         memset(bytes+bytePos, 0, 200 - bytePos);
         write(sockfd, bytes, 200);
         bytePos = 8;
@@ -1276,7 +1385,6 @@ void processNone(q15_t sample)
     ret = correlateDataSync();
     if (ret)
     {
-        //    io.setDecode(true);
         rxState = DSRXS_DATA;
     }
 }
@@ -1338,6 +1446,7 @@ void decodeData()
     // Fuzzy matching of the end frame sequences
     if (countBits64((bitBuffer[bitPtr] & DSTAR_END_SYNC_MASK) ^ DSTAR_END_SYNC_DATA) <= END_SYNC_ERRS)
     {
+        fprintf(stderr, "DSTAR RX end: terminator detected (frameCount %u)\n", frameCount);
         pthread_mutex_lock(&txSourceMutex);
         if (currentTxSource != TX_NET)
             processEOT(false);
@@ -1365,6 +1474,7 @@ void decodeData()
     // We've not seen a data sync for too long, signal RXLOST and change to RX_NONE
     if (frameCount >= MAX_FRAMES)
     {
+        fprintf(stderr, "DSTAR RX end: no terminator, data sync lost (timeout)\n");
         pthread_mutex_lock(&txSourceMutex);
         if (currentTxSource != TX_NET)
             processEOT(false);
@@ -1418,7 +1528,9 @@ bool correlateFrameSync()
                 ptr -= DSTAR_DATA_LENGTH_SAMPLES;
         }
 
-        if (corr > maxFrameCorr)
+        q31_t minFrameCorr = ((q31_t)DSTAR_FRAME_SYNC_LENGTH_SYMBOLS * AGC_TARGET_PEAK * FRAME_SYNC_MIN_PCT) / 100;
+
+        if (corr > maxFrameCorr && corr >= minFrameCorr)
         {
             maxFrameCorr = corr;
             headerPtr    = 0U;
@@ -1456,7 +1568,9 @@ bool correlateDataSync()
                 ptr -= DSTAR_DATA_LENGTH_SAMPLES;
         }
 
-        if (corr > maxDataCorr)
+        q31_t minDataCorr = ((q31_t)DSTAR_DATA_SYNC_LENGTH_SYMBOLS * AGC_TARGET_PEAK * DATA_SYNC_MIN_PCT) / 100;
+
+        if (corr > maxDataCorr && corr >= minDataCorr)
         {
             maxDataCorr = corr;
             frameCount  = 0U;
@@ -1514,12 +1628,10 @@ void acs(int* metric)
     if (m1 < m2)
     {
         pathMemory0[j] &= BIT_MASK_TABLE0[k];
-        if (metric[4U] != 0) totalBitErrors++;  // Error detected
     }
     else
     {
         pathMemory0[j] |= BIT_MASK_TABLE1[k];
-        if (metric[0U] != 0) totalBitErrors++;  // Error detected
     }
 
     // Pres. state = S1, Prev. state = S0 & S2
@@ -1529,12 +1641,10 @@ void acs(int* metric)
     if (m1 < m2)
     {
         pathMemory1[j] &= BIT_MASK_TABLE0[k];
-        if (metric[5U] != 0) totalBitErrors++;
     }
     else
     {
         pathMemory1[j] |= BIT_MASK_TABLE1[k];
-        if (metric[1U] != 0) totalBitErrors++;
     }
 
     // Pres. state = S2, Prev. state = S2 & S3
@@ -1544,12 +1654,10 @@ void acs(int* metric)
     if (m1 < m2)
     {
         pathMemory2[j] &= BIT_MASK_TABLE0[k];
-        if (metric[6U] != 0) totalBitErrors++;
     }
     else
     {
         pathMemory2[j] |= BIT_MASK_TABLE1[k];
-        if (metric[2U] != 0) totalBitErrors++;
     }
 
     // Pres. state = S3, Prev. state = S1 & S3
@@ -1559,18 +1667,15 @@ void acs(int* metric)
     if (m1 < m2)
     {
         pathMemory3[j] &= BIT_MASK_TABLE0[k];
-        if (metric[7U] != 0) totalBitErrors++;
     }
     else
     {
         pathMemory3[j] |= BIT_MASK_TABLE1[k];
-        if (metric[3U] != 0) totalBitErrors++;
     }
 
     for (unsigned int i = 0U; i < 4U; i++) pathMetric[i] = tempMetric[i];
 
     mar++;
-    totalBitsDecoded += 2;  // We decode 2 bits per call
 }
 
 void viterbiDecode(int* data)
@@ -1644,6 +1749,7 @@ bool checksum(const uint8_t* header)
         uint16_t crc16;
         uint8_t crc8[2U];
     } crc;
+
     crc.crc16 = 0xFFFFU;
     for (uint8_t i = 0U; i < (DSTAR_HEADER_LENGTH_BYTES - 2U); i++)
         crc.crc16 = ((uint16_t)(crc.crc8[1U])) ^ CCITT16_TABLE[crc.crc8[0U] ^ header[i]];
@@ -1859,6 +1965,13 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                     hBuffer[2] = a;
                     hBuffer[3] = b;
                     hBuffer[4] = c;
+                    if (ptr > (uint8_t)(sizeof(header) - 5U))
+                    {
+                        ptr           = 0;
+                        bHeaderActive = false;
+                        validSSHeader = false;
+                        break;
+                    }
                     memcpy(header + ptr, hBuffer, 5U);
                     ptr += 5U;
 
@@ -1880,15 +1993,18 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                             ptr           = 0;
                             bHeaderActive = false;
                             validSSHeader = false;
-                            bFirstSection = false;
-                            return 0;
+                      //      bFirstSection = false;
+                     //       return 0;
                         }
+                        else
+                        {
                         //                        dump((char*)"SS Header", header, DSTAR_HEADER_LENGTH_BYTES);
                         validSSHeader = true;
                         memcpy(ssHeader, header, DSTAR_HEADER_LENGTH_BYTES);
                         bHeaderActive = false;
                         ptr           = 0;
                         iRet          = 1;
+                        }
                     }
                 }
             }
@@ -2160,14 +2276,23 @@ void* timerThread(void* arg)
 void processHeader(uint8_t* data, uint8_t length, bool isNet)
 {
     uint8_t buf[49];
+
+    if (length > DSTAR_HEADER_LENGTH_BYTES)
+    {
+        length = DSTAR_HEADER_LENGTH_BYTES;
+    }
+
     buf[0] = 0x61;
     buf[1] = 0x00;
     buf[2] = 0x31;
     buf[3] = 0x04;
     memcpy(buf + 4, TYPE_HEADER, 4);
     memcpy(buf + 8, data, length);
+    /* header[] holds the 41-byte header at offset 8 (after the 8-byte
+     * packet prefix), which is how the SS-header path and the canned
+     * BER message in processEOT() read it. */
     memset(header, 0x00, 49);
-    memcpy(header, data, length);
+    memcpy(header + 8, data, length);
 
     bzero(myCall, 9);
     bzero(urCall, 9);
@@ -2253,12 +2378,24 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
     memcpy(buffer + 4, TYPE_DATA, 4);
     memcpy(buffer + 8, data, length);
 
+    /* BER the way MMDVMHost does it: count the bit errors the AMBE FEC finds
+     * in the 48 protected bits of every voice frame (about 50 samples a
+     * second), instead of comparing 24 sync bits every 21 frames.  Frames
+     * relayed from the network were never on the air here, so skip those. */
+    if (!isNet && length >= 9U)
+    {
+        unsigned int fecErrors = dstarFecErrors(buffer + 8, DSTAR_FEC_REGENERATE != 0);
+
+        totalBitErrors   += fecErrors;
+        totalBitsDecoded += DSTAR_FEC_BITS_PER_FRAME;
+        if (debugM && fecErrors)
+            fprintf(stderr, "AMBE FEC: %u errors in frame\n", fecErrors);
+    }
+
     if ((frameCount % 21U) == 0 && genSync)
     {
         if (frameCount == 0U)
         {
-            validFrame  = true;
-            txOn        = true;
             currentTxSource = isNet ? TX_NET : TX_RF;
             memcpy(buffer + 17, DSTAR_DATA_SYNC_BYTES + 9, 3);
         }
@@ -2267,8 +2404,6 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
             /* Measure raw BER against the known sync pattern.
              * buffer + 17 holds the 3 received sync bytes (24 bits). */
             syncErrors = calcRawBERFromSync(buffer + 17);
-            totalBitErrors += syncErrors;
-            totalBitsDecoded += 24;
             if (debugM)
                 fprintf(stderr, "Sync BER: %u/24 errors\n", syncErrors);
         }
@@ -2283,8 +2418,6 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
         /* Measure raw BER against the known sync pattern.
          * buffer + 17 holds the 3 received sync bytes (24 bits). */
         syncErrors = calcRawBERFromSync(buffer + 17);
-        totalBitErrors += syncErrors;
-        totalBitsDecoded += 24;
         if (debugM)
             fprintf(stderr, "Sync BER: %u/24 errors\n", syncErrors);
         frameCount++;
@@ -2345,7 +2478,6 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
                     RingBuffer_addData(&gwTxBuffer, buf, 49);
                     pthread_mutex_unlock(&gwTxBufMutex);
                 }
-
                 if (modem_duplex || isNet)
                 {
                     if (packetType == PACKET_TYPE_FRAME)
@@ -2406,6 +2538,17 @@ void processEOT(bool isNet)
     buf[3] = 0x04;
     memcpy(buf + 4, TYPE_EOT, 4);
 
+    if (!validFrame && !isNet)
+    {
+        fprintf(stderr, "DSTAR EOT to gateway: not sent (no valid header for this transmission)\n");
+    }
+
+    if (isNet && netHeaderRepeats > 0)
+    {
+        fprintf(stderr, "NET: stream ended, %u repeated header(s) ignored\n", netHeaderRepeats);
+        netHeaderRepeats = 0;
+    }
+
     if (validFrame)
     {
         gps[0] = 0;
@@ -2417,7 +2560,7 @@ void processEOT(bool isNet)
 
         // Calculate BER
      //   float loss_BER = ((float)syncErrors / 24.0f) * 100.0f;
-        if (totalBitsDecoded > 0)
+        if (!isNet && totalBitsDecoded > 0)
         {
             loss_BER = (float)totalBitErrors / (float)totalBitsDecoded;
             fprintf(stderr, "BER: %.6f (%u errors / %u bits)\n", loss_BER, totalBitErrors, totalBitsDecoded);
@@ -2434,27 +2577,61 @@ void processEOT(bool isNet)
 
         fprintf(stderr, "Text: [%s]\n", metaText);
 
-        if (!isNet && dstarGWConnected && RingBuffer_freeSpace(&gwTxBuffer) >= 8 && (strcasecmp(rpt2Call, station_rpt2Call) == 0))
+        if (!isNet)
         {
+            int gwFree;
+
             pthread_mutex_lock(&gwTxBufMutex);
-            RingBuffer_addData(&gwTxBuffer, buf, 8);
+            gwFree = (int)RingBuffer_freeSpace(&gwTxBuffer);
+            if (!dstarGWConnected)
+            {
+                fprintf(stderr, "DSTAR EOT to gateway: DROPPED (gateway not connected)\n");
+            }
+            else if (strcasecmp(rpt2Call, station_rpt2Call) != 0)
+            {
+                fprintf(stderr, "DSTAR EOT to gateway: not sent (RPT2 [%s] is not gateway [%s])\n", rpt2Call, station_rpt2Call);
+            }
+            else if (gwFree < 8)
+            {
+                fprintf(stderr, "DSTAR EOT to gateway: DROPPED (gateway buffer full, %d bytes free)\n", gwFree);
+            }
+            else
+            {
+                RingBuffer_addData(&gwTxBuffer, buf, 8);
+                fprintf(stderr, "DSTAR EOT to gateway: queued (%d bytes waiting ahead of it)\n",
+                        (int)RingBuffer_dataSize(&gwTxBuffer) - 8);
+            }
             pthread_mutex_unlock(&gwTxBufMutex);
         }
 
         if ((strcasecmp(rpt1Call, station_rpt1Call) == 0) && (modem_duplex || isNet))
         {
-            write(sockfd, buf, 8);
+            if (packetType == PACKET_TYPE_FRAME)
+                write(sockfd, buf, 8);
+            else
+            {
+                pthread_mutex_lock(&rxBufMutex);
+                RingBuffer_addData(&rxBuffer, buf, 8);
+                pthread_mutex_unlock(&rxBufMutex);
+            }
         }
 
         if ((strcasecmp(rpt1Call, station_rpt1Call) == 0) && modem_duplex && !isNet)
         {
-            delay(100000);
+            delay(500000);
             // Canned EOT sending BER message.
             // ***********************************************************************
             uint8_t buf2[49] = {0x61, 0x00, 0x31, 0x04, 'D', 'S', 'T', 'H'};
             memcpy(buf2 + 8, header + 8, 41);
-            write(sockfd, buf2, 49);
-            delay(22000);
+            if (packetType == PACKET_TYPE_FRAME)
+                write(sockfd, buf2, 49);
+            else
+            {
+                pthread_mutex_lock(&rxBufMutex);
+                RingBuffer_addData(&rxBuffer, buf2, 49);
+                pthread_mutex_unlock(&rxBufMutex);
+            }
+            delay(10000);
 
             buf2[2] = 0x14;
             buf2[7] = 'D';
@@ -2471,18 +2648,30 @@ void processEOT(bool isNet)
             for (uint8_t i = 0; i < 19; i++)
             {
                 slowSpeedDataEncode(metaText, buf2 + 17, 1);
-                write(sockfd, buf2, 20);
-                delay(22000);
+                if (packetType == PACKET_TYPE_FRAME)
+                    write(sockfd, buf2, 20);
+                else
+                {
+                    pthread_mutex_lock(&rxBufMutex);
+                    RingBuffer_addData(&rxBuffer, buf2, 20);
+                    pthread_mutex_unlock(&rxBufMutex);
+                }
+                delay(10000);
             }
 
             memcpy(buf2 + 4, TYPE_EOT, 4);
             memcpy(buf2 + 17, DSTAR_EOT, 3);
-            write(sockfd, buf2, 20);
+            if (packetType == PACKET_TYPE_FRAME)
+                write(sockfd, buf2, 20);
+            else
+            {
+                pthread_mutex_lock(&rxBufMutex);
+                RingBuffer_addData(&rxBuffer, buf2, 20);
+                pthread_mutex_unlock(&rxBufMutex);
+            }
             // ***********************************************************************
         }
     }
-    else
-        write(sockfd, buf, 8);
 
     bzero(myCall, 9);
     bzero(urCall, 9);
@@ -2539,7 +2728,7 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
             symBuffer[symLen++] = data[i];
 
         symPtr = 0U;
-        fprintf(stderr, "Data\n");
+ //       fprintf(stderr, "Data\n");
     }
 
     if (type == DSTAR_EOT2 && symLen == 0U)
@@ -2590,7 +2779,7 @@ void* rxThread(void* arg)
         delay(100);
         loop++;
 
-        if (loop > 100)
+        if (loop > 120)
         {
             pthread_mutex_lock(&rxBufMutex);
             if (RingBuffer_dataSize(&rxBuffer) >= 5)
@@ -2684,6 +2873,10 @@ void* txThread(void* arg)
                 {
                     uint8_t buf[len];
                     RingBuffer_getData(&gwTxBuffer, buf, len);
+                    if (len >= 8 && memcmp(buf + 4, TYPE_EOT, 4) == 0)
+                    {
+                        fprintf(stderr, "DSTAR EOT to gateway: written to socket\n");
+                    }
                     if (write(sockfd, buf, len) < 0)
                     {
                         fprintf(stderr, "ERROR: remote disconnect\n");
@@ -2884,8 +3077,24 @@ void* processGatewaySocket(void* arg)
                 fprintf(stderr, "NET: header rejected - RF TX active\n");
                 pthread_mutex_unlock(&txSourceMutex);
             }
+            else if (currentTxSource == TX_NET && validFrame && respLen >= 8U + 39U &&
+                     memcmp(header + 8 + 3, buffer + 8 + 3, 36) == 0)
+            {
+                /* Repeat of the header for the stream already being
+                 * transmitted (G2 sends each header several times).
+                 * Modulating it again would put another preamble and
+                 * header (~440 ms) on air and delay every voice frame
+                 * behind it. */
+                netHeaderRepeats++;
+                pthread_mutex_unlock(&txSourceMutex);
+            }
             else
             {
+                if (currentTxSource == TX_NET)
+                {
+                    fprintf(stderr, "NET: new header during net stream (previous stream had no EOT)\n");
+                }
+                netHeaderRepeats = 0;
                 processHeader(buffer + 8, respLen - 8, true);
                 pthread_mutex_unlock(&txSourceMutex);
             }
@@ -2951,6 +3160,8 @@ void* startTCPServer(void* arg)
     int sockFd;
 
     sockFd = socket(AF_INET, SOCK_STREAM, 0);
+
+    setNoDelay(sockFd);
     if (sockFd < 0)
     {
         fprintf(stderr, "DSTAR_Service: error when creating the socket: %s\n", strerror(errno));
@@ -3012,6 +3223,8 @@ void* startTCPServer(void* arg)
          * accept: wait for a connection request
          */
         childfd = accept(sockFd, (struct sockaddr*)&clientaddr, &clientlen);
+        if (childfd >= 0)
+            setNoDelay(childfd);
         if (childfd < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
             perror("accept failed");
@@ -3105,6 +3318,7 @@ void* startClient(void* arg)
     }
 
     // Connect to the server
+    setNoDelay(sockfd);
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
     {
         if (errno != EINPROGRESS)
@@ -3130,8 +3344,7 @@ void* startClient(void* arg)
     uint16_t offset   = 0;
     uint16_t respLen  = 0;
     uint8_t typeLen   = 0;
-    uint8_t configLen = 4 + 4 + 11 + 6 + 1 + 40 + 16 + 1 +
-                        1;  // 1 + 1 + 1 + 1 + 12 + 1 + 1 + 1 + 1 + 15;
+    uint8_t configLen = 4 + 4 + 11 + 6 + 1 + 40 + 16 + 1 + 1;  // 1 + 1 + 1 + 1 + 12 + 1 + 1 + 1 + 1 + 15;
 
     txOn = false;
 
@@ -3164,8 +3377,7 @@ void* startClient(void* arg)
     uint32_t reg13 = (uint32_t)0b1101 << 0;           // register 13
     reg13 |= (uint32_t)ADF7021_SLICER_TH_DSTAR << 4;  // slicer threshold
 
-    ifConf(bytes, reg2, reg3, reg4, reg10, reg13, atol(modem_rxFrequency),
-           atol(modem_txFrequency), txLevel, rfPower, 0, true);
+    ifConf(bytes, reg2, reg3, reg4, reg10, reg13, atol(modem_rxFrequency), atol(modem_txFrequency), txLevel, rfPower, 0, true);
 
     memcpy(buffer + 26, bytes, 40);
     uint64_t tmp[2] = {PREAMBLE_DATA, PREAMBLE_MASK};
@@ -3194,17 +3406,14 @@ void* startClient(void* arg)
         if (len != 1)
         {
             fprintf(stderr,
-                    "DSTAR_Service: error when reading from server, errno=%d\n",
-                    errno);
+                    "DSTAR_Service: error when reading from server, errno=%d\n", errno);
             break;
         }
 
         if (buffer[0] != 0x61)
         {
-            fprintf(stderr, "DSTAR_Service: unknown byte from server, 0x%02X\n",
-                    buffer[0]);
+            fprintf(stderr, "DSTAR_Service: unknown byte from server, 0x%02X\n", buffer[0]);
             continue;
-            ;
         }
 
         offset = 0;
@@ -3257,6 +3466,11 @@ void* startClient(void* arg)
             for (uint16_t i = 8; i < respLen; i = i + 4)
             {
                 memcpy(in, buffer + i, 4);
+                q31_t res1 = in[0] * (rxLevel * 128);
+                in[0] = __SSAT((res1 >> 15), 16);
+                res1 = in[1] * (rxLevel * 128);
+                in[1] = __SSAT((res1 >> 15), 16);
+
                 if (USE_DC_FILTER)
                 {
                     q31_t q31Samples[2];
@@ -3280,9 +3494,11 @@ void* startClient(void* arg)
                 else
                     arm_fir_fast_q15(&rxGaussianFilter, in, smp, 2);
 
+                smp[0] = agcProcess(smp[0]);
+                smp[1] = agcProcess(smp[1]);
+
                 samples(smp, NULL, 2);
             }
-            //       write(sockfd, buffer, respLen);
         }
         else if (memcmp(type, TYPE_BITS, typeLen) == 0)
         {
@@ -3431,7 +3647,7 @@ int main(int argc, char** argv)
 
     char tmp[15];
     readHostConfig(modemName, "config", "modem", tmp);
-    if (strcasecmp(tmp, "openmt") == 0)
+    if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
         packetType = PACKET_TYPE_SAMP;
     else if (strcasecmp(tmp, "openmths") == 0)
         packetType = PACKET_TYPE_BIT;
@@ -3444,8 +3660,15 @@ int main(int argc, char** argv)
         setHostConfig(modemName, "DSTAR", "rpt1Call", "input", "DIRECT");
         setHostConfig(modemName, "DSTAR", "rpt2Call", "input", "DIRECT");
         setHostConfig(modemName, "DSTAR", "callsign", "input", "N0CALL");
+        setHostConfig(modemName, "DSTAR", "rxLevel", "input", "50");
         setHostConfig(modemName, "DSTAR", "txLevel", "input", "50");
         setHostConfig(modemName, "DSTAR", "rfPower", "input", "128");
+        setHostConfig(modemName, "DSTAR", "useAgc", "input", "true");
+        setHostConfig(modemName, "DSTAR", "agcTarget", "input", "24000");
+        setHostConfig(modemName, "DSTAR", "agcMinGain", "input", "16");
+        setHostConfig(modemName, "DSTAR", "agcMaxGain", "input", "4096");
+        setHostConfig(modemName, "DSTAR", "frameSyncMinPct", "input", "40");
+        setHostConfig(modemName, "DSTAR", "dataSyncMinPct", "input", "40");
         setHostConfig(modemName, "DSTAR", "gwPortOut", "input", "20010");
         setHostConfig(modemName, "DSTAR", "gwPortIn", "input", "20011");
         setHostConfig(modemName, "DSTAR", "gwAddress", "input", "127.0.0.1");
@@ -3458,10 +3681,42 @@ int main(int argc, char** argv)
     readHostConfig(modemName, "DSTAR", "rpt1Call", station_rpt1Call);
     readHostConfig(modemName, "DSTAR", "rpt2Call", station_rpt2Call);
 
+    readHostConfig(modemName, "DSTAR", "rxLevel", tmp);
+    rxLevel = atoi(tmp);
     readHostConfig(modemName, "DSTAR", "txLevel", tmp);
     txLevel = atoi(tmp);
     readHostConfig(modemName, "DSTAR", "rfPower", tmp);
     rfPower = atoi(tmp);
+
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DSTAR", "useAgc", tmp);
+    if (strlen(tmp) > 0)
+        USE_AGC = (strcasecmp(tmp, "false") != 0);
+
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DSTAR", "agcTarget", tmp);
+    if (strlen(tmp) > 0)
+        AGC_TARGET_PEAK = atoi(tmp);
+
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DSTAR", "agcMinGain", tmp);
+    if (strlen(tmp) > 0)
+        AGC_MIN_GAIN_Q8 = atoi(tmp);
+
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DSTAR", "agcMaxGain", tmp);
+    if (strlen(tmp) > 0)
+        AGC_MAX_GAIN_Q8 = atoi(tmp);
+
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DSTAR", "frameSyncMinPct", tmp);
+    if (strlen(tmp) > 0)
+        FRAME_SYNC_MIN_PCT = atoi(tmp);
+
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DSTAR", "dataSyncMinPct", tmp);
+    if (strlen(tmp) > 0)
+        DATA_SYNC_MIN_PCT = atoi(tmp);
 
     //  clearDashbCommands();
     clearReflLinkStatus(modemName, "DSTAR");

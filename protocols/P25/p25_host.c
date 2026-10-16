@@ -1523,7 +1523,7 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
 {
     uint8_t typeLen = 4;
 
-    fprintf(stderr, "Process frame.\n");
+    fprintf(stderr, "Process frame. Len: %d\n", length);
 
     char cType[4] = "RF";
     if (isNet)
@@ -1531,6 +1531,7 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
 
     if (memcmp(buffer + 4, "P25", 3) == 0 && memcmp(buffer + 4, TYPE_EOT, typeLen) != 0)
     {
+        dump((char*)"Data", buffer + 8, length - 8);
         decodeP25(buffer, isNet);
         if ((modem_duplex || isNet) && txOn)
         {
