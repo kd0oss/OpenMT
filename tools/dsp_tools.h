@@ -68,7 +68,14 @@ unsigned int golay24128_encode23127(unsigned int data);
 unsigned int golay24128_encode24128(unsigned int data);
 
 unsigned int golay24128_decode23127(unsigned int code);
+unsigned int golay24128_correct23127(unsigned int code);
+unsigned int get_syndrome_23127(unsigned int pattern);
 unsigned int golay24128_decode24128(uint8_t* bytes);
+
+unsigned int golay24128_errors23127(unsigned int word, unsigned int* data);
+unsigned int golay24128_errors24128(unsigned int word, unsigned int* data);
+
+extern const unsigned int AMBE_PRNG_TABLE[4096U];
 
 void bch_encode1(uint8_t* data);
 void bch_encode2(const int* data, int* bb);

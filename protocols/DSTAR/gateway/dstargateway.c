@@ -45,6 +45,7 @@
 #include <unistd.h>
 
 #include "../dstar_gps.h"
+#include "../dstar_jitter.h"
 
 #define VERSION "2025-09-25"
 #define BUFFER_SIZE 1024
@@ -115,6 +116,13 @@ GatewayCommState gwState = {
     .frames_received     = 0,
     .frames_lost         = 0,
     .mutex               = PTHREAD_MUTEX_INITIALIZER};
+
+/* Reflector -> host frames are put back in order and paced here (DSTAR/jitterMs, 0 = off).
+ * Only the thread that reads the gateway socket touches it. */
+static DJitter jb;
+static uint32_t jitterMs = 300;
+static uint16_t lastRejectedId = 0;     /* the other stream last reported as rejected */
+static uint16_t lastMismatchId = 0;     /* and as a mismatch                          */
 
 // RingBuffer reflTxBuffer;
 RingBuffer txBuffer;
@@ -204,9 +212,13 @@ static bool gwStateStartRx(uint16_t stream_id)
     if (gwState.state != GATEWAY_IDLE)
     {
         GatewayState current = gwState.state;
+        bool report          = gwState.reflector_stream_id != stream_id && stream_id != lastRejectedId;
         pthread_mutex_unlock(&gwState.mutex);
-        if (gwState.reflector_stream_id != stream_id)
+        if (report)
+        {
+            lastRejectedId = stream_id;
             fprintf(stderr, "REJECT RX: Gateway busy (%s)\n", current == GATEWAY_TX_TO_REFLECTOR ? "TX active" : "RX active");
+        }
         return false;
     }
 
@@ -217,6 +229,9 @@ static bool gwStateStartRx(uint16_t stream_id)
     gwState.frames_received     = 0;
     gwState.frames_lost         = 0;
     pthread_mutex_unlock(&gwState.mutex);
+
+    lastRejectedId = 0;
+    lastMismatchId = 0;
 
     fprintf(stderr, "START RX: Reflector→Host (stream %04X)\n", stream_id);
     return true;
@@ -314,8 +329,12 @@ static bool gwStateVerifyStreamId(uint16_t stream_id)
     uint16_t expected = gwState.reflector_stream_id;
     pthread_mutex_unlock(&gwState.mutex);
 
-    if (!matches)
-        fprintf(stderr, "STREAM MISMATCH: Expected %04X, got %04X\n", expected, stream_id);
+    /* every frame of another stream would be a line in the log: say it once */
+    if (!matches && stream_id != lastMismatchId)
+    {
+        lastMismatchId = stream_id;
+        fprintf(stderr, "STREAM MISMATCH: Expected %04X, got %04X (not logged again for this stream)\n", expected, stream_id);
+    }
 
     return matches;
 }
@@ -829,6 +848,68 @@ void sendToGw(char* cHeader, uint8_t* ucData, bool bSsEncode, bool bEnd)
 }
 
 // Connect to and process incoming IRCDDB gateway bytes.
+static uint64_t jbLastEmitMs  = 0U;   /* when the last frame of this stream went to the host */
+static uint32_t jbQueueFull   = 0U;   /* frames that found the queue to the host full        */
+
+/* A frame from the jitter buffer is due: on to the host */
+static void jbEmitToHost(void* ctx, const uint8_t* frame, bool concealed)
+{
+    uint8_t buffer[20];
+    uint64_t emitNow = getTimeMillis();
+
+    (void)ctx;
+
+    if (jbLastEmitMs != 0U && emitNow - jbLastEmitMs >= JB_STALL_MS)
+        fprintf(stderr, "HOST: nothing sent to the host for %u ms\n", (unsigned)(emitNow - jbLastEmitMs));
+    jbLastEmitMs = emitNow;
+
+    buffer[0] = 0x61;
+    buffer[1] = 0x00;
+    buffer[2] = 0x14;
+    buffer[3] = 0x04;
+    memcpy(buffer + 4, TYPE_DATA, 4);
+    memcpy(buffer + 8, frame, 12);
+    pthread_mutex_lock(&txBufMutex);
+    if (RingBuffer_freeSpace(&txBuffer) <= 20U)
+    {
+        /* RingBuffer_addData() empties the whole queue when it does not fit, headers and end frames included */
+        jbQueueFull++;
+        fprintf(stderr, "QUEUE: the queue to the host is full (%u bytes waiting), it is emptied\n", (unsigned)RingBuffer_dataSize(&txBuffer));
+    }
+    RingBuffer_addData(&txBuffer, buffer, 20);
+    pthread_mutex_unlock(&txBufMutex);
+
+    pthread_mutex_lock(&gwState.mutex);
+    if (concealed)
+        gwState.frames_lost++;
+    else
+        gwState.frames_received++;
+    pthread_mutex_unlock(&gwState.mutex);
+}
+
+static void jbPrintStats(void)
+{
+    /* The LOSS line that follows is worked out from the jitter buffer: the sequence number only repeats every
+       21 frames, so counting it cannot see an outage longer than 420 ms.  A frame counts as lost when it never came,
+       whether silence was played for it or the clock was moved on past it. */
+    pthread_mutex_lock(&gwState.mutex);
+    gwState.frames_received = jb.played + jb.late;
+    gwState.frames_lost     = jb.concealed;
+    pthread_mutex_unlock(&gwState.mutex);
+
+    if (jbQueueFull > 0)
+        fprintf(stderr, "QUEUE: the queue to the host was full %u time(s) in this stream\n", jbQueueFull);
+
+    if (jb.skipped > 0)
+        fprintf(stderr, "SKIPPED: %u frames arrived in one go after a stall and were thrown away because the buffer was full\n", jb.skipped);
+
+    if (jb.stalls > 0)
+        fprintf(stderr, "STALLS: %u time(s) with no audio from the reflector for %u ms or more, longest %u ms, %u ms in all\n",
+                jb.stalls, (unsigned)JB_STALL_MS, jb.longestStall, jb.stallMs);
+    fprintf(stderr, "JITTER: %u played, %u replaced by silence, %u late, %u duplicate, %u arrived out of order and were put back (buffer %u ms)\n",
+            jb.played, jb.concealed, jb.late, jb.duplicate, jb.reordered, jb.jitterMs);
+}
+
 void* connectIRCDDBGateway(void* argv)
 {
     //   uint16_t iStreamId;
@@ -888,8 +969,20 @@ void* connectIRCDDBGateway(void* argv)
     cRxBuffer[26] = 0x00;
     sendto(sockoutfd, cRxBuffer, 27, 0, (struct sockaddr*)&servaddrout, sizeof(servaddrout));
 
+    uint64_t loopPrevMs = 0U;
+
     while (connected)
     {
+        {
+            /* this loop normally comes round every 100 microseconds: a long time between two rounds means that
+               something in it (a lock, a log line, a send) held the gateway up and no packet was read meanwhile */
+            uint64_t loopNow = getTimeMillis();
+
+            if (loopPrevMs != 0U && loopNow - loopPrevMs >= JB_STALL_MS)
+                fprintf(stderr, "LOOP: the gateway was held up for %u ms\n", (unsigned)(loopNow - loopPrevMs));
+            loopPrevMs = loopNow;
+        }
+
         bzero(cRecvline, 50);
 
         socklen_t len = sizeof(cliaddr);
@@ -917,6 +1010,37 @@ void* connectIRCDDBGateway(void* argv)
             gwStateEnd("Reflector EOT");
         }
 
+        /* Release the frames that are due (jitter buffer) */
+        if (jb.active)
+        {
+            if (!gwStateIsRxActive())
+            {
+                /* the stream was ended some other way (timeout, status message, link change) */
+                jbPrintStats();
+                jbStop(&jb);
+            }
+            else
+            {
+                JbResult jr = jbService(&jb, getTimeMillis(), jbEmitToHost, NULL);
+
+                if (jr != JB_RUNNING)
+                {
+                    jbPrintStats();
+                    jbStop(&jb);
+
+                    buffer[0] = 0x61;
+                    buffer[1] = 0x00;
+                    buffer[2] = 0x08;
+                    buffer[3] = 0x04;
+                    memcpy(buffer + 4, TYPE_EOT, 4);
+                    pthread_mutex_lock(&txBufMutex);
+                    RingBuffer_addData(&txBuffer, buffer, 8);
+                    pthread_mutex_unlock(&txBufMutex);
+                    gwStateEnd(jr == JB_END_FLAG ? "Reflector EOT" : "Reflector stream stopped");
+                }
+            }
+        }
+
         /* Handle incoming header from reflector (49 bytes, type 0x20) */
         if (n == 49 && cRecvline[4] == 0x20)
         {
@@ -924,6 +1048,13 @@ void* connectIRCDDBGateway(void* argv)
 
             if (gwStateStartRx(stream_id))
             {
+                if (jitterMs > 0)
+                {
+                    jbReset(&jb, jitterMs);
+                    jbLastEmitMs = 0U;
+                    jbQueueFull  = 0U;
+                }
+
                 bzero(myCall, 9);
                 bzero(suffix, 5);
                 bzero(urCall, 9);
@@ -978,7 +1109,24 @@ void* connectIRCDDBGateway(void* argv)
                 gwStateUpdateTime();
                 if (gwStateVerifyStreamId(pkt_stream_id))
                 {
-                    if ((cRecvline[7] & 0x40) == 0x40)
+                    if (jb.active)
+                    {
+                        bool lastFrame = (cRecvline[7] & 0x40) == 0x40;
+                        uint8_t seq    = cRecvline[7] & 0x3F;
+
+                        /* an end frame with a number outside 0..20 follows the one before */
+                        if (lastFrame && seq >= JB_SEQ_COUNT)
+                            seq = jb.haveFrames ? (uint8_t)((jb.hi + 1) % JB_SEQ_COUNT) : 0;
+
+                        jbPut(&jb, seq, lastFrame, cRecvline + 9, getTimeMillis());
+
+                        if (jb.lastStall > 0)
+                        {
+                            fprintf(stderr, "REFLECTOR: no audio for %u ms\n", jb.lastStall);
+                            jb.lastStall = 0;
+                        }
+                    }
+                    else if ((cRecvline[7] & 0x40) == 0x40)
                     {
                         buffer[0] = 0x61;
                         buffer[1] = 0x00;
@@ -1820,6 +1968,13 @@ int main(int argc, char** argv)
     readHostConfig(modemName, "DSTAR", "gwPortIn", tmp);
     gwPortIn = atol(tmp);
     readHostConfig(modemName, "DSTAR", "gwAddress", gwAddress);
+
+    /* DSTAR/jitterMs: how long reflector audio is held to put it back in order, 0 = pass it on at once */
+    memset(tmp, 0x00, sizeof(tmp));
+    readHostConfig(modemName, "DSTAR", "jitterMs", tmp);
+    if (strlen(tmp) > 0)
+        jitterMs = (uint32_t)atol(tmp) > 1000U ? 1000U : (uint32_t)atol(tmp);
+    fprintf(stderr, "Reflector jitter buffer: %u ms%s\n", jitterMs, jitterMs == 0 ? " (off)" : "");
 
     int err = pthread_create(&(clientid), NULL, &startClient, DSTARHost);
     if (err != 0)

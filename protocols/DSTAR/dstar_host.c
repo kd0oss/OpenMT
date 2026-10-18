@@ -21,7 +21,7 @@
 #include <ADF7021.h>
 #include <CCITTChecksumReverse.h>
 #include <RingBuffer.h>
-#include <arm_math.h>
+#include <dsp_compat.h> // <arm_math.h>
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
@@ -49,10 +49,12 @@
 #include "dstar_gps.h"
 #include "dstar_fec.h"
 #include <netinet/tcp.h>
-/* Disable Nagle: these programs talk over loopback TCP in small frames
- * (200 bytes of samples, 3 byte requests).  With Nagle on, a small write
- * waits for the ACK of the previous one, and the peer delays that ACK for
- * ~40 ms, so the stream arrives in bursts with 40 ms gaps. */
+
+/*
+ * setNoDelay()
+ *   Disables Nagle's algorithm (TCP_NODELAY) on the socket fd so small packets
+ *   are sent immediately.
+ */
 static void setNoDelay(int fd)
 {
     int one = 1;
@@ -60,19 +62,18 @@ static void setNoDelay(int fd)
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 }
 
-/* External modemCommandBuffer from Modem_Host */
 extern RingBuffer modemCommandBuffer;
 
 #define VERSION "2026-09-26"
 #define BUFFER_SIZE 500
 
-q31_t DC_FILTER[]               = {3367972, 0, 3367972, 0, 2140747704, 0};  // {b0, 0, b1, b2, -a1, -a2}
-const uint32_t DC_FILTER_STAGES = 1U;                        // One Biquad stage
+q31_t DC_FILTER[]               = {3367972, 0, 3367972, 0, 2140747704, 0};
+const uint32_t DC_FILTER_STAGES = 1U;
 bool USE_DC_FILTER              = true;
 
 const int16_t TX_GAUSSIAN_0_35_FILTER[] = {0,     0,     0,     0,     1001, 3514, 9333, 18751,
-                                           28499, 32767, 28499, 18751, 9333, 3514, 1001};    // numTaps = 15, L = 5
-const uint8_t TX_GAUSSIAN_0_35_FILTER_PHASE_LEN = 3;  // phaseLength = numTaps/L
+                                           28499, 32767, 28499, 18751, 9333, 3514, 1001};
+const uint8_t TX_GAUSSIAN_0_35_FILTER_PHASE_LEN = 3;
 
 const uint8_t TX_FILTER_STATE_LEN               = 20;
 const uint8_t TX_GAUSSIAN_0_35_FILTER_LEN       = 15;
@@ -83,7 +84,7 @@ const int16_t RX_GAUSSIAN_0_5_FILTER[]   = {8,    104,  760, 3158, 7421, 9866,
                                             7421, 3158, 760, 104,  8,    0};
 const uint8_t RX_GAUSSIAN_0_5_FILTER_LEN = 12;
 
-#define DSTAR_RADIO_SYMBOL_LENGTH 5U  // At 24 kHz sample rate
+#define DSTAR_RADIO_SYMBOL_LENGTH 5U
 
 #define DSTAR_HEADER_LENGTH_BYTES 41U
 
@@ -123,7 +124,6 @@ const uint8_t DSTAR_RELAY_UNAVAILABLE   = 0x01U;
 const uint8_t DSTAR_DATA_SYNC_BYTES[] = {0x9E, 0x8D, 0x32, 0x88, 0x26, 0x1A,
                                          0x3F, 0x61, 0xE8, 0x55, 0x2D, 0x16};
 
-// D-Star bit order version of 0x55 0x6E 0x0A
 const uint32_t DSTAR_FRAME_SYNC_DATA  = 0x00557650U;
 const uint32_t DSTAR_FRAME_SYNC_MASK  = 0x00FFFFFFU;
 const bool DSTAR_FRAME_SYNC_SYMBOLS[] = {
@@ -131,7 +131,6 @@ const bool DSTAR_FRAME_SYNC_SYMBOLS[] = {
     false, true, true,  true, false, true,  true,  false,
     false, true, false, true, false, false, false, false};
 
-// D-Star bit order version of 0x55 0x2D 0x16
 const uint32_t DSTAR_DATA_SYNC_DATA  = 0x00AAB468U;
 const uint32_t DSTAR_DATA_SYNC_MASK  = 0x00FFFFFFU;
 const bool DSTAR_DATA_SYNC_SYMBOLS[] = {
@@ -139,7 +138,6 @@ const bool DSTAR_DATA_SYNC_SYMBOLS[] = {
     true,  false, true, true,  false, true,  false, false,
     false, true,  true, false, true,  false, false, false};
 
-// D-Star bit order version of 0x55 0x55 0xC8 0x7A
 const uint32_t DSTAR_END_SYNC_DATA   = 0xAAAA135EU;
 const uint32_t DSTAR_END_SYNC_MASK   = 0xFFFFFFFFU;
 const uint8_t DSTAR_END_SYNC_BYTES[] = {0x55, 0x55, 0x55, 0x55, 0xC8, 0x7A,
@@ -155,22 +153,18 @@ const uint8_t DSTAR_SCRAMBLER_BYTES[] = {0x70U, 0x4FU, 0x93U};
 
 #define MAX_SYNC_BITS 100U * DSTAR_DATA_LENGTH_BITS
 
-// D-Star preamble sequence (only 32 bits of 101010...)
 const uint64_t PREAMBLE_MASK = 0x00000000FFFFFFFFU;
 const uint64_t PREAMBLE_DATA = 0x00000000AAAAAAAAU;
 const uint8_t PREAMBLE_ERRS  = 2U;
 
-// D-Star bit order version of 0x55 0x55 0xC8 0x7A
 const uint64_t END_SYNC_DATA = 0x0000AAAAAAAA135EU;
 const uint64_t END_SYNC_MASK = 0x0000FFFFFFFFFFFFU;
 const uint8_t END_SYNC_ERRS  = 1U;
 
-// D-Star bit order version of 0x55 0x55 0x6E 0x0A
 const uint64_t FRAME_SYNC_DATA = 0x0000000000557650U;
 const uint64_t FRAME_SYNC_MASK = 0x0000000000FFFFFFU;
 const uint8_t FRAME_SYNC_ERRS  = 2U;
 
-// D-Star bit order version of 0x55 0x2D 0x16
 const uint64_t DATA_SYNC_DATA = 0x0000000000AAB468U;
 const uint64_t DATA_SYNC_MASK = 0x0000000000FFFFFFU;
 const uint8_t DATA_SYNC_ERRS  = 2U;
@@ -365,7 +359,7 @@ const uint16_t CCITT16_TABLE[] = {
 const q15_t DSTAR_LEVEL0 = -841;
 const q15_t DSTAR_LEVEL1 = 841;
 
-const uint8_t BIT_MASK_TABLE[] = {0x80U, 0x40U, 0x20U, 0x10U,
+static const uint8_t BIT_MASK_TABLE[] = {0x80U, 0x40U, 0x20U, 0x10U,
                                   0x08U, 0x04U, 0x02U, 0x01U};
 
 const uint8_t INTERLEAVE_TABLE_TX[] = {
@@ -567,14 +561,13 @@ q31_t dcState[4];
 
 arm_fir_interpolate_instance_q15 txModFilter;
 arm_fir_instance_q15 rxGaussianFilter;
-q15_t rxGaussianState[40U];  // NoTaps + BlockSize - 1, 12 + 20 - 1 plus some
-                             // spare
+q15_t rxGaussianState[40U];
 
-q15_t txModState[20U];  // blockSize + phaseLength - 1, 8 + 9 - 1 plus some spare
+q15_t txModState[20U];
 uint8_t symBuffer[600U];
 uint16_t symLen;
 uint16_t symPtr;
-uint16_t txDelay;  // In bytes
+uint16_t txDelay;
 
 const char* TYPE_HEADER     = "DSTH";
 const char* TYPE_DATA       = "DSTD";
@@ -621,7 +614,7 @@ bool txOn                = false;
 bool validSSHeader       = false;
 bool slowSpeedUpdate     = false;
 bool validFrame          = false;
-uint32_t netHeaderRepeats = 0;  /* repeated net headers ignored this stream */
+uint32_t netHeaderRepeats = 0;
 bool validHeader         = false;
 bool headerSent          = false;
 bool debugM              = false;
@@ -642,57 +635,25 @@ char modem_rxFrequency[11] = "435000000";
 char modem_txFrequency[11] = "435000000";
 uint32_t syncErrors        = 0;
 
-/* --- AGC (automatic gain control) on RX samples -----------------------
- * rxLevel above is a fixed, manually-set preamp; it cannot track changes
- * in received signal strength (fading, a different station's audio level,
- * temperature drift in the front end, etc.) without a restart. This AGC
- * trims the *filtered* RX sample stream in real time toward a target peak
- * so the sync correlators (correlateFrameSync()/correlateDataSync()) see
- * a consistent amplitude without clipping. See agcProcess(). */
 bool USE_AGC          = true;
-q31_t AGC_TARGET_PEAK = 24000;  // target peak sample magnitude, q15 counts (~73% of full scale)
-q31_t AGC_MIN_GAIN_Q8 = 16;     // gain floor,   Q8 fixed point (16  = 0.0625x)
-q31_t AGC_MAX_GAIN_Q8 = 4096;   // gain ceiling, Q8 fixed point (4096 = 16x)
-q31_t agcGainQ8       = 256;    // current gain, Q8 fixed point (256 = 1.0x, unity at startup)
-q31_t agcEnvelope     = 0;      // smoothed peak envelope, q15 counts
+q31_t AGC_TARGET_PEAK = 24000;
+q31_t AGC_MIN_GAIN_Q8 = 16;
+q31_t AGC_MAX_GAIN_Q8 = 4096;
+q31_t agcGainQ8       = 256;
+q31_t agcEnvelope     = 0;
 
-#define AGC_ATTACK_Q15    6554U // ~0.20/sample: envelope rises quickly onto a bigger peak (avoids clipping)
-#define AGC_DECAY_Q15       33U // ~0.001/sample: envelope falls slowly (avoids pumping between symbol edges)
-#define AGC_GAIN_SLEW_SHIFT  6U // gain itself is smoothed over ~2^6 updates so it can't step abruptly
-#define AGC_MIN_ENVELOPE   200U // below this, treat as noise floor: hold gain rather than let it blow up
+#define AGC_ATTACK_Q15    6554U
+#define AGC_DECAY_Q15       33U
+#define AGC_GAIN_SLEW_SHIFT  6U
+#define AGC_MIN_ENVELOPE   200U
 
-/* --- Minimum absolute sync-correlation threshold -----------------------
- * correlateFrameSync()/correlateDataSync() only ever compared a candidate
- * correlation against the best one seen so far *this window*
- * (maxFrameCorr/maxDataCorr, both reset to 0 every window) -- there was no
- * floor on how strong that "best" actually had to be. On a noisy/marginal
- * channel, a weak correlation produced by nothing but noise can still be
- * the best of a weak field and gets accepted as a real sync. Every accept
- * of correlateDataSync() also resets frameCount to 0 (see the function),
- * so this was firing far more often than just "lost signal, re-acquire" --
- * it was corrupting frame-position tracking on every falsely-accepted
- * "win", which is consistent with chance-level Sync BER (~12/24) and
- * "invalid slow data header" spam even on an otherwise-working channel.
- *
- * Each sync pattern is DSTAR_FRAME_SYNC_LENGTH_SYMBOLS /
- * DSTAR_DATA_SYNC_LENGTH_SYMBOLS (24) symbols long, so a perfect match at
- * the AGC's target amplitude correlates to ~24 * AGC_TARGET_PEAK. The
- * *_SYNC_MIN_PCT knobs require a candidate to reach that percentage of the
- * ideal correlation before it can win, on top of remaining the best
- * candidate this window. Set either to 0 to fully restore the old
- * (no-floor) behavior. */
-q31_t FRAME_SYNC_MIN_PCT = 10;  // 0-100, minimum % of ideal correlation required to accept a frame sync
-q31_t DATA_SYNC_MIN_PCT  = 10;  // 0-100, minimum % of ideal correlation required to accept a data sync
+q31_t FRAME_SYNC_MIN_PCT = 10;
+q31_t DATA_SYNC_MIN_PCT  = 10;
 
-/* 1 = also write the FEC-corrected AMBE bits into the relayed frame (what
- * MMDVMHost does: cleaner audio to the radio/network).  Frames with more
- * errors than DSTAR_FEC_MAX_ERRORS (dstar_fec.h) are relayed unchanged.
- * 0 = only count. */
 #ifndef DSTAR_FEC_REGENERATE
 #define DSTAR_FEC_REGENERATE 1
 #endif
 
-// BER tracking variables
 uint32_t totalBitsDecoded = 0;
 uint32_t totalBitErrors   = 0;
 
@@ -709,23 +670,22 @@ char modemHost[80]  = "127.0.0.1";
 int sockfd          = 0;
 uint16_t serverPort = 18100;
 uint16_t clientPort = 18000;
-unsigned int clientlen;         //< byte size of client's address
-char* hostaddrp;                //< dotted decimal host addr string
-int optval;                     //< flag value for setsockopt
-struct sockaddr_in serveraddr;  //< server's addr
-struct sockaddr_in clientaddr;  //< client addr
+unsigned int clientlen;
+char* hostaddrp;
+int optval;
+struct sockaddr_in serveraddr;
+struct sockaddr_in clientaddr;
 
 RingBuffer rxBuffer;
 RingBuffer gwTxBuffer;
 RingBuffer gwCommand;
 
 pthread_mutex_t timerMutex   = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;  /* Protects rxBuffer */
-pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;  /* Protects gwTxBuffer */
-pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;  /* Protects gwCommand */
-pthread_mutex_t txSourceMutex = PTHREAD_MUTEX_INITIALIZER; /* Prevents RF and NET TX overlap */
+pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t txSourceMutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* Tracks which source currently owns the transmitter */
 typedef enum { TX_NONE, TX_RF, TX_NET } TxSource;
 TxSource currentTxSource = TX_NONE;
 
@@ -755,7 +715,6 @@ typedef union crc
 } m_crc;
 m_crc mcrc;
 
-// Forward declarations
 void processBitNone(bool bit);
 void decodeBitHeader(bool bit);
 void decodeBitData(bool bit);
@@ -776,15 +735,20 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet);
 void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet);
 void processEOT(bool isNet);
 
-
-// error - wrapper for perror
+/*
+ * error()
+ *   Prints msg with perror() and exits the process with status 1.
+ */
 void error(char* msg)
 {
     perror(msg);
     exit(1);
 }
 
-// Wait for 'delay' miroseconds
+/*
+ * delay()
+ *   Sleeps for the given number of microseconds.
+ */
 void delay(uint32_t delay)
 {
     struct timespec req, rem;
@@ -793,7 +757,67 @@ void delay(uint32_t delay)
     nanosleep(&req, &rem);
 };
 
-// Print debug data.
+/*
+ * Transmit clock. Tracks how much audio has been written to the modem against
+ * the wall clock so that gateway audio is released at no more than real time
+ * plus a small lead, and so that an underrun (the modem running dry in the
+ * middle of a call) is logged.
+ */
+#define TX_LEAD_MAX_MS      300
+#define TX_UNDERRUN_MS      40
+
+static bool     txClockRun     = false;
+static uint64_t txClockSamples = 0U;
+static uint64_t txClockStartMs = 0U;
+
+static uint64_t monoMs(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)(ts.tv_nsec / 1000000L);
+}
+
+/* Milliseconds of audio written to the modem that has not been played yet */
+static int txLeadMs(void)
+{
+    if (!txClockRun)
+        return 0;
+    return (int)(txClockSamples * 1000U / 24000U) - (int)(monoMs() - txClockStartMs);
+}
+
+static uint64_t lastNetMs = 0U;      /* arrival time of the last net voice frame */
+static uint64_t netHandleMs = 0U;    /* time it took to handle the previous net voice frame */
+
+static void txClockStop(void)
+{
+    txClockRun = false;
+}
+
+static void txClockAdd(uint32_t samples)
+{
+    if (txClockRun)
+    {
+        int lead = txLeadMs();
+        if (lead < -TX_UNDERRUN_MS)
+        {
+            fprintf(stderr, "TX underrun: modem ran dry for %d ms\n", -lead);
+            txClockRun = false;
+        }
+    }
+    if (!txClockRun)
+    {
+        txClockStartMs = monoMs();
+        txClockSamples = 0U;
+        txClockRun     = true;
+    }
+    txClockSamples += samples;
+}
+
+/*
+ * dump()
+ *   Debug helper. Prints text and a millisecond timestamp, then a hex and ASCII
+ *   dump of length bytes of data, 16 bytes per line.
+ */
 void dump(char* text, unsigned char* data, unsigned int length)
 {
     struct timespec ts;
@@ -801,14 +825,12 @@ void dump(char* text, unsigned char* data, unsigned int length)
     unsigned int offset = 0U;
     unsigned int i;
 
-    // Get the current time with nanosecond precision
     if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
     {
         perror("clock_gettime");
         return;
     }
 
-    // Convert to milliseconds
     milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 
     fprintf(stdout, "%s: %llu\n", text, milliseconds);
@@ -846,6 +868,11 @@ void dump(char* text, unsigned char* data, unsigned int length)
     }
 }
 
+/*
+ * isActiveMode()
+ *   Returns true when the modem host's active mode is DSTAR or idle, i.e. when
+ *   this host is allowed to process frames.
+ */
 bool isActiveMode()
 {
     char active_mode[10] = "IDLE";
@@ -858,6 +885,11 @@ bool isActiveMode()
         return false;
 }
 
+/*
+ * reset()
+ *   Resets the receive state machine, correlation state, sync pointers, buffers
+ *   and counters to their start-up values.
+ */
 void reset()
 {
     rxState      = DSRXS_NONE;
@@ -877,24 +909,18 @@ void reset()
 
     symLen       = 0U;
     symPtr       = 0U;
-    txDelay      = 180U;  // TX preamble length in bytes.
+    txDelay      = 180U;
     rxBufferBits = 0U;
     dataBits     = 0U;
     bitBuffer[0] = 0;
     validSSHeader = false;
 }
 
-/* Peak-following AGC applied to the fully-filtered RX sample stream (the
- * same samples that feed the sync correlators and the bit slicer). A fast
- * attack lets the envelope jump up onto a stronger signal immediately, so
- * a sudden loud station can't clip; a slow decay keeps the envelope from
- * chasing the sample-to-sample swings of the FSK waveform itself, which
- * would otherwise fight the very correlation it's meant to help. The gain
- * derived from the envelope is itself smoothed (AGC_GAIN_SLEW_SHIFT) so it
- * settles rather than stepping. Below AGC_MIN_ENVELOPE (silence/noise
- * floor) the gain is held at its last value instead of being driven up
- * toward AGC_MAX_GAIN_Q8, which would otherwise slam the very next real
- * symbol into saturation.
+/*
+ * agcProcess()
+ *   Automatic gain control for the receive samples. Tracks the signal envelope
+ *   and scales the sample toward a constant level. Returns the sample unchanged
+ *   when AGC is disabled.
  */
 q15_t agcProcess(q15_t sample)
 {
@@ -924,6 +950,11 @@ q15_t agcProcess(q15_t sample)
     return (q15_t)__SSAT(scaled, 16);
 }
 
+/*
+ * calcRawBERFromSync()
+ *   Counts the bit errors between the 24 sync bits at rxBits and the D-Star data
+ *   sync pattern. Returns the number of differing bits.
+ */
 uint32_t calcRawBERFromSync(const uint8_t *rxBits)
 {
     uint32_t errors = 0;
@@ -934,11 +965,14 @@ uint32_t calcRawBERFromSync(const uint8_t *rxBits)
         errors += __builtin_popcount(diff);
     }
 
-    /* Diagnostic only: 24 bits every 21 frames is too few samples to be a
-     * useful BER, so this no longer feeds the call BER (see dstarFecErrors). */
     return errors;
 }
 
+/*
+ * checkCCITT161()
+ *   Checks the CCITT-16 CRC at the end of a buffer of length bytes. Returns true
+ *   when the CRC matches.
+ */
 bool checkCCITT161(const unsigned char* in, unsigned int length)
 {
     assert(in != NULL);
@@ -955,11 +989,15 @@ bool checkCCITT161(const unsigned char* in, unsigned int length)
         crc.crc16 = (uint16_t)(crc.crc8[1U]) ^ CCITT16_TABLE[crc.crc8[0U] ^ in[i]];
 
     crc.crc16 = ~crc.crc16;
-    /* fprintf(stderr, "crc: %02X  %02X    %02X  %02X\n", crc.crc8[0], crc.crc8[1],
-    in[length -2], in[length - 1]); */
     return crc.crc8[0U] == in[length - 2U] && crc.crc8[1U] == in[length - 1U];
 }
 
+/*
+ * txHeader()
+ *   Encodes a 41 byte D-Star header into its transmitted form: CRC,
+ *   convolutional coding, interleaving and scrambling. in is the header, out
+ *   receives the encoded bytes.
+ */
 void txHeader(const uint8_t* in, uint8_t* out)
 {
     uint8_t intermediate[84U];
@@ -971,7 +1009,6 @@ void txHeader(const uint8_t* in, uint8_t* out)
         out[i]          = 0x00U;
     }
 
-    // Convolve the header
     uint8_t d, d1 = 0U, d2 = 0U, g0, g1;
     uint32_t k = 0U;
     for (i = 0U; i < 42U; i++)
@@ -996,7 +1033,6 @@ void txHeader(const uint8_t* in, uint8_t* out)
         }
     }
 
-    // Interleave the header
     i = 0U;
     while (i < 660U)
     {
@@ -1038,25 +1074,28 @@ void txHeader(const uint8_t* in, uint8_t* out)
         }
     }
 
-    // Scramble the header
     for (i = 0U; i < 83U; i++)
         out[i] ^= SCRAMBLE_TABLE_TX[i];
 }
 
+/*
+ * writeBits()
+ *   Queues one byte of transmit bits for the modem host in 200 byte BITS
+ *   packets. isEOT flushes the partly filled packet.
+ */
 void writeBits(uint8_t c, bool isEOT)
 {
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'B', 'I', 'T', 'S'}; // setup 8 byte header
-    static uint8_t bytePos = 8; // set first position after header
+    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'B', 'I', 'T', 'S'};
+    static uint8_t bytePos = 8;
 
     bytes[bytePos++] = c;
     if (bytePos == 200)
     {
         write(sockfd, bytes, 200);
         bytePos = 8;
-      //  delay(1000);
     }
 
-    if (bytePos > 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
+    if (bytePos > 8 && isEOT)
     {
         memset(bytes+bytePos, 0, 200 - bytePos);
         write(sockfd, bytes, 200);
@@ -1064,6 +1103,11 @@ void writeBits(uint8_t c, bool isEOT)
     }
 }
 
+/*
+ * processBits()
+ *   BIT mode receive entry point. Feeds length bytes through the bit state
+ *   machine, most significant bit first.
+ */
 void processBits(uint8_t* bytes, uint8_t length)
 {
     bool bit;
@@ -1098,37 +1142,35 @@ void processBits(uint8_t* bytes, uint8_t length)
     }
 }
 
+/*
+ * processBitNone()
+ *   BIT mode idle state. Shifts in one bit and starts a header when the D-Star
+ *   frame sync matches; a preamble match is ignored.
+ */
 void processBitNone(bool bit)
 {
-    // Fuzzy matching of the preamble sync sequence
     bitBuffer[0] <<= 1;
     if (bit)
         bitBuffer[0] |= 0x01U;
 
     if (countBits64((bitBuffer[0] & PREAMBLE_MASK) ^ PREAMBLE_DATA) <= PREAMBLE_ERRS)
     {
-        // Extend scan period in D-Star, once preamble is detected
-
         rxState = DSRXS_NONE;
 
         return;
     }
 
-    // Fuzzy matching of the frame sync sequence
     if (countBits64((bitBuffer[0] & FRAME_SYNC_MASK) ^ FRAME_SYNC_DATA) <= FRAME_SYNC_ERRS)
     {
         memset(rxBitBuffer, 0x00U, DSTAR_FEC_SECTION_LENGTH_BYTES);
         rxBufferBits = 0U;
-    //    fprintf(stderr, "Detected header sync.\n");
 
         rxState = DSRXS_HEADER;
         return;
     }
 
-    // Exact matching of the data sync bit sequence
     if (countBits64((bitBuffer[0] & DATA_SYNC_MASK) ^ DATA_SYNC_DATA) == 0U)
     {
-    //    fprintf(stderr, "Detected data sync.\n");
         pthread_mutex_lock(&txSourceMutex);
         if (currentTxSource != TX_NET)
             processData(rxBitBuffer, DSTAR_DATA_LENGTH_BYTES, false, false);
@@ -1143,6 +1185,11 @@ void processBitNone(bool bit)
     }
 }
 
+/*
+ * decodeBitHeader()
+ *   BIT mode header state. Collects the bits of the FEC protected header and,
+ *   when complete, decodes it and moves on to the data state.
+ */
 void decodeBitHeader(bool bit)
 {
     bitBuffer[0] <<= 1;
@@ -1155,10 +1202,8 @@ void decodeBitHeader(bool bit)
     if (rxBufferBits > DSTAR_BUFFER_LENGTH_BITS)
         reset();
 
-    // A full FEC header
     if (rxBufferBits == DSTAR_FEC_SECTION_LENGTH_SYMBOLS)
     {
-        // Process the scrambling, interleaving and FEC, then return if the chcksum was correct
         unsigned char header[DSTAR_HEADER_LENGTH_BYTES];
         bool ok = rxHeader(rxBitBuffer, header);
         if (ok)
@@ -1176,13 +1221,16 @@ void decodeBitHeader(bool bit)
         }
         else
         {
-            // The checksum failed, return to looking for syncs
             rxState = DSRXS_NONE;
-        //    fprintf(stderr, "Header checksum failed.\n");
         }
     }
 }
 
+/*
+ * decodeBitData()
+ *   BIT mode data state. Collects voice frame bits, delivers each completed
+ *   frame, and ends the call on the end sync or when sync is lost.
+ */
 void decodeBitData(bool bit)
 {
     bitBuffer[0] <<= 1;
@@ -1195,7 +1243,6 @@ void decodeBitData(bool bit)
     if (rxBufferBits > DSTAR_BUFFER_LENGTH_BITS)
         reset();
 
-    // Fuzzy matching of the end frame sequences
     if (countBits64((bitBuffer[0] & END_SYNC_MASK) ^ END_SYNC_DATA) <= END_SYNC_ERRS)
     {
         fprintf(stderr, "DSTAR RX end: terminator detected\n");
@@ -1208,20 +1255,17 @@ void decodeBitData(bool bit)
         return;
     }
 
-    // Fuzzy matching of the data sync bit sequence
     bool syncSeen = false;
     if (rxBufferBits >= (DSTAR_DATA_LENGTH_BITS - 3U))
     {
         if (countBits64((bitBuffer[0] & DATA_SYNC_MASK) ^ DATA_SYNC_DATA) <= DATA_SYNC_ERRS)
         {
-       //     fprintf(stderr, "Detected data sync.\n");
             rxBufferBits = DSTAR_DATA_LENGTH_BITS;
             dataBits     = MAX_SYNC_BITS;
             syncSeen       = true;
         }
     }
 
-    // Check to see if the sync is arriving late
     if (rxBufferBits == DSTAR_DATA_LENGTH_BITS && !syncSeen)
     {
         for (uint8_t i = 1U; i <= 3U; i++)
@@ -1238,7 +1282,6 @@ void decodeBitData(bool bit)
 
     dataBits--;
 
-    // We've not seen a data sync for too long, signal RXLOST and change to RX_NONE
     if (dataBits == 0U)
     {
         fprintf(stderr, "DSTAR RX end: no terminator, data sync lost (timeout)\n");
@@ -1251,7 +1294,6 @@ void decodeBitData(bool bit)
         return;
     }
 
-    // Send a data frame to the host if the required number of bits have been received, or if a data sync has been seen
     if (rxBufferBits == DSTAR_DATA_LENGTH_BITS)
     {
         if (syncSeen)
@@ -1273,16 +1315,21 @@ void decodeBitData(bool bit)
             pthread_mutex_unlock(&txSourceMutex);
         }
 
-        // Start the next frame
         memset(rxBitBuffer, 0x00U, DSTAR_DATA_LENGTH_BYTES);
         rxBufferBits = 0U;
     }
 }
 
+/*
+ * writeSamples()
+ *   Turns one byte of transmit bits into shaped transmit samples and queues them
+ *   for the modem host in 200 byte SAMP packets. isEOT flushes the partly filled
+ *   packet.
+ */
 void writeSamples(uint8_t c, bool isEOT)
 {
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'}; // setup 8 byte header
-    static uint8_t bytePos = 8; // set first position after header
+    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'};
+    static uint8_t bytePos = 8;
     q15_t          inBuffer[8U];
     q15_t          outBuffer[DSTAR_RADIO_SYMBOL_LENGTH * 8U];
 
@@ -1300,6 +1347,8 @@ void writeSamples(uint8_t c, bool isEOT)
 
     arm_fir_interpolate_q15(&txModFilter, inBuffer, outBuffer, 8U);
 
+    txClockAdd(DSTAR_RADIO_SYMBOL_LENGTH * 8U);
+
     bytes[5] = 'A';
     bytes[6] = 'M';
     bytes[7] = 'P';
@@ -1312,11 +1361,10 @@ void writeSamples(uint8_t c, bool isEOT)
         {
             write(sockfd, bytes, 200);
             bytePos = 8;
-  //          delay(100);
         }
     }
 
-    if (bytePos >= 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
+    if (bytePos >= 8 && isEOT)
     {
         bytes[5] = 'E';
         bytes[6] = 'O';
@@ -1327,15 +1375,20 @@ void writeSamples(uint8_t c, bool isEOT)
     }
 }
 
+/*
+ * samples()
+ *   SAMPLE mode receive entry point. Feeds length demodulated samples (with
+ *   their RSSI values) through the sync search and the header and data state
+ *   machine.
+ */
 void samples(const q15_t* samples, const uint16_t* rssi, uint8_t length)
 {
     for (uint16_t i = 0U; i < length; i++)
     {
-        rssiAccum = 0;  //+= rssi[i];
+        rssiAccum = 0;
         rssiCount++;
 
-        q15_t sample = samples[i];  //((samples[i] & 0x00ff) << 8) |
-                                    //((samples[i] & 0xff00) >> 8);
+        q15_t sample = samples[i];
 
         bitBuffer[bitPtr] <<= 1;
         if (sample < 0) bitBuffer[bitPtr] |= 0x01U;
@@ -1363,9 +1416,13 @@ void samples(const q15_t* samples, const uint16_t* rssi, uint8_t length)
     }
 }
 
+/*
+ * processNone()
+ *   Idle receive state. Looks for the frame sync in the incoming samples and,
+ *   when found, starts collecting the header.
+ */
 void processNone(q15_t sample)
 {
-    // Fuzzy matching of the frame sync sequence
     bool ret = correlateFrameSync();
     if (ret)
     {
@@ -1381,7 +1438,6 @@ void processNone(q15_t sample)
         return;
     }
 
-    // Fuzzy matching of the data sync bit sequence
     ret = correlateDataSync();
     if (ret)
     {
@@ -1389,6 +1445,13 @@ void processNone(q15_t sample)
     }
 }
 
+/*
+ * decodeHeader()
+ *   Header receive state. Collects the header samples, converts them to bits and
+ *   decodes them with rxHeader(). A bad header returns the receiver to idle; a
+ *   good one is passed to processHeader() unless a network call owns the
+ *   transmitter. Moves to the data state once the header has been read.
+ */
 void decodeHeader(q15_t sample)
 {
     if (countdown > 0U)
@@ -1400,19 +1463,15 @@ void decodeHeader(q15_t sample)
     headerBuffer[headerPtr] = sample;
     headerPtr++;
 
-    // A full FEC header
     if (headerPtr == (DSTAR_FEC_SECTION_LENGTH_SAMPLES + DSTAR_RADIO_SYMBOL_LENGTH))
     {
         uint8_t buffer[DSTAR_FEC_SECTION_LENGTH_BYTES];
         samplesToBits(headerBuffer, DSTAR_RADIO_SYMBOL_LENGTH, DSTAR_FEC_SECTION_LENGTH_SYMBOLS, buffer, DSTAR_FEC_SECTION_LENGTH_SAMPLES);
 
-        // Process the scrambling, interleaving and FEC, then return true if the
-        // chcksum was correct
         uint8_t header[DSTAR_HEADER_LENGTH_BYTES];
         bool ok = rxHeader(buffer, header);
         if (!ok)
         {
-            // The checksum failed, return to looking for syncs
             rxState      = DSRXS_NONE;
             maxFrameCorr = 0;
             maxDataCorr  = 0;
@@ -1426,7 +1485,6 @@ void decodeHeader(q15_t sample)
         }
     }
 
-    // Ready to start the first data section
     if (headerPtr == (DSTAR_FEC_SECTION_LENGTH_SAMPLES + 2U * DSTAR_RADIO_SYMBOL_LENGTH))
     {
         frameCount = 0U;
@@ -1441,9 +1499,15 @@ void decodeHeader(q15_t sample)
     }
 }
 
+/*
+ * decodeData()
+ *   Data receive state. Ends the call (processEOT) on the end sync or when too
+ *   many frames pass without a terminator, follows the data sync, and at each
+ *   frame time converts the frame's samples to bits and passes the voice frame
+ *   to processData() unless a network call owns the transmitter.
+ */
 void decodeData()
 {
-    // Fuzzy matching of the end frame sequences
     if (countBits64((bitBuffer[bitPtr] & DSTAR_END_SYNC_MASK) ^ DSTAR_END_SYNC_DATA) <= END_SYNC_ERRS)
     {
         fprintf(stderr, "DSTAR RX end: terminator detected (frameCount %u)\n", frameCount);
@@ -1459,7 +1523,6 @@ void decodeData()
         return;
     }
 
-    // Fuzzy matching of the data sync bit sequence
     if (minSyncPtr < maxSyncPtr)
     {
         if (dataPtr >= minSyncPtr && dataPtr <= maxSyncPtr)
@@ -1471,7 +1534,6 @@ void decodeData()
             correlateDataSync();
     }
 
-    // We've not seen a data sync for too long, signal RXLOST and change to RX_NONE
     if (frameCount >= MAX_FRAMES)
     {
         fprintf(stderr, "DSTAR RX end: no terminator, data sync lost (timeout)\n");
@@ -1487,7 +1549,6 @@ void decodeData()
         return;
     }
 
-    // Send a data frame to the host if the required number of bits have been received
     if (dataPtr == maxSyncPtr)
     {
         uint8_t buffer[DSTAR_DATA_LENGTH_BYTES];
@@ -1504,6 +1565,12 @@ void decodeData()
     }
 }
 
+/*
+ * correlateFrameSync()
+ *   Correlates the received symbols against the D-Star frame sync pattern. When
+ *   a match better than the stored one is found, remembers its position. Returns
+ *   true when the sync is accepted.
+ */
 bool correlateFrameSync()
 {
     if (countBits64((bitBuffer[bitPtr] & DSTAR_FRAME_SYNC_MASK) ^ DSTAR_FRAME_SYNC_DATA) <= FRAME_SYNC_ERRS)
@@ -1541,6 +1608,12 @@ bool correlateFrameSync()
     return false;
 }
 
+/*
+ * correlateDataSync()
+ *   Correlates the received symbols against the D-Star data sync pattern that
+ *   marks every 21st voice frame, and keeps the sample timing aligned to it.
+ *   Returns true when the sync is accepted.
+ */
 bool correlateDataSync()
 {
     uint8_t maxErrs = 0U;
@@ -1596,6 +1669,11 @@ bool correlateDataSync()
     return false;
 }
 
+/*
+ * samplesToBits()
+ *   Converts count samples from inBuffer, starting at start and wrapping at
+ *   limit, into bits (one per symbol) written to outBuffer.
+ */
 void samplesToBits(const q15_t* inBuffer, uint16_t start, uint16_t count, uint8_t* outBuffer, uint16_t limit)
 {
     for (uint16_t i = 0U; i < count; i++)
@@ -1612,6 +1690,11 @@ void samplesToBits(const q15_t* inBuffer, uint16_t start, uint16_t count, uint8_
     }
 }
 
+/*
+ * acs()
+ *   Add-compare-select step of the Viterbi decoder. Updates the path metrics and
+ *   the path memory for one received symbol pair from the branch metrics.
+ */
 void acs(int* metric)
 {
     int tempMetric[4U];
@@ -1619,12 +1702,10 @@ void acs(int* metric)
     unsigned int j = mar >> 3;
     unsigned int k = mar & 7;
 
-    // Pres. state = S0, Prev. state = S0 & S2
     int m1         = metric[0U] + pathMetric[0U];
     int m2         = metric[4U] + pathMetric[2U];
     tempMetric[0U] = m1 < m2 ? m1 : m2;
 
-    // Count bit errors based on path metric difference
     if (m1 < m2)
     {
         pathMemory0[j] &= BIT_MASK_TABLE0[k];
@@ -1634,7 +1715,6 @@ void acs(int* metric)
         pathMemory0[j] |= BIT_MASK_TABLE1[k];
     }
 
-    // Pres. state = S1, Prev. state = S0 & S2
     m1             = metric[1U] + pathMetric[0U];
     m2             = metric[5U] + pathMetric[2U];
     tempMetric[1U] = m1 < m2 ? m1 : m2;
@@ -1647,7 +1727,6 @@ void acs(int* metric)
         pathMemory1[j] |= BIT_MASK_TABLE1[k];
     }
 
-    // Pres. state = S2, Prev. state = S2 & S3
     m1             = metric[2U] + pathMetric[1U];
     m2             = metric[6U] + pathMetric[3U];
     tempMetric[2U] = m1 < m2 ? m1 : m2;
@@ -1660,7 +1739,6 @@ void acs(int* metric)
         pathMemory2[j] |= BIT_MASK_TABLE1[k];
     }
 
-    // Pres. state = S3, Prev. state = S1 & S3
     m1             = metric[3U] + pathMetric[1U];
     m2             = metric[7U] + pathMetric[3U];
     tempMetric[3U] = m1 < m2 ? m1 : m2;
@@ -1678,6 +1756,11 @@ void acs(int* metric)
     mar++;
 }
 
+/*
+ * viterbiDecode()
+ *   Runs one Viterbi decoding step for a pair of received coded bits: computes
+ *   the branch metrics and calls acs().
+ */
 void viterbiDecode(int* data)
 {
     int metric[8U];
@@ -1694,16 +1777,20 @@ void viterbiDecode(int* data)
     acs(metric);
 }
 
+/*
+ * traceBack()
+ *   Viterbi trace back. Follows the stored paths from the end of the header to
+ *   recover the decoded bits.
+ */
 void traceBack()
 {
-    // Start from the S0, t=31
     unsigned int j = 0U;
     unsigned int k = 0U;
     for (int i = 329; i >= 0; i--)
     {
         switch (j)
         {
-            case 0U:  // if state = S0
+            case 0U:
                 if (!READ_BIT1(pathMemory0, i))
                     j = 0U;
                 else
@@ -1712,7 +1799,7 @@ void traceBack()
                 k++;
                 break;
 
-            case 1U:  // if state = S1
+            case 1U:
                 if (!READ_BIT1(pathMemory1, i))
                     j = 0U;
                 else
@@ -1721,7 +1808,7 @@ void traceBack()
                 k++;
                 break;
 
-            case 2U:  // if state = S1
+            case 2U:
                 if (!READ_BIT1(pathMemory2, i))
                     j = 1U;
                 else
@@ -1730,7 +1817,7 @@ void traceBack()
                 k++;
                 break;
 
-            case 3U:  // if state = S1
+            case 3U:
                 if (!READ_BIT1(pathMemory3, i))
                     j = 1U;
                 else
@@ -1742,6 +1829,11 @@ void traceBack()
     }
 }
 
+/*
+ * checksum()
+ *   Returns true when the CRC at the end of the 41 byte header matches the rest
+ *   of the header.
+ */
 bool checksum(const uint8_t* header)
 {
     union
@@ -1760,18 +1852,22 @@ bool checksum(const uint8_t* header)
            crc.crc8[1U] == header[DSTAR_HEADER_LENGTH_BYTES - 1U];
 }
 
+/*
+ * rxHeader()
+ *   Decodes a received D-Star header: descrambles and deinterleaves in, runs the
+ *   Viterbi decoder and trace back, and checks the CRC. out receives the 41 byte
+ *   header. Returns true when the header is valid.
+ */
 bool rxHeader(uint8_t* in, uint8_t* out)
 {
     int i;
 
-    // Descramble the header
     for (i = 0; i < (int)(DSTAR_FEC_SECTION_LENGTH_BYTES); i++)
         in[i] ^= SCRAMBLE_TABLE_RX[i];
 
     unsigned char intermediate[84U];
     for (i = 0; i < 84; i++) intermediate[i] = 0x00U;
 
-    // Deinterleave the header
     i = 0;
     while (i < 660)
     {
@@ -1856,23 +1952,32 @@ bool rxHeader(uint8_t* in, uint8_t* out)
     return checksum(out);
 }
 
-// Decode GPS packets in slow-speed bytes.
-/* Forward declaration for C++ GPS parsing module */
 extern bool dstar_parse_gps(unsigned char c,
                            char* gps_buffer, int* gps_idx,
                            char* gps_call_out,
                            float* lat_out, float* lon_out, uint16_t* alt_out);
 
-/* Wrapper function that calls C++ GPS parser */
+/*
+ * decodeGPS()
+ *   Feeds one slow data byte to the GPS sentence parser and keeps the position,
+ *   altitude and call sign found in it. Returns true when a complete sentence
+ *   has been decoded.
+ */
 bool decodeGPS(unsigned char c)
 {
     static char tgps[201];
     static int gpsidx = 0;
-    
+
     return dstar_parse_gps(c, tgps, &gpsidx, sGPSCall, &fLat, &fLong, &altitude);
 }
 
-// Decode slow-speed data bytes.
+/*
+ * slowSpeedDataDecode()
+ *   Decodes the three slow data bytes a, b and c of a voice frame. Follows the
+ *   slow data state across frames and collects text messages into metaText and
+ *   GPS sentences into the GPS parser. Returns a status code for the slow data
+ *   frame type.
+ */
 int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char* metaText)
 {
     static bool bSyncFound;
@@ -1886,7 +1991,6 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
     static uint8_t ptr;
     static uint8_t hBuffer[5];
 
-    // Unscramble
     a ^= 0x70;
     b ^= 0x4f;
     c ^= 0x93;
@@ -1900,7 +2004,6 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
         memset(cText, 0x20, 29);
         ucType = 0x00;
         memset(hBuffer, 0x00U, 5);
-  //      memset(header, 0x00U, DSTAR_HEADER_LENGTH_BYTES);
         return 20;
     }
 
@@ -1908,7 +2011,6 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
     {
         ucType = (unsigned char)(a & 0xf0);
 
-        // DV Header start
         if (bSyncFound == true && ucType == 0x50)
         {
             bSyncFound    = false;
@@ -1919,7 +2021,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
 
         switch (ucType)
         {
-            case 0x50:  // Header
+            case 0x50:
             {
                 if (bHeaderActive)
                 {
@@ -1929,14 +2031,14 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
             }
                 break;
 
-            case 0x30:  // GPS
+            case 0x30:
                 if (decodeGPS(b))
                     iRet = 2;
                 else if (decodeGPS(c))
                     iRet = 2;
                 break;
 
-            case 0x40:  // Text
+            case 0x40:
                 iSection = a & 0x0f;
                 if (iSection >= 4)
                 {
@@ -1947,7 +2049,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                 cText[iSection * 5 + 1] = c & 0x7FU;
                 break;
 
-            case 0xc0:  // Code Squelch
+            case 0xc0:
                 break;
 
             default:
@@ -1958,7 +2060,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
     {
         switch (ucType)
         {
-            case 0x50:  // Header
+            case 0x50:
             {
                 if (bHeaderActive)
                 {
@@ -1977,7 +2079,6 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
 
                     if (ptr >= 45 && (hBuffer[0U] & DSTAR_SLOW_DATA_TYPE_MASK) == DSTAR_SLOW_DATA_TYPE_HEADER)
                     {
-                        // Clean up the data
                         header[0U] &= (DSTAR_INTERRUPTED_MASK | DSTAR_URGENT_MASK | DSTAR_REPEATER_MASK);
                         header[1U] = 0x00U;
                         header[2U] = 0x00U;
@@ -1985,7 +2086,6 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                         for (unsigned int i = 3U; i < 39U; i++)
                             header[i] &= 0x7FU;
 
-                        // Check the CRC
                         bool ret = checkCCITT161(header, DSTAR_HEADER_LENGTH_BYTES);
                         if (!ret)
                         {
@@ -1993,12 +2093,9 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                             ptr           = 0;
                             bHeaderActive = false;
                             validSSHeader = false;
-                      //      bFirstSection = false;
-                     //       return 0;
                         }
                         else
                         {
-                        //                        dump((char*)"SS Header", header, DSTAR_HEADER_LENGTH_BYTES);
                         validSSHeader = true;
                         memcpy(ssHeader, header, DSTAR_HEADER_LENGTH_BYTES);
                         bHeaderActive = false;
@@ -2010,7 +2107,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
             }
             break;
 
-            case 0x30:  // GPS
+            case 0x30:
                 if (decodeGPS(a))
                     iRet = 2;
                 else if (decodeGPS(b))
@@ -2019,7 +2116,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                     iRet = 2;
                 break;
 
-            case 0x40:  // Text
+            case 0x40:
                 cText[iSection * 5 + 2] = a & 0x7FU;
                 cText[iSection * 5 + 3] = b & 0x7FU;
                 cText[iSection * 5 + 4] = c & 0x7FU;
@@ -2037,7 +2134,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                 }
                 break;
 
-            case 0xc0:  // Code Squelch
+            case 0xc0:
                 break;
         }
         bFirstSection = true;
@@ -2045,7 +2142,11 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
     return iRet;
 }
 
-// Encode message to slow-speed bytes.
+/*
+ * slowSpeedDataEncode()
+ *   Builds the slow data bytes for the next voice frame from cMessage and writes
+ *   them to ucBytes (three bytes). ucMode 10 restarts the frame counter.
+ */
 void slowSpeedDataEncode(char* cMessage, unsigned char* ucBytes, unsigned char ucMode)
 {
     static int iIndex;
@@ -2132,6 +2233,10 @@ void slowSpeedDataEncode(char* cMessage, unsigned char* ucBytes, unsigned char u
     }
 }
 
+/*
+ * initTimers()
+ *   Clears the table of software timers so every slot is free.
+ */
 void initTimers()
 {
     for (uint8_t i = 0; i < 10; i++)
@@ -2145,6 +2250,11 @@ void initTimers()
     }
 }
 
+/*
+ * getTimer()
+ *   Claims a free timer slot named name with the given duration (in timer thread
+ *   ticks of 1 ms). Returns the slot index, or -1 when all slots are in use.
+ */
 int8_t getTimer(const char* name, uint32_t duration)
 {
     for (uint8_t i = 0; i < 10; i++)
@@ -2166,6 +2276,10 @@ int8_t getTimer(const char* name, uint32_t duration)
     return -1;
 }
 
+/*
+ * isTimerTriggered()
+ *   Returns true when the timer called name exists and has reached its duration.
+ */
 bool isTimerTriggered(const char* name)
 {
     for (uint8_t i = 0; i < 10; i++)
@@ -2181,6 +2295,11 @@ bool isTimerTriggered(const char* name)
     return false;
 }
 
+/*
+ * resetTimer()
+ *   Restarts the timer called name: its count goes back to zero and its
+ *   triggered flag is cleared.
+ */
 void resetTimer(const char* name)
 {
     for (uint8_t i = 0; i < 10; i++)
@@ -2197,6 +2316,10 @@ void resetTimer(const char* name)
     }
 }
 
+/*
+ * disableTimer()
+ *   Frees timer slot id so it no longer counts or triggers.
+ */
 void disableTimer(uint8_t id)
 {
     pthread_mutex_lock(&timerMutex);
@@ -2209,8 +2332,14 @@ void disableTimer(uint8_t id)
     pthread_mutex_unlock(&timerMutex);
 }
 
-// Simple timer thread.
-// Each loop through the while statement takes 1 millisecond.
+/*
+ * timerThread()
+ *   Timer thread. Counts every enabled timer once per millisecond and sets its
+ *   triggered flag when the duration is reached. Also owns the modeHang timer:
+ *   while the mode is busy the timer is held at zero, and once it has been quiet
+ *   for the hang time it queues a SETIDLE command to hand the modem back to
+ *   idle.
+ */
 void* timerThread(void* arg)
 {
     bool idle = true;
@@ -2243,7 +2372,6 @@ void* timerThread(void* arg)
                 }
             }
             pthread_mutex_unlock(&timerMutex);
-            // fprintf(stderr, "T: %d  N: %s D: %u C: %u\n", i, timer[i].name, timer[i].duration, timer[i].count);
             if (txOn && strcasecmp(timer[i].name, "modeHang") == 0)
             {
                 idle = false;
@@ -2273,6 +2401,14 @@ void* timerThread(void* arg)
     return NULL;
 }
 
+/*
+ * processHeader()
+ *   Handles a received or network header. Splits out MY, UR, RPT1, RPT2 and
+ *   suffix, and if RPT1 matches this station starts the call: sets the modem
+ *   mode, records the call on the dashboard and queues the header for the
+ *   gateway and, for duplex or network traffic, the modem. isNet marks network
+ *   originated headers.
+ */
 void processHeader(uint8_t* data, uint8_t length, bool isNet)
 {
     uint8_t buf[49];
@@ -2288,9 +2424,6 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet)
     buf[3] = 0x04;
     memcpy(buf + 4, TYPE_HEADER, 4);
     memcpy(buf + 8, data, length);
-    /* header[] holds the 41-byte header at offset 8 (after the 8-byte
-     * packet prefix), which is how the SS-header path and the canned
-     * BER message in processEOT() read it. */
     memset(header, 0x00, 49);
     memcpy(header + 8, data, length);
 
@@ -2311,7 +2444,6 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet)
     {
         validFrame = true;
 
-        // Reset BER counters for new transmission
         totalBitsDecoded = 0;
         totalBitErrors = 0;
 
@@ -2343,7 +2475,6 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet)
             headerSent = true;
         }
 
-        // only retransmit RF data if in duplex mode
         if (modem_duplex || isNet)
         {
             if (packetType == PACKET_TYPE_FRAME)
@@ -2360,6 +2491,13 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet)
     }
 }
 
+/*
+ * processData()
+ *   Handles one voice data frame. Counts FEC errors for the BER, checks or
+ *   generates the data sync, decodes the slow data text, refreshes the dashboard
+ *   record and queues the frame for the gateway and the modem. genSync says
+ *   whether this host supplies the frame sync, isNet marks network frames.
+ */
 void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
 {
     if (!txOn && validFrame)
@@ -2378,10 +2516,6 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
     memcpy(buffer + 4, TYPE_DATA, 4);
     memcpy(buffer + 8, data, length);
 
-    /* BER the way MMDVMHost does it: count the bit errors the AMBE FEC finds
-     * in the 48 protected bits of every voice frame (about 50 samples a
-     * second), instead of comparing 24 sync bits every 21 frames.  Frames
-     * relayed from the network were never on the air here, so skip those. */
     if (!isNet && length >= 9U)
     {
         unsigned int fecErrors = dstarFecErrors(buffer + 8, DSTAR_FEC_REGENERATE != 0);
@@ -2401,8 +2535,6 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
         }
         else
         {
-            /* Measure raw BER against the known sync pattern.
-             * buffer + 17 holds the 3 received sync bytes (24 bits). */
             syncErrors = calcRawBERFromSync(buffer + 17);
             if (debugM)
                 fprintf(stderr, "Sync BER: %u/24 errors\n", syncErrors);
@@ -2415,8 +2547,6 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
 
     if ((frameCount % 21) == 0 && !genSync)
     {
-        /* Measure raw BER against the known sync pattern.
-         * buffer + 17 holds the 3 received sync bytes (24 bits). */
         syncErrors = calcRawBERFromSync(buffer + 17);
         if (debugM)
             fprintf(stderr, "Sync BER: %u/24 errors\n", syncErrors);
@@ -2527,6 +2657,13 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
         frameCount++;
 }
 
+/*
+ * processEOT()
+ *   Ends the current call. Calculates the BER, saves the last call and the
+ *   history record, sends the end of transmission to the gateway and, when
+ *   needed, to the modem, and resets the call state. isNet marks network
+ *   originated calls.
+ */
 void processEOT(bool isNet)
 {
     float loss_BER = 0.0f;
@@ -2558,8 +2695,6 @@ void processEOT(bool isNet)
             sprintf(gps, "%f %f %d 0 0", fLat, fLong, altitude);
         }
 
-        // Calculate BER
-     //   float loss_BER = ((float)syncErrors / 24.0f) * 100.0f;
         if (!isNet && totalBitsDecoded > 0)
         {
             loss_BER = (float)totalBitErrors / (float)totalBitsDecoded;
@@ -2619,8 +2754,6 @@ void processEOT(bool isNet)
         if ((strcasecmp(rpt1Call, station_rpt1Call) == 0) && modem_duplex && !isNet)
         {
             delay(500000);
-            // Canned EOT sending BER message.
-            // ***********************************************************************
             uint8_t buf2[49] = {0x61, 0x00, 0x31, 0x04, 'D', 'S', 'T', 'H'};
             memcpy(buf2 + 8, header + 8, 41);
             if (packetType == PACKET_TYPE_FRAME)
@@ -2637,10 +2770,7 @@ void processEOT(bool isNet)
             buf2[7] = 'D';
             memcpy(buf2 + 8, AMBE_SILENCE, 9);
             slowSpeedDataEncode(metaText, buf2 + 17, 10);
-            //   write(sockfd, buf2, 20);
-         //   delay(18000);
 
-            //strcpy(metaText, "Have a nice day.   ");
             bzero(metaText, 23);
             memset(metaText, ' ', 20);
             sprintf(buf, "Your BER: %2.1f", loss_BER);
@@ -2669,7 +2799,6 @@ void processEOT(bool isNet)
                 RingBuffer_addData(&rxBuffer, buf2, 20);
                 pthread_mutex_unlock(&rxBufMutex);
             }
-            // ***********************************************************************
         }
     }
 
@@ -2691,6 +2820,12 @@ void processEOT(bool isNet)
     headerSent      = false;
 }
 
+/*
+ * processTx()
+ *   Converts a header, voice frame or end of transmission from the gateway into
+ *   the transmit symbol stream and writes it out as BITS or SAMP packets. type
+ *   selects the item, m_tx is true when the transmission is already running.
+ */
 void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_tx)
 {
     if (type == DSTAR_HEADER && symLen == 0U)
@@ -2717,6 +2852,7 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
             symBuffer[symLen++] = buffer[i];
 
         symPtr = 0U;
+        txClockStop();
         fprintf(stderr, "Header\n");
     }
 
@@ -2728,7 +2864,6 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
             symBuffer[symLen++] = data[i];
 
         symPtr = 0U;
- //       fprintf(stderr, "Data\n");
     }
 
     if (type == DSTAR_EOT2 && symLen == 0U)
@@ -2765,11 +2900,19 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
         {
             symPtr = 0U;
             symLen = 0U;
+            if (type == DSTAR_EOT2)
+                txClockStop();
             return;
         }
     }
 }
 
+/*
+ * rxThread()
+ *   Thread that drains the receive ring buffer. Five byte commands are passed on
+ *   to the modem host connection; headers, voice frames and end of transmission
+ *   are passed to processTx() for transmission.
+ */
 void* rxThread(void* arg)
 {
     uint8_t loop = 0;
@@ -2779,7 +2922,7 @@ void* rxThread(void* arg)
         delay(100);
         loop++;
 
-        if (loop > 120)
+        if (loop > 10)
         {
             pthread_mutex_lock(&rxBufMutex);
             if (RingBuffer_dataSize(&rxBuffer) >= 5)
@@ -2798,6 +2941,13 @@ void* rxThread(void* arg)
                 len = (byte[1] << 8) + byte[2];
                 if (RingBuffer_dataSize(&rxBuffer) >= len)
                 {
+                    /* Hold audio back once the modem has enough queued */
+                    if (len != 5 && packetType == PACKET_TYPE_SAMP && txLeadMs() > TX_LEAD_MAX_MS)
+                    {
+                        pthread_mutex_unlock(&rxBufMutex);
+                        delay(2000);
+                        continue;
+                    }
                     uint8_t buf[len];
                     RingBuffer_getData(&rxBuffer, buf, len);
                     if (len == 5)
@@ -2840,7 +2990,11 @@ void* rxThread(void* arg)
     return NULL;
 }
 
-// Thread to send out going bytes to gateway.
+/*
+ * txThread()
+ *   Thread that sends the bytes queued for the gateway (gwTxBuffer) to the
+ *   gateway socket.
+ */
 void* txThread(void* arg)
 {
     int     sockfd = (intptr_t)arg;
@@ -2851,7 +3005,7 @@ void* txThread(void* arg)
         delay(100);
         loop++;
 
-        if (loop > 100)
+        if (loop > 10)
         {
             pthread_mutex_lock(&gwTxBufMutex);
             if (RingBuffer_dataSize(&gwTxBuffer) >= 5)
@@ -2893,7 +3047,6 @@ void* txThread(void* arg)
             pthread_mutex_unlock(&gwTxBufMutex);
         }
 
-        // Send command data to gateway.
         pthread_mutex_lock(&gwCmdMutex);
         if (RingBuffer_dataSize(&gwCommand) >= 5)
         {
@@ -2939,7 +3092,14 @@ void* txThread(void* arg)
     return NULL;
 }
 
-// Process incoming gateway bytes.
+/*
+ * processGatewaySocket()
+ *   Thread serving the connected D-Star gateway. Registers the gateway, then
+ *   reads its packets: reflector replies update the link status on the
+ *   dashboard, commands are acknowledged, and headers, voice frames and end of
+ *   transmission from the network are decoded as network traffic. Unregisters
+ *   the gateway when the connection closes.
+ */
 void* processGatewaySocket(void* arg)
 {
     int      childfd      = (intptr_t)arg;
@@ -2971,7 +3131,6 @@ void* processGatewaySocket(void* arg)
         if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         {
             delay(5);
-       //     continue;
         }
 
         if (len != 1)
@@ -3080,11 +3239,6 @@ void* processGatewaySocket(void* arg)
             else if (currentTxSource == TX_NET && validFrame && respLen >= 8U + 39U &&
                      memcmp(header + 8 + 3, buffer + 8 + 3, 36) == 0)
             {
-                /* Repeat of the header for the stream already being
-                 * transmitted (G2 sends each header several times).
-                 * Modulating it again would put another preamble and
-                 * header (~440 ms) on air and delay every voice frame
-                 * behind it. */
                 netHeaderRepeats++;
                 pthread_mutex_unlock(&txSourceMutex);
             }
@@ -3095,13 +3249,29 @@ void* processGatewaySocket(void* arg)
                     fprintf(stderr, "NET: new header during net stream (previous stream had no EOT)\n");
                 }
                 netHeaderRepeats = 0;
+                lastNetMs = 0U;
                 processHeader(buffer + 8, respLen - 8, true);
                 pthread_mutex_unlock(&txSourceMutex);
             }
         }
         else if (memcmp(type, TYPE_DATA, typeLen) == 0 && isActiveMode())
         {
+            uint64_t arrived = monoMs();
+            {
+                /* A long gap is either a gap in what the gateway sent (nothing waiting in the socket, the previous
+                   frame handled quickly) or a stall in this thread (previous frame slow, frames queued in the socket). */
+                if (lastNetMs != 0U && arrived - lastNetMs > 60U)
+                {
+                    int pending = 0;
+                    if (ioctl(childfd, FIONREAD, &pending) < 0)
+                        pending = -1;
+                    fprintf(stderr, "NET: gap of %u ms between voice frames (previous frame took %u ms to handle, %d bytes already waiting from the gateway)\n",
+                            (unsigned int)(arrived - lastNetMs), (unsigned int)netHandleMs, pending);
+                }
+                lastNetMs = arrived;
+            }
             pthread_mutex_lock(&txSourceMutex);
+            uint64_t gotLock = monoMs();
             if (currentTxSource == TX_RF)
             {
                 pthread_mutex_unlock(&txSourceMutex);
@@ -3111,6 +3281,10 @@ void* processGatewaySocket(void* arg)
                 processData(buffer + 8, respLen - 8, false, true);
                 pthread_mutex_unlock(&txSourceMutex);
             }
+            netHandleMs = monoMs() - arrived;
+            if (netHandleMs > 100U)
+                fprintf(stderr, "NET: handling one voice frame took %u ms (%u ms of it waiting for the TX lock)\n",
+                        (unsigned int)netHandleMs, (unsigned int)(gotLock - arrived));
         }
         else if (memcmp(type, TYPE_EOT, typeLen) == 0 && isActiveMode())
         {
@@ -3121,11 +3295,11 @@ void* processGatewaySocket(void* arg)
             }
             else
             {
+                lastNetMs = 0U;
                 processEOT(true);
                 pthread_mutex_unlock(&txSourceMutex);
             }
         }
-      //  delay(5000);
     }
 
     fprintf(stderr, "Gateway disconnected.\n");
@@ -3134,7 +3308,6 @@ void* processGatewaySocket(void* arg)
     setReflectorStatus(modemName, "DSTAR", (const char*)linkedReflector, false);
     delGateway(modemName, "main", "DSTAR");
 
-    /* Flush stale data so a reconnecting gateway gets a clean slate */
     pthread_mutex_lock(&gwTxBufMutex);
     RingBuffer_clear(&gwTxBuffer);
     pthread_mutex_unlock(&gwTxBufMutex);
@@ -3152,11 +3325,16 @@ void* processGatewaySocket(void* arg)
     return 0;
 }
 
-// Listen for incoming gateway connection.
+/*
+ * startTCPServer()
+ *   Thread that listens for the D-Star gateway on the server port. For each
+ *   accepted connection it starts txThread() to send data to the gateway and
+ *   processGatewaySocket() to read from it.
+ */
 void* startTCPServer(void* arg)
 {
-    struct hostent* hostp; /* client host info */
-    int childfd;           /* child socket */
+    struct hostent* hostp;
+    int childfd;
     int sockFd;
 
     sockFd = socket(AF_INET, SOCK_STREAM, 0);
@@ -3168,26 +3346,15 @@ void* startTCPServer(void* arg)
         exit(1);
     }
 
-    /* setsockopt: Handy debugging trick that lets
-     * us rerun the server immediately after we kill it;
-     * otherwise we have to wait about 20 secs.
-     * Eliminates "ERROR on binding: Address already in use" error.
-     */
     optval = 1;
     setsockopt(sockFd, SOL_SOCKET, SO_REUSEADDR, (const void*)&optval, sizeof(int));
 
-    /*
-     * build the server's Internet address
-     */
     bzero((char*)&serveraddr, sizeof(serveraddr));
 
-    /* this is an Internet address */
     serveraddr.sin_family = AF_INET;
 
-    /* let the system figure out our IP address */
     serveraddr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    /* this is the port we will listen on */
     serveraddr.sin_port = htons((unsigned short)serverPort);
 
     if (bind(sockFd, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) < 0)
@@ -3199,16 +3366,9 @@ void* startTCPServer(void* arg)
     if (debugM)
         fprintf(stdout, "Opened the TCP socket on port %u\n", serverPort);
 
-    /*
-     * listen: make this socket ready to accept connection requests
-     */
-    if (listen(sockFd, 10) < 0) /* allow 10 requests to queue up */
+    if (listen(sockFd, 10) < 0)
         error((char*)"ERROR on listen");
 
-    /*
-     * main loop: wait for a connection request, echo input line,
-     * then close connection.
-     */
     clientlen = sizeof(clientaddr);
 
     if (sockFd < 0)
@@ -3219,9 +3379,6 @@ void* startTCPServer(void* arg)
 
     while (connected)
     {
-        /*
-         * accept: wait for a connection request
-         */
         childfd = accept(sockFd, (struct sockaddr*)&clientaddr, &clientlen);
         if (childfd >= 0)
             setNoDelay(childfd);
@@ -3233,9 +3390,6 @@ void* startTCPServer(void* arg)
 
         if (childfd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
 
-        /*
-         * gethostbyaddr: determine who sent the message
-         */
         hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
         if (hostp == NULL)
         {
@@ -3282,14 +3436,18 @@ void* startTCPServer(void* arg)
     return NULL;
 }
 
-// Start up connection to modem host.
+/*
+ * startClient()
+ *   Thread that connects to the modem host socket at the address in arg, starts
+ *   the receive thread, sends the mode and radio configuration packet to the
+ *   modem host and then processes the packets it returns.
+ */
 void* startClient(void* arg)
 {
     struct sockaddr_in serv_addr;
     uint8_t buffer[BUFFER_SIZE] = {0};
     char hostAddress[80];
     strcpy(hostAddress, (char*)arg);
-    // Create socket file descriptor
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
         perror("Socket creation error");
@@ -3306,18 +3464,15 @@ void* startClient(void* arg)
     int on = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
 
-    // Prepare the sockaddr_in structure
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port   = htons(clientPort);
 
-    // Convert IPv4 and IPv6 addresses from text to binary form
     if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
-    {  // Connect to localhost
+    {
         perror("Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
 
-    // Connect to the server
     setNoDelay(sockfd);
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
     {
@@ -3344,7 +3499,7 @@ void* startClient(void* arg)
     uint16_t offset   = 0;
     uint16_t respLen  = 0;
     uint8_t typeLen   = 0;
-    uint8_t configLen = 4 + 4 + 11 + 6 + 1 + 40 + 16 + 1 + 1;  // 1 + 1 + 1 + 1 + 12 + 1 + 1 + 1 + 1 + 15;
+    uint8_t configLen = 4 + 4 + 11 + 6 + 1 + 40 + 16 + 1 + 1;
 
     txOn = false;
 
@@ -3358,24 +3513,22 @@ void* startClient(void* arg)
     buffer[25] = txLevel;
     uint8_t bytes[40];
 
-    // Dev: 1200 Hz, symb rate = 4800
     uint32_t reg3  = 0x2A4C4193;
     uint32_t reg10 = 0x0C96473A;
 
-    // K=32
-    uint32_t reg4 = (uint32_t)0b0100 << 0;  // register 4
-    reg4 |= (uint32_t)0b001 << 4;           // mode, GMSK
+    uint32_t reg4 = (uint32_t)0b0100 << 0;
+    reg4 |= (uint32_t)0b001 << 4;
     reg4 |= (uint32_t)0b1 << 7;
     reg4 |= (uint32_t)0b10 << 8;
-    reg4 |= (uint32_t)522U << 10;  // Disc BW
-    reg4 |= (uint32_t)10U << 20;   // Post dem BW
-    reg4 |= (uint32_t)0b00 << 30;  // IF filter (12.5 kHz)
+    reg4 |= (uint32_t)522U << 10;
+    reg4 |= (uint32_t)10U << 20;
+    reg4 |= (uint32_t)0b00 << 30;
 
-    uint32_t reg2 = (uint32_t)0b00 << 28;  // invert data (and RC alpha = 0.5)
-    reg2 |= (uint32_t)0b001 << 4;          // modulation (GMSK)
+    uint32_t reg2 = (uint32_t)0b00 << 28;
+    reg2 |= (uint32_t)0b001 << 4;
 
-    uint32_t reg13 = (uint32_t)0b1101 << 0;           // register 13
-    reg13 |= (uint32_t)ADF7021_SLICER_TH_DSTAR << 4;  // slicer threshold
+    uint32_t reg13 = (uint32_t)0b1101 << 0;
+    reg13 |= (uint32_t)ADF7021_SLICER_TH_DSTAR << 4;
 
     ifConf(bytes, reg2, reg3, reg4, reg10, reg13, atol(modem_rxFrequency), atol(modem_txFrequency), txLevel, rfPower, 0, true);
 
@@ -3383,14 +3536,13 @@ void* startClient(void* arg)
     uint64_t tmp[2] = {PREAMBLE_DATA, PREAMBLE_MASK};
     memcpy(buffer + 66, (uint8_t*)tmp, 16);
     buffer[82] = 0x8a;
-    buffer[83] = 0x01;  // TX LSB fisrt / scan multiplier
+    buffer[83] = 0x01;
     write(sockfd, buffer, configLen);
     dump((char*)"MODE", buffer, configLen);
     sleep(1);
 
     while (connected)
     {
-        // Read data from server
         len = read(sockfd, buffer, 1);
         if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
@@ -3548,7 +3700,6 @@ void* startClient(void* arg)
     }
     txOn = false;
     fprintf(stderr, "Disconnected from host.\n");
-    // Close socket
     close(sockfd);
     connected = false;
     int iRet  = 100;
@@ -3556,6 +3707,14 @@ void* startClient(void* arg)
     return 0;
 }
 
+/*
+ * main()
+ *   Program entry. Parses the command line (-m modem number 1-10, which also
+ *   selects the TCP ports, -d daemon, -v version, -x debug), reads the modem and
+ *   radio configuration, initialises the ring buffers, filters and timers, then
+ *   starts the modem host client, gateway server and timer threads and waits for
+ *   them.
+ */
 int main(int argc, char** argv)
 {
     bool daemon = 0;
@@ -3608,10 +3767,8 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        // If this is the parent, exit
         if (pid > 0) return 0;
 
-        // We are the child from here onwards
         setsid();
 
         umask(0);
@@ -3634,7 +3791,6 @@ int main(int argc, char** argv)
     txModFilter.pCoeffs     = TX_GAUSSIAN_0_35_FILTER;
     txModFilter.pState      = txModState;
 
-    /* Initialize RingBuffers */
     RingBuffer_Init(&rxBuffer, 1600);
     RingBuffer_Init(&gwTxBuffer, 800);
     RingBuffer_Init(&gwCommand, 200);
@@ -3718,7 +3874,6 @@ int main(int argc, char** argv)
     if (strlen(tmp) > 0)
         DATA_SYNC_MIN_PCT = atoi(tmp);
 
-    //  clearDashbCommands();
     clearReflLinkStatus(modemName, "DSTAR");
 
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);
@@ -3766,16 +3921,23 @@ int main(int argc, char** argv)
                 readHostConfig(modemName, "DSTAR", "rpt1Call", rpt1Call);
                 readHostConfig(modemName, "DSTAR", "rpt2Call", rpt2Call);
                 readHostConfig(modemName, "main", "callsign", myCall);
-                uint8_t buf[9];
-                buf[0] = 0x61;
-                buf[1] = 0x00;
-                buf[2] = 0x09;
-                buf[3] = 0x04;
-                memcpy(buf + 4, TYPE_COMMAND, 4);
-                buf[8] = COMM_UPDATE_CONF;
-                pthread_mutex_lock(&gwCmdMutex);
-                RingBuffer_addData(&gwCommand, buf, 9);
-                pthread_mutex_unlock(&gwCmdMutex);
+                if (dstarGWConnected)
+                {
+                    uint8_t buf[9];
+                    buf[0] = 0x61;
+                    buf[1] = 0x00;
+                    buf[2] = 0x09;
+                    buf[3] = 0x04;
+                    memcpy(buf + 4, TYPE_COMMAND, 4);
+                    buf[8] = COMM_UPDATE_CONF;
+                    pthread_mutex_lock(&gwCmdMutex);
+                    RingBuffer_addData(&gwCommand, buf, 9);
+                    pthread_mutex_unlock(&gwCmdMutex);
+                }
+                else
+                {
+                    ackDashbCommand(modemName, "updateConfDSTAR", "success");
+                }
             }
 
             if (dstarGWConnected)
@@ -3861,11 +4023,10 @@ int main(int argc, char** argv)
     clearReflLinkStatus(modemName, "DSTAR");
     fprintf(stderr, "DSTAR service terminated.\n");
     logError(modemName, "main", "DSTAR host terminated.");
-    
-    /* Cleanup RingBuffers */
+
     RingBuffer_Destroy(&rxBuffer);
     RingBuffer_Destroy(&gwTxBuffer);
     RingBuffer_Destroy(&gwCommand);
-    
+
     return 0;
 }

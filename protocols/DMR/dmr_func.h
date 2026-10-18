@@ -271,4 +271,11 @@ bool DMREmbeddedData_getRawData(unsigned char* data, const uint8_t slot);
 
 void decodeGPS(const unsigned char* data,  const uint8_t slot);
 
+/* DMR Slot Type (BPTC 20,8): recovers/stamps the colour code and data
+ * type bits carried in each burst's slot type field. Ported from
+ * MMDVM's DMRSlotType.cpp -- this codebase's dmr_func.c did not have
+ * an equivalent, and RX frame classification needs it. */
+void DMRSlotType_decode(const unsigned char* frame, uint8_t* colorCode, uint8_t* dataType);
+void DMRSlotType_encode(uint8_t colorCode, uint8_t dataType, unsigned char* frame);
+
 #endif

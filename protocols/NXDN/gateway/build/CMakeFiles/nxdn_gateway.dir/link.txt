@@ -1,0 +1,1 @@
+/usr/bin/cc -Wl,--dependency-file=CMakeFiles/nxdn_gateway.dir/link.d CMakeFiles/nxdn_gateway.dir/nxdn_gateway.c.o CMakeFiles/nxdn_gateway.dir/home/pi/OpenMT/tools/string_builder.c.o CMakeFiles/nxdn_gateway.dir/home/pi/OpenMT/tools/tools.c.o -o nxdn_gateway  -lm -lpthread /usr/lib/arm-linux-gnueabihf/libmariadb.so

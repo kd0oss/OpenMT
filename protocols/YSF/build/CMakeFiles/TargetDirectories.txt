@@ -1,0 +1,3 @@
+/home/pi/OpenMT/protocols/YSF/build/CMakeFiles/ysf_host.dir
+/home/pi/OpenMT/protocols/YSF/build/CMakeFiles/edit_cache.dir
+/home/pi/OpenMT/protocols/YSF/build/CMakeFiles/rebuild_cache.dir

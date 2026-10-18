@@ -47,7 +47,7 @@
 #include <dsp_tools.h>
 #include <ADF7021.h>
 
-#include <arm_math.h>
+#include <dsp_compat.h> //<arm_math.h>
 
 #include "p25_func.h"
 
@@ -123,6 +123,7 @@ uint8_t  duration            = 0;
 uint8_t  p25_space           = 0;
 bool     txOn                = false;
 uint16_t modeHang            = 30000;
+uint8_t  rxLevel             = 50;
 uint8_t  txLevel             = 50;
 uint8_t  rfPower             = 128;
 time_t   start_time;
@@ -188,7 +189,7 @@ uint16_t    p25poPtr;
 uint64_t    p25_64BitBuffer;
 uint64_t    m_bitBuffer;
 uint8_t     p25outBuffer[P25_LDU_FRAME_LENGTH_BYTES + 3U];
-uint8_t*    m_buffer;
+uint8_t*    m_buffer = p25outBuffer + 1U;
 uint16_t    p25bufferPtr;
 uint16_t    p25endPtr;
 
@@ -331,12 +332,60 @@ void reset()
     p25srcId        = 0U;
     p25dstId        = 0U;
     p25lastDUID     = 0U;
-    p25nac          = 0U;
+  //  p25nac          = 0U;
     p25poLen        = 0U;
     p25poPtr        = 0U;
     p25txDelay      = 240U;
     p25_64BitBuffer = 0U;
     memset(p25mi, 0x00U, P25_MI_LENGTH_BYTES);
+}
+
+/* 1 = rewrite the voice frames of RF LDUs with their FEC-corrected version
+ * (what MMDVMHost does) before they are relayed.  0 = only count errors.
+ * Frames that needed more than P25_FEC_MAX_ERRORS corrections (p25_fec.h)
+ * are relayed unchanged. */
+#ifndef P25_FEC_REGENERATE
+#define P25_FEC_REGENERATE 1
+#endif
+
+static unsigned int p25RfErrs = 0U;     // bit errors found in this RF call
+static unsigned int p25RfBits = 0U;     // protected bits checked in this RF call
+
+/* Check (and, if enabled, regenerate) the voice frames of an RF LDU. */
+static void p25RfVoice(uint8_t* data, bool nidValid, uint8_t duid)
+{
+    p25RfErrs += p25RegenerateLDU(data + 8, P25_FEC_REGENERATE != 0);
+    p25RfBits += P25_FEC_BITS_PER_LDU;
+
+    /* The NID was matched against the expected values, so put them back */
+    if (P25_FEC_REGENERATE != 0 && nidValid)
+    {
+        encodeNID(data + 8, duid);
+    }
+}
+
+/* Print the BER of the RF call that just ended and return it (0 if none). */
+static float p25RfBer(bool isNet)
+{
+    float ber = 0.0f;
+
+    /* Network calls were never on the air here, so they have no BER and
+     * must not disturb the counters of an RF call. */
+    if (isNet)
+    {
+        return ber;
+    }
+
+    if (p25RfBits > 0U)
+    {
+        ber = (float)p25RfErrs / (float)p25RfBits;
+        fprintf(stderr, "BER: %.6f (%u errors / %u bits)\n", ber, p25RfErrs, p25RfBits);
+    }
+
+    p25RfErrs = 0U;
+    p25RfBits = 0U;
+
+    return ber;
 }
 
 void decodeP25(uint8_t* data, bool isNet)
@@ -375,6 +424,22 @@ void decodeP25(uint8_t* data, bool isNet)
     char cType[4] = "RF";
     if (isNet)
         strcpy(cType, "NET");
+
+    /* RF voice: count the FEC errors and regenerate the frames before the
+     * gateway copy and the relay below are made. */
+    if (!isNet)
+    {
+        if (duid == P25_DUID_LDU1 && rf_state == RS_RF_LISTENING)
+        {
+            p25RfErrs = 0U;
+            p25RfBits = 0U;
+            p25RfVoice(data, valid, duid);
+        }
+        else if ((duid == P25_DUID_LDU1 || duid == P25_DUID_LDU2) && rf_state == RS_RF_AUDIO)
+        {
+            p25RfVoice(data, valid, duid);
+        }
+    }
 
     if (duid == P25_DUID_HEADER)
     {
@@ -492,7 +557,7 @@ void decodeP25(uint8_t* data, bool isNet)
             pthread_mutex_unlock(&stateMutex);
 
             saveLastCall(1, modemName, "P25", cType, src_callsign, "", dst_callsign, "", NULL, "", false);
-            saveHistory(modemName, "P25", cType, src_callsign, "", dst_callsign, 0, "", duration);
+            saveHistory(modemName, "P25", cType, src_callsign, "", dst_callsign, p25RfBer(isNet), "", duration);
 
             pthread_mutex_lock(&stateMutex);
             rf_state = RS_RF_LISTENING;
@@ -796,6 +861,8 @@ void calculateLevels(uint16_t start, uint16_t count)
 
 void processHdr(q15_t sample)
 {
+    uint8_t hdrFrame[108] = {};
+
     if (p25minSyncPtr < p25maxSyncPtr)
     {
         if (p25dataPtr >= p25minSyncPtr && p25dataPtr <= p25maxSyncPtr)
@@ -817,17 +884,23 @@ void processHdr(q15_t sample)
         samplesToBits(nidStartPtr, (2U * 4U), nid, 0U, p25centerVal, p25thresholdVal);
 
         p25duid = nid[1U] & 0x0F;
-
+        fprintf(stderr, "P25_DUID: %d\n", p25duid);
         switch (p25duid)
         {
             case P25_DUID_HDU:
             {
                 calculateLevels(p25hdrStartPtr, P25_HDR_FRAME_LENGTH_SYMBOLS);
 
-                uint8_t frame[P25_HDR_FRAME_LENGTH_BYTES + 1U];
-                samplesToBits(p25hdrStartPtr, P25_HDR_FRAME_LENGTH_SYMBOLS, frame, 8U, p25centerVal, p25thresholdVal);
+                uint8_t frame[P25_HDR_FRAME_LENGTH_BYTES];
+                samplesToBits(p25hdrStartPtr, P25_HDR_FRAME_LENGTH_SYMBOLS, frame, 0U, p25centerVal, p25thresholdVal);
 
-                frame[0U] = 0x01U;
+                hdrFrame[0] = 0x61;
+                hdrFrame[1] = 0x00;
+                hdrFrame[2] = 0x6B;
+                hdrFrame[3] = 0x04;
+                memcpy(hdrFrame + 4, "P25H", 4);
+                memcpy(hdrFrame + 8, frame, P25_HDR_FRAME_LENGTH_BYTES);
+                decodeFrame(hdrFrame, P25_HDR_FRAME_LENGTH_BYTES + 8U, false);
             }
             break;
 
@@ -835,10 +908,16 @@ void processHdr(q15_t sample)
             {
                 calculateLevels(p25hdrSyncPtr, P25_PDU_HDR_FRAME_LENGTH_SYMBOLS);
 
-                uint8_t frame[P25_PDU_HDR_FRAME_LENGTH_BYTES + 1U];
-                samplesToBits(p25hdrSyncPtr, P25_PDU_HDR_FRAME_LENGTH_SYMBOLS, frame, 8U, p25centerVal, p25thresholdVal);
+                uint8_t frame[P25_PDU_HDR_FRAME_LENGTH_BYTES];
+                samplesToBits(p25hdrSyncPtr, P25_PDU_HDR_FRAME_LENGTH_SYMBOLS, frame, 0U, p25centerVal, p25thresholdVal);
 
-                frame[0U] = 0x01U;
+                hdrFrame[0] = 0x61;
+                hdrFrame[1] = 0x00;
+                hdrFrame[2] = 0x35;
+                hdrFrame[3] = 0x04;
+                memcpy(hdrFrame + 4, "P25H", 4);
+                memcpy(hdrFrame + 8, frame, P25_PDU_HDR_FRAME_LENGTH_BYTES);
+                decodeFrame(hdrFrame, P25_PDU_HDR_FRAME_LENGTH_BYTES + 8U, false);
             }
             break;
 
@@ -846,10 +925,16 @@ void processHdr(q15_t sample)
             {
                 calculateLevels(p25hdrStartPtr, P25_TSDU_FRAME_LENGTH_SYMBOLS);
 
-                uint8_t frame[P25_TSDU_FRAME_LENGTH_BYTES + 1U];
-                samplesToBits(p25hdrStartPtr, P25_TSDU_FRAME_LENGTH_SYMBOLS, frame, 8U, p25centerVal, p25thresholdVal);
+                uint8_t frame[P25_TSDU_FRAME_LENGTH_BYTES];
+                samplesToBits(p25hdrStartPtr, P25_TSDU_FRAME_LENGTH_SYMBOLS, frame, 0U, p25centerVal, p25thresholdVal);
 
-                frame[0U] = 0x01U;
+                hdrFrame[0] = 0x61;
+                hdrFrame[1] = 0x00;
+                hdrFrame[2] = 0x35;
+                hdrFrame[3] = 0x04;
+                memcpy(hdrFrame + 4, "P25H", 4);
+                memcpy(hdrFrame + 8, frame, P25_TSDU_FRAME_LENGTH_BYTES);
+                decodeFrame(hdrFrame, P25_TSDU_FRAME_LENGTH_BYTES + 8U, false);
             }
             break;
 
@@ -857,10 +942,16 @@ void processHdr(q15_t sample)
             {
                 calculateLevels(p25hdrStartPtr, P25_TERM_FRAME_LENGTH_SYMBOLS);
 
-                uint8_t frame[P25_TERM_FRAME_LENGTH_BYTES + 1U];
-                samplesToBits(p25hdrStartPtr, P25_TERM_FRAME_LENGTH_SYMBOLS, frame, 8U, p25centerVal, p25thresholdVal);
+                uint8_t frame[P25_TERM_FRAME_LENGTH_BYTES];
+                samplesToBits(p25hdrStartPtr, P25_TERM_FRAME_LENGTH_SYMBOLS, frame, 0U, p25centerVal, p25thresholdVal);
 
-                frame[0U] = 0x01U;
+                hdrFrame[0] = 0x61;
+                hdrFrame[1] = 0x00;
+                hdrFrame[2] = 0x1A;
+                hdrFrame[3] = 0x04;
+                memcpy(hdrFrame + 4, "P25E" , 4);
+                memcpy(hdrFrame + 8, frame, P25_TERM_FRAME_LENGTH_BYTES);
+                decodeFrame(hdrFrame, P25_TERM_FRAME_LENGTH_BYTES + 8U, false);
             }
             break;
 
@@ -868,10 +959,16 @@ void processHdr(q15_t sample)
             {
                 calculateLevels(p25hdrStartPtr, P25_TERMLC_FRAME_LENGTH_SYMBOLS);
 
-                uint8_t frame[P25_TERMLC_FRAME_LENGTH_BYTES + 1U];
-                samplesToBits(p25hdrStartPtr, P25_TERMLC_FRAME_LENGTH_SYMBOLS, frame, 8U, p25centerVal, p25thresholdVal);
+                uint8_t frame[P25_TERMLC_FRAME_LENGTH_BYTES];
+                samplesToBits(p25hdrStartPtr, P25_TERMLC_FRAME_LENGTH_SYMBOLS, frame, 0U, p25centerVal, p25thresholdVal);
 
-                frame[0U] = 0x01U;
+                hdrFrame[0] = 0x61;
+                hdrFrame[1] = 0x00;
+                hdrFrame[2] = 0x3E;
+                hdrFrame[3] = 0x04;
+                memcpy(hdrFrame + 4, "P25E", 4);
+                memcpy(hdrFrame + 8, frame, P25_TERMLC_FRAME_LENGTH_BYTES);
+                decodeFrame(hdrFrame, P25_TERMLC_FRAME_LENGTH_BYTES + 8U, false);
             }
             break;
 
@@ -921,8 +1018,9 @@ void processLdu(q15_t sample)
 
         calculateLevels(p25lduStartPtr, P25_LDU_FRAME_LENGTH_SYMBOLS);
 
-        uint8_t frame[P25_LDU_FRAME_LENGTH_BYTES + 3U];
-        samplesToBits(p25lduStartPtr, P25_LDU_FRAME_LENGTH_SYMBOLS, frame, 8U, p25centerVal, p25thresholdVal);
+        uint8_t frame[P25_LDU_FRAME_LENGTH_BYTES];
+        uint8_t lduFrame[P25_LDU_FRAME_LENGTH_BYTES + 8U];
+        samplesToBits(p25lduStartPtr, P25_LDU_FRAME_LENGTH_SYMBOLS, frame, 0U, p25centerVal, p25thresholdVal);
 
         // We've not seen a data sync for too long, signal RXLOST and change to RX_NONE
         p25lostCount--;
@@ -937,7 +1035,13 @@ void processLdu(q15_t sample)
         }
         else
         {
-            frame[0U] = p25lostCount == (MAX_SYNC_FRAMES - 1U) ? 0x01U : 0x00U;
+            lduFrame[0] = 0x61;
+            lduFrame[1] = 0x00;
+            lduFrame[2] = 0xE0;
+            lduFrame[3] = 0x04;
+            memcpy(lduFrame + 4, "P25L" , 4);
+            memcpy(lduFrame + 8, frame, P25_LDU_FRAME_LENGTH_BYTES);
+            decodeFrame(lduFrame, P25_LDU_FRAME_LENGTH_BYTES + 8U, false);
             p25maxCorr = 0;
         }
     }
@@ -945,7 +1049,7 @@ void processLdu(q15_t sample)
 
 void setEndPtr(const uint8_t duid)
 {
-    fprintf(stderr, "EOT.\n");
+    fprintf(stderr, "Set end ptr.\n");
 
     switch (duid)
     {
@@ -981,7 +1085,7 @@ void processBitNone(bool bit)
     {
         fprintf(stderr, "First sync.\n");
         for (uint8_t i = 0U; i < P25_SYNC_LENGTH_BYTES; i++)
-            p25buffer[i] = P25_SYNC_BYTES[i];
+            m_buffer[i] = P25_SYNC_BYTES[i];
 
         p25lostCount = MAX_SYNC_FRAMES;
         p25bufferPtr = P25_SYNC_LENGTH_BITS;
@@ -991,13 +1095,11 @@ void processBitNone(bool bit)
 
 void processBitHdr(bool bit)
 {
-    fprintf(stderr, "Process header.\n");
-
     p25_64BitBuffer <<= 1;
     if (bit)
         p25_64BitBuffer |= 0x01U;
 
-    WRITE_BIT(p25buffer, p25bufferPtr, bit);
+    WRITE_BIT(m_buffer, p25bufferPtr, bit);
 
     p25bufferPtr++;
     if (p25bufferPtr > P25_LDU_FRAME_LENGTH_BITS)
@@ -1005,7 +1107,9 @@ void processBitHdr(bool bit)
 
     if (p25bufferPtr == P25_SYNC_LENGTH_BITS + 16U)
     {
-        p25duid = p25buffer[7U] & 0x0F;
+        fprintf(stderr, "Detected LDU 1.\n");
+
+        p25duid = m_buffer[7U] & 0x0F;
 
         if (p25duid != P25_DUID_HDU && p25duid != P25_DUID_TSDU && p25duid != P25_DUID_TDU && p25duid != P25_DUID_TDULC)
         {
@@ -1020,11 +1124,13 @@ void processBitHdr(bool bit)
     // Search for end of header frame
     if (p25bufferPtr == p25endPtr)
     {
+        fprintf(stderr, "Detected LDU 2.\n");
+
         uint8_t buf[(p25endPtr / 8U) + 8];
         buf[0] = 0x61; buf[1] = 0x00; buf[2] = 0x00; buf[3] = 0x04;
         buf[4] = 'P'; buf[5] = '2'; buf[6] = '5'; buf[7] = 'H';
         buf[2] = (p25endPtr / 8U) + 8;
-        memcpy(buf + 8, p25buffer, (p25endPtr / 8U));
+        memcpy(buf + 8, m_buffer, (p25endPtr / 8U));
 
         decodeFrame(buf, (p25endPtr / 8U), false);
 
@@ -1040,7 +1146,7 @@ void processBitLdu(bool bit)
     if (bit)
         p25_64BitBuffer |= 0x01U;
 
-    WRITE_BIT(p25buffer, p25bufferPtr, bit);
+    WRITE_BIT(m_buffer, p25bufferPtr, bit);
 
     p25bufferPtr++;
     if (p25bufferPtr > P25_LDU_FRAME_LENGTH_BITS) reset();
@@ -1048,9 +1154,13 @@ void processBitLdu(bool bit)
     // Only search for a sync in the right place +-2 bits
     if (p25bufferPtr >= (P25_SYNC_LENGTH_BITS - 2U) && p25bufferPtr <= (P25_SYNC_LENGTH_BITS + 2U))
     {
+   //     fprintf(stderr, "Process LDU 1.\n");
+
         // Fuzzy matching of the data sync bit sequence
         if (countBits64((p25_64BitBuffer & P25_SYNC_BITS_MASK) ^ P25_SYNC_BITS) <= SYNC_BIT_RUN_ERRS)
         {
+   //         fprintf(stderr, "Process LDU 2.\n");
+
             p25lostCount = MAX_SYNC_FRAMES;
             p25bufferPtr = P25_SYNC_LENGTH_BITS;
         }
@@ -1058,7 +1168,7 @@ void processBitLdu(bool bit)
 
     if (p25bufferPtr == P25_SYNC_LENGTH_BITS + 16U)
     {
-        p25duid = p25buffer[7U] & 0x0F;
+        p25duid = m_buffer[7U] & 0x0F;
         setEndPtr(p25duid);
     }
 
@@ -1069,6 +1179,8 @@ void processBitLdu(bool bit)
         // We've not seen a data sync for too long, signal RXLOST and change to RX_NONE
         if (p25lostCount == 0U)
         {
+            fprintf(stderr, "Data sync not seen.\n");
+
             uint8_t buf[(p25endPtr / 8U) + 8];
             buf[0] = 0x61; buf[1] = 0x00; buf[2] = 0x08; buf[3] = 0x04;
             buf[4] = 'P'; buf[5] = '2'; buf[6] = '5'; buf[7] = 'E';
@@ -1077,11 +1189,13 @@ void processBitLdu(bool bit)
         }
         else
         {
+    //        fprintf(stderr, "Process LDU 3.\n");
+
             uint8_t buf[(p25endPtr / 8U) + 8];
             buf[0] = 0x61; buf[1] = 0x00; buf[2] = 0x00; buf[3] = 0x04;
             buf[4] = 'P'; buf[5] = '2'; buf[6] = '5'; buf[7] = 'L';
             buf[2] = (p25endPtr / 8U) + 8;
-            memcpy(buf + 8, p25buffer, (p25endPtr / 8U));
+            memcpy(buf + 8, m_buffer, (p25endPtr / 8U));
             decodeFrame(buf, (p25endPtr / 8U), false);
 
             p25bufferPtr = 0U;
@@ -1090,6 +1204,8 @@ void processBitLdu(bool bit)
         // Check if we found a TDU to avoid a false "lost lock"
         if (p25duid == P25_DUID_TDU || p25duid == P25_DUID_TDULC)
         {
+            fprintf(stderr, "TDU found.\n");
+
             reset();
         }
     }
@@ -1144,27 +1260,99 @@ void writeBits(uint8_t c, bool isEOT)
     }
 }
 
+void writeSamples(uint8_t c, bool isEOT)
+{
+    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'};  // setup 8 byte header
+    static uint8_t bytePos    = 8;                                             // set first position after header
+    q15_t inBuffer[4U];
+    q15_t intBuffer[P25_RADIO_SYMBOL_LENGTH * 4U];
+    q15_t outBuffer[P25_RADIO_SYMBOL_LENGTH * 4U];
+
+    const uint8_t MASK = 0xC0U;
+
+    for (uint8_t i = 0U; i < 4U; i++, c <<= 2)
+    {
+        switch (c & MASK)
+        {
+            case 0xC0U:
+                inBuffer[i] = P25_LEVELA;
+                break;
+            case 0x80U:
+                inBuffer[i] = P25_LEVELB;
+                break;
+            case 0x00U:
+                inBuffer[i] = P25_LEVELC;
+                break;
+            default:
+                inBuffer[i] = P25_LEVELD;
+                break;
+        }
+    }
+
+    arm_fir_interpolate_q15(&modFilter, inBuffer, outBuffer, 4U);
+
+  //  arm_fir_q15(&lpFilter, intBuffer, outBuffer, P25_RADIO_SYMBOL_LENGTH * 4U);
+
+    bytes[5] = 'A';
+    bytes[6] = 'M';
+    bytes[7] = 'P';
+
+    for (uint8_t i = 0U; i < P25_RADIO_SYMBOL_LENGTH * 4U; i++)
+    {
+        outBuffer[i] *= 1.0f;
+        bytes[bytePos++] = (outBuffer[i] & 0x00ff);
+        bytes[bytePos++] = (outBuffer[i] & 0xff00) >> 8;
+        if (bytePos == 200)
+        {
+            write(sockfd, bytes, 200);
+            bytePos = 8;
+            delay(500);
+        }
+    }
+
+    if (bytePos >= 8 && isEOT)  // If EOT and number of new bytes less than 200 pad out with 0.
+    {
+        bytes[5] = 'E';
+        bytes[6] = 'O';
+        bytes[7] = 'T';
+        memset(bytes + bytePos, 0, 200 - bytePos);
+        write(sockfd, bytes, 200);
+        bytePos = 8;
+    }
+}
+
 void processTx(const uint8_t* data, uint8_t length, const char* type, bool isTx)
 {
     if (strcasecmp(type, TYPE_EOT) == 0)
     {
+        fprintf(stderr, "EOT ==================\n");
         uint8_t tmp[1] = {0x00};
-        writeBits(tmp[0], true);
+        if (packetType == PACKET_TYPE_BIT)
+            writeBits(tmp[0], true);
+        else if (packetType == PACKET_TYPE_SAMP)
+            writeSamples(tmp[0], true);
         return;
     }
 
     if (!isTx)
     {
+        fprintf(stderr, "PREAMBLE ==================\n");
         for (uint8_t i = 0U; i < p25txDelay; i++)
         {
-            writeBits(P25_START_SYNC, false);
+            if (packetType == PACKET_TYPE_BIT)
+                writeBits(P25_START_SYNC, false);
+            else if (packetType == PACKET_TYPE_SAMP)
+                writeSamples(P25_START_SYNC, false);
         }
         delay(10000);
     }
 
     for (uint8_t i = 0U; i < length; i++)
     {
-        writeBits(data[i], false);
+        if (packetType == PACKET_TYPE_BIT)
+            writeBits(data[i], false);
+        else if (packetType == PACKET_TYPE_SAMP)
+            writeSamples(data[i], false);
     }
 }
 
@@ -1521,7 +1709,8 @@ void* txThread(void *arg)
 
 void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
 {
-    uint8_t typeLen = 4;
+    static bool started = false;
+    uint8_t     typeLen = 4;
 
     fprintf(stderr, "Process frame. Len: %d\n", length);
 
@@ -1531,14 +1720,19 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
 
     if (memcmp(buffer + 4, "P25", 3) == 0 && memcmp(buffer + 4, TYPE_EOT, typeLen) != 0)
     {
-        dump((char*)"Data", buffer + 8, length - 8);
+    //    dump((char*)"Data", buffer + 8, length - 8);
         decodeP25(buffer, isNet);
-        if ((modem_duplex || isNet) && txOn)
+        if ((modem_duplex || isNet) && packetType == PACKET_TYPE_FRAME && txOn)
         {
             if (write(sockfd, buffer, length) < 0)
             {
                 fprintf(stderr, "ERROR: host disconnect\n");
             }
+        }
+        else if ((modem_duplex || isNet) && txOn)
+        {
+            processTx(buffer + 8, length - 8, "P25 ", started);
+            started = true;
         }
     }
     else if (memcmp(buffer + 4, TYPE_EOT, 4) == 0)
@@ -1550,11 +1744,15 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
             rf_state   = RS_RF_LISTENING;
             txOn       = false;
             rx_started = false;
+            started    = false;
         }
         pthread_mutex_unlock(&stateMutex);
 
         if (wasOn)
         {
+            if ((modem_duplex || isNet) && packetType != PACKET_TYPE_FRAME)
+                processTx(buffer + 8, length - 8, "P25E", wasOn);
+
             duration = difftime(time(NULL), start_time);
             char tmp[100];
             bzero(tmp, 100);
@@ -1562,12 +1760,12 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
             if (strcasecmp(src_callsign, tmp) != 0)
             {
                 saveLastCall(1, modemName, "P25", cType, src_callsign, tmp, dst_callsign, "", NULL, "", false);
-                saveHistory(modemName, "P25", cType, src_callsign, tmp, dst_callsign, 0, "", duration);
+                saveHistory(modemName, "P25", cType, src_callsign, tmp, dst_callsign, p25RfBer(isNet), "", duration);
             }
             else
             {
                 saveLastCall(1, modemName, "P25", cType, tmp, "", dst_callsign, "", NULL, "", false);
-                saveHistory(modemName, "P25", cType, tmp, "", dst_callsign, 0, "", duration);
+                saveHistory(modemName, "P25", cType, tmp, "", dst_callsign, p25RfBer(isNet), "", duration);
             }
         }
     }
@@ -1936,6 +2134,11 @@ void* startClient(void *arg)
             for (uint16_t i = 8; i < respLen; i = i + 4)
             {
                 memcpy(in, buffer + i, 4);
+                q31_t res1 = in[0] * (rxLevel * 128);
+                in[0] = __SSAT((res1 >> 15), 16);
+                res1 = in[1] * (rxLevel * 128);
+                in[1] = __SSAT((res1 >> 15), 16);
+
                 if (USE_DC_FILTER)
                 {
                     q31_t q31Samples[2];
@@ -2183,7 +2386,7 @@ int main(int argc, char** argv)
 
     char tmp[15];
     readHostConfig(modemName, "config", "modem", tmp);
-    if (strcasecmp(tmp, "openmt") == 0)
+    if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
         packetType = PACKET_TYPE_SAMP;
     else if (strcasecmp(tmp, "openmths") == 0)
         packetType = PACKET_TYPE_BIT;
@@ -2198,6 +2401,8 @@ int main(int argc, char** argv)
         setHostConfig(modemName, "P25", "rfPower", "input", "128");
     }
 
+    readHostConfig(modemName, "P25", "rxLevel", tmp);
+    rxLevel = atoi(tmp);
     readHostConfig(modemName, "P25", "txLevel", tmp);
     txLevel = atoi(tmp);
     readHostConfig(modemName, "P25", "rfPower", tmp);

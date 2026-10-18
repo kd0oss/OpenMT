@@ -1,0 +1,52 @@
+--- /tmp/uh_orig.php	2026-10-13 09:55:37.627771806 -0500
++++ updateHosts.php	2026-10-13 09:55:37.714391880 -0500
+@@ -121,6 +121,40 @@
+     }
+ }
+ 
++function updateNXDNHosts()
++{
++    global $mysql;
++
++    $file = "http://www.pistar.uk/downloads/NXDN_Hosts.txt";
++    $hosts = getHostFile($file);
++    if ($hosts != "error")
++    {
++        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'NXDN' AND status = 'Unlinked'");
++        $lines = explode("\n", $hosts);
++        for ($x = 0; $x < count($lines); $x++)
++        {
++            $line = trim($lines[$x]);
++            if (strlen($line) > 6 && $line[0] != '#')
++            {
++                // "talk group <tab or spaces> address <tab or spaces> port"
++                $fields = preg_split('/\s+/', $line);
++                if (count($fields) < 3 || !ctype_digit($fields[0]) || !ctype_digit($fields[2]))
++                    continue;
++                $nick = mysqli_real_escape_string($mysql, $fields[0]);
++                $ip4 = mysqli_real_escape_string($mysql, $fields[1]);
++                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'NXDN' AND Nick = '".$nick."'";
++                $result = mysqli_query($mysql, $query);
++                if (mysqli_num_rows($result) > 0)
++                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$ip4."', port = ".$fields[2]." WHERE Nick = '".$nick."' AND refl_type = 'NXDN'";
++                else
++                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$nick."', ip4 = '".$ip4."', port = ".$fields[2].", refl_type = 'NXDN'";
++                mysqli_free_result($result);
++                mysqli_query($mysql, $query);
++            }
++        }
++    }
++}
++
+ function updateDSTARHosts()
+ {
+     global $mysql;
+@@ -281,6 +315,8 @@
+ 
+ echo "Updating P25 Hosts.\n";
+ updateP25Hosts();
++echo "Updating NXDN Hosts.\n";
++updateNXDNHosts();
+ echo "Updating M17 Hosts.\n";
+ updateM17Hosts();
+ echo "Updating DSTAR Hosts.\n";

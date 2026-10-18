@@ -65,7 +65,18 @@ extern "C" {
 #include <ADF7021.h>
 }
 
-#include <arm_math.h>
+#include <dsp_compat.h> //<arm_math.h>
+#include <netinet/tcp.h>
+/* Disable Nagle: these programs talk over loopback TCP in small frames
+ * (200 bytes of samples, 3 byte requests).  With Nagle on, a small write
+ * waits for the ACK of the previous one, and the peer delays that ACK for
+ * ~40 ms, so the stream arrives in bursts with 40 ms gaps. */
+static void setNoDelay(int fd)
+{
+    int one = 1;
+
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+}
 
 using namespace std;
 using namespace M17;
@@ -283,11 +294,15 @@ uint8_t  totalSMSMessages = 0;
 uint16_t totalSMSLength   = 0;
 uint16_t voiceFrameCnt    = 0;
 uint16_t lastFrameNum     = 0;
+#define M17_MAX_FILL 4U                 /* lost frames replaced at most (160 ms) */
+uint8_t  lastStreamFrame[48];           /* last stream frame passed on (raw)     */
+uint8_t  lastStreamFrameLen = 0;
 uint16_t serverPort       = 18200;
 uint16_t clientPort       = 18000;
 uint16_t streamId         = 0;
 uint16_t modeHang         = 30000;
 time_t   start_time;
+uint8_t  rxLevel          = 50;
 uint8_t  txLevel          = 50;
 uint8_t  rfPower          = 128;
 char     modem_rxFrequency[11]  = "435000000";
@@ -295,6 +310,7 @@ char     modem_txFrequency[11]  = "435000000";
 uint8_t  symBuffer[600U];
 uint16_t symLen;
 uint16_t symPtr;
+
 
 M17::M17LinkSetupFrame rx_lsf;   //< M17 link setup frame
 M17::M17LinkSetupFrame pkt_lsf;  //< M17 packet link setup frame
@@ -450,6 +466,120 @@ void reset()
     m17txDelay      = 240U;      // 200ms
 }
 
+/* RF repeat: frames are re-encoded from the decoded data instead of being
+ * sent on as received.  Passed on raw, every bit error of the uplink went out
+ * again -- damaged sync words included, which make the receiving radio lose
+ * the frame and resync (the M17 drop outs).  Re-encoded, the downlink has a
+ * clean sync word and LICH, the payload as corrected by the Viterbi decoder,
+ * and continuous frame numbers.  Network streams are encoded by the gateway
+ * already and still go out as they come.  0 = send RF frames on raw. */
+#ifndef M17_REGENERATE
+#define M17_REGENERATE 1
+#endif
+/* RF frames with more Viterbi bit errors than this are logged (uplink
+ * quality; a clean frame has 0) */
+#ifndef M17_RF_ERR_LOG
+#define M17_RF_ERR_LOG 10
+#endif
+bool    regenStarted = false;           /* LSF encoded for this RF over      */
+uint8_t lastPayload[16];                /* last stream payload sent (regen)  */
+
+/* The last-frame flag (bit 15 of the frame number) of an RF frame is not
+ * trusted on its own: a damaged frame number can carry it in the middle of
+ * an over (seen: 0x8079 between 0x0078 and 0x007A).  Sent on, it ended the
+ * stream for the receiving radios and for the reflector, which split the
+ * over in two -- the parrot echo then lost seconds of audio.  So each
+ * regenerated stream frame is held back by one frame: when another stream
+ * frame follows it goes out as an ordinary frame, when the over ends (EOT or
+ * lost signal) it goes out as the last frame. */
+bool    heldValid = false;              /* a payload waits in heldPayload     */
+bool    heldLast  = false;              /* it came in flagged as last         */
+uint8_t heldPayload[16];
+uint16_t heldFn   = 0U;                 /* its frame number, for the log      */
+
+/* Queue one 48 byte M17 frame for transmission ("M17L", "M17S", ...).
+ * false = host connection lost. */
+static bool queueTxFrame(const char* type4, const uint8_t* frame48)
+{
+    uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04};
+
+    memcpy(buf + 4, type4, 4);
+    memcpy(buf + 8, frame48, 48);
+    if (packetType == PACKET_TYPE_FRAME)
+    {
+        if (write(sockfd, buf, 56) < 0)
+        {
+            fprintf(stderr, "ERROR: host disconnect\n");
+            return false;
+        }
+    }
+    else if (packetType == PACKET_TYPE_BIT || packetType == PACKET_TYPE_SAMP)
+    {
+        pthread_mutex_lock(&rxBufMutex);
+        RingBuffer_addData(&rxBuffer, buf, 56);
+        pthread_mutex_unlock(&rxBufMutex);
+    }
+    return true;
+}
+
+/* Queue one 48 byte M17 frame for the gateway (RF traffic to the
+ * reflector). */
+static void queueGwFrame(const char* type4, const uint8_t* frame48)
+{
+    uint8_t hdr[8] = {0x61, 0x00, 56, 0x04};
+
+    memcpy(hdr + 4, type4, 4);
+    pthread_mutex_lock(&gwTxBufMutex);
+    if (m17ReflConnected && RingBuffer_freeSpace(&gwTxBuffer) >= 56)
+    {
+        RingBuffer_addData(&gwTxBuffer, hdr, 8);
+        RingBuffer_addData(&gwTxBuffer, frame48, 48);
+    }
+    pthread_mutex_unlock(&gwTxBufMutex);
+}
+
+/* Start a regenerated RF over: encode the LSF (as received, or rebuilt from
+ * the LICH on a late entry) and queue it for the modem (duplex only; the TX
+ * side sends the preamble in front of it) and for the gateway. */
+static bool regenStart(void)
+{
+    frame_t f;
+
+    encoder.reset();
+    encoder.encodeLsf(rx_lsf, f);
+    regenStarted = true;
+    heldValid    = false;
+    queueGwFrame("M17L", f.data());
+    if (modem_duplex)
+        return queueTxFrame("M17L", f.data());
+    return true;
+}
+
+/* Encode one regenerated stream frame and send it to the modem (duplex) and
+ * the gateway.  false = host connection lost. */
+static bool regenEmit(const uint8_t* payload16, bool last)
+{
+    frame_t   f;
+    payload_t pl;
+
+    memcpy(pl.data(), payload16, 16);
+    encoder.encodeStreamFrame(pl, f, last);
+    memcpy(lastPayload, payload16, 16);
+    queueGwFrame("M17S", f.data());
+    if (modem_duplex)
+        return queueTxFrame("M17S", f.data());
+    return true;
+}
+
+/* End of an RF over: the held frame goes out as the last one. */
+static bool regenFlush(void)
+{
+    if (!regenStarted || !heldValid)
+        return true;
+    heldValid = false;
+    return regenEmit(heldPayload, true);
+}
+
 void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
 {
     static char gps[50];
@@ -467,7 +597,11 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
             frame.data()[x] = buffer[x];
         }
 
+        auto errBefore = decoder.bitErr;
         auto ftype  = decoder.decodeFrame(frame);
+        long frameErr  = (long)(decoder.bitErr - errBefore);
+        /* RF repeat and RF to reflector use regenerated frames */
+        bool rfRegen = M17_REGENERATE && !isNet;
         rx_lsf      = decoder.getLsf();
         bool lsfOk  = rx_lsf.valid();
         if (!txOn)
@@ -477,13 +611,17 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
             frameCnt = 0;
             validFrame = false;
             lastFrameNum = 0;
+            lastStreamFrameLen = 0;
+            regenStarted = false;
+            heldValid = false;
             bzero(metaText, 53);
             start_time = time(NULL);
         }
         if (lsfOk)
         {
             pthread_mutex_lock(&gwTxBufMutex);
-            if (!isNet && m17ReflConnected && RingBuffer_freeSpace(&gwTxBuffer) >= (length + 8))
+            if (!isNet && m17ReflConnected && RingBuffer_freeSpace(&gwTxBuffer) >= (length + 8) &&
+                !(rfRegen && (ftype == M17FrameType::LINK_SETUP || ftype == M17FrameType::STREAM)))
             {
                 uint8_t buf[8];
                 buf[0] = 0x61;
@@ -571,7 +709,12 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
 
             if (ftype == M17FrameType::LINK_SETUP && validFrame)
             {
-                 if (modem_duplex || isNet)
+                if (rfRegen)
+                {
+                    if (!regenStarted && !regenStart())
+                        return;
+                }
+                else if (modem_duplex || isNet)
                 {
                     uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04, 'M', '1', '7', 'L'};
                     memcpy(buf + 8, buffer, length);
@@ -603,24 +746,42 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                     saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, "", true);
                 }
                 M17StreamFrame sf = decoder.getStreamFrame();
-                uint16_t diff = (sf.getFrameNumber() & 0x7fff) - (lastFrameNum & 0x7fff);
-                if ((sf.getFrameNumber() & 0x8000) != 0x8000)
+                /* Frame numbers count 0..0x7FFF and wrap; bit 15 marks the last
+                 * frame.  Every stream frame is passed on: dropping one left a
+                 * 40 ms hole in the TX samples, the modem ran dry and the
+                 * receiving radio lost sync for about half a second.
+                 *
+                 * The decoded number is not always right: with too many bit
+                 * errors the decoder keeps the previous frame's data (same
+                 * number again), and a damaged number can come out as anything
+                 * (0x6158 for 0x0158).  Such a frame is taken as the expected
+                 * one.  A number 1..M17_MAX_FILL past the expected one means
+                 * frames were lost on the way in: those are replaced (see
+                 * below) so the transmission keeps its timing. */
+                uint16_t fn       = sf.getFrameNumber() & 0x7fff;
+                uint16_t expected = (lastFrameNum + 1U) & 0x7fff;
+                uint16_t ahead    = (fn - expected) & 0x7fff;
+                uint16_t missing  = 0;
+
+                if (voiceFrameCnt > 0)
                 {
-                    if (diff > 2 || sf.getFrameNumber() == 0)
+                    if (ahead == 0U)
                     {
-                        fprintf(stderr, "Frame number invalid.\n");
-                        lastFrameNum = sf.getFrameNumber() & 0x7fff;
-                        return;
+                        /* in sequence */
+                    }
+                    else if (ahead <= M17_MAX_FILL)
+                    {
+                        missing = ahead;
+                        fprintf(stderr, "M17: %u frame(s) lost before %04X, filling\n", (unsigned)missing, (unsigned)fn);
+                    }
+                    else
+                    {
+                        fn = expected;          /* damaged number or repeat */
                     }
                 }
-                else
-                {
+                if ((sf.getFrameNumber() & 0x8000) == 0x8000)
                     fprintf(stderr, "Last frame detected.\n");
-              //      txOn = false;
-             //       currentTxSource = TX_NONE;
-             //       return;
-                }
-                lastFrameNum = sf.getFrameNumber();
+                lastFrameNum = fn;
                 frameCnt++;
                 if (!txOn)
                     voiceFrameCnt = 0;
@@ -689,10 +850,71 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                     resetTimer("status");
                 }
 
-                if (modem_duplex || isNet)
+                if (rfRegen)
+                {
+                    uint16_t rawFn = sf.getFrameNumber();
+
+                    if (frameErr > M17_RF_ERR_LOG)
+                        fprintf(stderr, "M17: RF frame %04X decoded with %ld bit errors\n", (unsigned)rawFn, frameErr);
+                    if (!regenStarted && !regenStart())
+                        return;
+                    /* a frame follows: the held one was not the last */
+                    if (heldValid)
+                    {
+                        if (heldLast)
+                            fprintf(stderr, "M17: last-frame flag on %04X in mid over, ignored\n", (unsigned)heldFn);
+                        heldValid = false;
+                        if (!regenEmit(heldPayload, false))
+                            return;
+                    }
+                    /* lost frames: the previous payload again (40 ms of
+                     * repeated audio), with their own frame numbers */
+                    for (uint16_t i = 0; i < missing; i++)
+                    {
+                        if (!regenEmit(lastPayload, false))
+                            return;
+                    }
+                    memcpy(heldPayload, sf.getData() + 2, 16);   /* skip frame number */
+                    heldLast  = (rawFn & 0x8000) == 0x8000;
+                    heldFn    = rawFn;
+                    heldValid = true;
+                }
+                else if (modem_duplex || isNet)
                 {
                     uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04, 'M', '1', '7', 'S'};
+
+                    /* Lost frames: send the previous frame again in their
+                     * place.  The receiver sees a repeated frame number and
+                     * repeats 40 ms of audio, but the stream keeps its timing
+                     * and the receiver stays in sync. */
+                    if (missing > 0U && lastStreamFrameLen == length)
+                    {
+                        memcpy(buf + 8, lastStreamFrame, length);
+                        for (uint16_t i = 0; i < missing; i++)
+                        {
+                            if (packetType == PACKET_TYPE_FRAME)
+                            {
+                                if (write(sockfd, buf, 56) < 0)
+                                {
+                                    fprintf(stderr, "ERROR: host disconnect\n");
+                                    return;
+                                }
+                            }
+                            else if (packetType == PACKET_TYPE_BIT || packetType == PACKET_TYPE_SAMP)
+                            {
+                                pthread_mutex_lock(&rxBufMutex);
+                                RingBuffer_addData(&rxBuffer, buf, length + 8);
+                                pthread_mutex_unlock(&rxBufMutex);
+                            }
+                        }
+                    }
+
                     memcpy(buf + 8, buffer, length);
+                    if (length <= sizeof(lastStreamFrame))
+                    {
+                        memcpy(lastStreamFrame, buffer, length);
+                        lastStreamFrameLen = length;
+                    }
                     if (packetType == PACKET_TYPE_FRAME)
                     {
                         if (write(sockfd, buf, 56) < 0)
@@ -711,6 +933,26 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
             }
             else if (ftype == M17FrameType::PACKET && validFrame)
             {
+                if (modem_duplex || isNet)
+                {
+                    uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04, 'M', '1', '7', 'P'};
+                    memcpy(buf + 8, buffer, length);
+                    if (packetType == PACKET_TYPE_FRAME)
+                    {
+                        if (write(sockfd, buf, 56) < 0)
+                        {
+                            fprintf(stderr, "ERROR: host disconnect\n");
+                            return;
+                        }
+                    }
+                    else if (packetType == PACKET_TYPE_BIT || packetType == PACKET_TYPE_SAMP)
+                    {
+                        pthread_mutex_lock(&rxBufMutex);
+                        RingBuffer_addData(&rxBuffer, buf, length + 8);
+                        pthread_mutex_unlock(&rxBufMutex);
+                    }
+                }
+
                 M17PacketFrame pf = decoder.getPacketFrame();
                 if (!smsStarted && pf.payload()[0] == 0x05)
                 {  // check for valid SMS packet message
@@ -764,31 +1006,14 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                 {
                     saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, "Packet", (const char*)packetData, "", true);
                 }
-
-                if (modem_duplex || isNet)
-                {
-                    uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04, 'M', '1', '7', 'P'};
-                    memcpy(buf + 8, buffer, length);
-                    if (packetType == PACKET_TYPE_FRAME)
-                    {
-                        if (write(sockfd, buf, 56) < 0)
-                        {
-                            fprintf(stderr, "ERROR: host disconnect\n");
-                            return;
-                        }
-                    }
-                    else if (packetType == PACKET_TYPE_BIT || packetType == PACKET_TYPE_SAMP)
-                    {
-                        pthread_mutex_lock(&rxBufMutex);
-                        RingBuffer_addData(&rxBuffer, buf, length + 8);
-                        pthread_mutex_unlock(&rxBufMutex);
-                    }
-                }
             }
         }
     }
     else if (memcmp(type, TYPE_EOT, typeLen) == 0 && validFrame)
     {
+        if (!isNet && !regenFlush())
+            return;
+        heldValid = false;
         pthread_mutex_lock(&gwTxBufMutex);
         if (!isNet && m17ReflConnected && RingBuffer_freeSpace(&gwTxBuffer) >= (length + 8))
         {
@@ -805,6 +1030,8 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
 
         frameCnt = 0;
         lastFrameNum = 0;
+        lastStreamFrameLen = 0;
+        regenStarted = false;
         /* rx_lsf is a C++ object, will be updated on next decode */
 
         if (debugM)
@@ -1329,11 +1556,11 @@ void writeSamples(uint8_t c, bool isEOT)
         {
             write(sockfd, bytes, 200);
             bytePos = 8;
-            delay(500);
+//            delay(200);
         }
     }
 
-    if (bytePos == 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
+    if (bytePos >= 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
     {
         bytes[5] = 'E';
         bytes[6] = 'O';
@@ -1764,9 +1991,26 @@ void* timerThread(void *arg)
     return NULL;
 }
 
+/* Milliseconds from a monotonic clock. */
+static int64_t monoMs(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* A stream or packet with nothing in front of it on air (no LSF caught: late
+ * entry on RF, or a new over after a pause) gets the preamble first.  Without
+ * it the transmission starts with no samples in hand, so any later gap in the
+ * input reaches the air, and the receiver has nothing to lock on to. */
+#define M17_TX_PAUSE_MS 500             /* longer gap = a new transmission */
+
 void* rxThread(void* arg)
 {
     uint8_t loop = 0;
+    bool    leadInSent = false;         /* preamble sent for this transmission */
+    int64_t lastTxMs   = 0;
 
     while (connected)
     {
@@ -1824,23 +2068,36 @@ void* rxThread(void* arg)
                         continue;
                     }
                     uint8_t type[4];
+                    int64_t nowMs = monoMs();
+
                     memcpy(type, buf + 4, 4);
+                    if (nowMs - lastTxMs > M17_TX_PAUSE_MS)
+                        leadInSent = false;     /* long pause: a new over */
+                    lastTxMs = nowMs;
+
                     if (memcmp(type, TYPE_LSF, 4) == 0)
                     {
                         processTx(buf + 8, 48, M17_LSF, false); // send preamble
                         processTx(buf + 8, 48, M17_LSF, true);  // send LSF
+                        leadInSent = true;
                     }
-                    else if (memcmp(type, TYPE_STREAM, 4) == 0)
+                    else if (memcmp(type, TYPE_STREAM, 4) == 0 || memcmp(type, TYPE_PACKET, 4) == 0)
                     {
-                        processTx(buf + 8, 48, M17_STREAM, true);
-                    }
-                    else if (memcmp(type, TYPE_PACKET, 4) == 0)
-                    {
-                        processTx(buf + 8, 48, M17_PACKET, true);
+                        if (!leadInSent)
+                        {
+                            fprintf(stderr, "M17: transmission starts without LSF, sending preamble first\n");
+                            processTx(buf + 8, 48, M17_LSF, false); // preamble only
+                            leadInSent = true;
+                        }
+                        if (memcmp(type, TYPE_STREAM, 4) == 0)
+                            processTx(buf + 8, 48, M17_STREAM, true);
+                        else
+                            processTx(buf + 8, 48, M17_PACKET, true);
                     }
                     else if (memcmp(type, TYPE_EOT, 4) == 0)
                     {
                         processTx(buf + 8, 48, M17_EOT, true);
+                        leadInSent = false;
                     }
                 }
             }
@@ -1894,6 +2151,7 @@ void* startClient(void *arg)
     }
 
     // Connect to the server
+    setNoDelay(sockfd);
     if (connect(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
     {
         if (errno != EINPROGRESS)
@@ -2025,8 +2283,8 @@ void* startClient(void *arg)
         uint8_t type[typeLen];
         memcpy(type, buffer+4, typeLen);
 
-        if (debugM)
-            dump((char*)"M17 data", (unsigned char*)buffer, respLen);
+//        if (debugM)
+  //          dump((char*)"M17 data", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -2039,19 +2297,19 @@ void* startClient(void *arg)
         {
             packetType = PACKET_TYPE_SAMP;
             q15_t smp[2];
-            int16_t in[2];
+            q15_t in[2];
             for (uint16_t i = 8; i < respLen; i = i + 4)
             {
                 memcpy(in, buffer + i, 4);
-                q31_t res1 = in[0] * (128 * 128);
-                in[0] = int16_t(__SSAT((res1 >> 15), 16));
-                res1 = in[1] * (128 * 128);
-                in[1] = int16_t(__SSAT((res1 >> 15), 16));
+                q31_t res1 = in[0] * (rxLevel * 128);
+                in[0] = __SSAT((res1 >> 15), 16);
+                res1 = in[1] * (rxLevel * 128);
+                in[1] = __SSAT((res1 >> 15), 16);
 
                 if (USE_DC_FILTER)
                 {
                     q31_t q31Samples[2];
-                    arm_q15_to_q31((q15_t*)in, q31Samples, 2);
+                    arm_q15_to_q31(in, q31Samples, 2);
 
                     q31_t dcValues[2];
                     arm_biquad_cascade_df1_q31(&dcFilter, q31Samples, dcValues, 2);
@@ -2062,16 +2320,16 @@ void* startClient(void *arg)
 
                     dcLevel /= 2;
 
-                    q15_t offset = q15_t(__SSAT((dcLevel >> 16), 16));
+                    q15_t offset = __SSAT((dcLevel >> 16), 16);
 
                     q15_t dcSamples[2];
                     for (uint8_t i = 0U; i < 2; i++)
-                        dcSamples[i] = (q15_t)in[i] - offset;
+                        dcSamples[i] = in[i] - offset;
 
                     arm_fir_fast_q15(&m17rrc05Filter, dcSamples, smp, 2);
                 }
                 else
-                    arm_fir_fast_q15(&m17rrc05Filter, (q15_t*)in, smp, 2);
+                    arm_fir_fast_q15(&m17rrc05Filter, in, smp, 2);
 
                 samples(smp, 2);
             }
@@ -2429,6 +2687,8 @@ void *startTCPServer(void *arg)
     int sockFd;
 
     sockFd = socket(AF_INET, SOCK_STREAM, 0);
+
+    setNoDelay(sockFd);
     if (sockFd < 0)
     {
         fprintf(stderr, "M17_Service: error when creating the socket: %s\n", strerror(errno));
@@ -2490,6 +2750,8 @@ void *startTCPServer(void *arg)
          * accept: wait for a connection request
          */
         childfd = accept(sockFd, (struct sockaddr *) &clientaddr, &clientlen);
+        if (childfd >= 0)
+            setNoDelay(childfd);
         if (childfd < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
             perror("accept failed");
@@ -2639,7 +2901,7 @@ int main(int argc, char **argv)
 
     char tmp[15];
     readHostConfig(modemName, "config", "modem", tmp);
-    if (strcasecmp(tmp, "openmt") == 0)
+    if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
         packetType = PACKET_TYPE_SAMP;
     else if (strcasecmp(tmp, "openmths") == 0)
         packetType = PACKET_TYPE_BIT;
@@ -2649,6 +2911,7 @@ int main(int argc, char **argv)
     readHostConfig(modemName, "M17", "txLevel", tmp);
     if (strlen(tmp) == 0)
     {
+        setHostConfig(modemName, "M17", "rxLevel", "input", "50");
         setHostConfig(modemName, "M17", "txLevel", "input", "50");
         setHostConfig(modemName, "M17", "rfPower", "input", "128");
     }
@@ -2656,6 +2919,8 @@ int main(int argc, char **argv)
     readHostConfig(modemName, "config", "rxFrequency", modem_rxFrequency);
     readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
 
+    readHostConfig(modemName, "M17", "rxLevel", tmp);
+    rxLevel = atoi(tmp);
     readHostConfig(modemName, "M17", "txLevel", tmp);
     txLevel = atoi(tmp);
     readHostConfig(modemName, "M17", "rfPower", tmp);

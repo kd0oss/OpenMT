@@ -121,6 +121,40 @@ function updateP25Hosts()
     }
 }
 
+function updateNXDNHosts()
+{
+    global $mysql;
+
+    $file = "http://www.pistar.uk/downloads/NXDN_Hosts.txt";
+    $hosts = getHostFile($file);
+    if ($hosts != "error")
+    {
+        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'NXDN' AND status = 'Unlinked'");
+        $lines = explode("\n", $hosts);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            $line = trim($lines[$x]);
+            if (strlen($line) > 6 && $line[0] != '#')
+            {
+                // "talk group <tab or spaces> address <tab or spaces> port"
+                $fields = preg_split('/\s+/', $line);
+                if (count($fields) < 3 || !ctype_digit($fields[0]) || !ctype_digit($fields[2]))
+                    continue;
+                $nick = mysqli_real_escape_string($mysql, $fields[0]);
+                $ip4 = mysqli_real_escape_string($mysql, $fields[1]);
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'NXDN' AND Nick = '".$nick."'";
+                $result = mysqli_query($mysql, $query);
+                if (mysqli_num_rows($result) > 0)
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$ip4."', port = ".$fields[2]." WHERE Nick = '".$nick."' AND refl_type = 'NXDN'";
+                else
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$nick."', ip4 = '".$ip4."', port = ".$fields[2].", refl_type = 'NXDN'";
+                mysqli_free_result($result);
+                mysqli_query($mysql, $query);
+            }
+        }
+    }
+}
+
 function updateDSTARHosts()
 {
     global $mysql;
@@ -261,8 +295,8 @@ function updateDMRIds()
     global $mysql;
 
     exec("curl -sSL http://www.pistar.uk/downloads/DMRIds.dat.gz  --user-agent Pi-Star_Pi-Star_20260101 | gunzip -c > DMRIds.dat", $out, $ret);
-echo $out."   ".$ret."\n";
-//    if ($hosts != "error")
+    echo $out."   ".$ret."\n";
+    //    if ($hosts != "error")
     {
         mysqli_query($mysql, "TRUNCATE modem_host.dmr_ids");
         $lines = file("DMRIds.dat", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
@@ -273,20 +307,76 @@ echo $out."   ".$ret."\n";
                 $fields = explode("\t", $lines[$x]);
                 $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '".$fields[0]."', Callsign = '".$fields[1]."', Name = '".$fields[2]."'";
                 mysqli_query($mysql, $query);
-                echo ".";
+//                echo ".";
+            }
+        }
+    }
+
+    $file = "http://www.pistar.uk/downloads/NXDN.csv";
+    $users = getHostFile($file);
+    if ($users != "error")
+    {
+        $lines = explode("\n", $users);
+        for ($x = 1; $x < count($lines)-1; $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode(",", $lines[$x]);
+                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '".$fields[0]."', Callsign = '".$fields[1]."', Name = '".substr($fields[2], 0, 40)."'";
+                mysqli_query($mysql, $query);
+//                echo ".";
             }
         }
     }
 }
 
+function updateYSFHosts()
+{
+    global $mysql;
+//sleep(2000);
+    // JSON list of the YSF reflectors (the same file as YSFHostsUpdate.sh)
+    exec("curl -H 'Authorization: Token f8278d375db51dfcde20be8b30fa7537aebf3af3' https://refcheck.radio/api/hostfile-gate/fetch/json/ysf/ -o  YSFHosts.json", $out, $ret);
+    $lines = file_get_contents("YSFHosts.json");
+
+        $list = json_decode($lines, true);
+        if (!is_array($list) || !isset($list['reflectors']) || !is_array($list['reflectors']))
+            return;
+
+        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'YSF' AND status = 'Unlinked'");
+        foreach ($list['reflectors'] as $r)
+        {
+            if (!isset($r['designator']) || !isset($r['name']) || !isset($r['ipv4']) || !isset($r['port']))
+                continue;
+            if (!ctype_digit((string)$r['designator']) || !ctype_digit((string)$r['port']) || (int)$r['port'] == 0)
+                continue;
+            $nick = mysqli_real_escape_string($mysql, (string)$r['designator']);
+            $ip4 = mysqli_real_escape_string($mysql, (string)$r['ipv4']);
+            $country = (!empty($r['use_xx_prefix'])) ? "XX" : (isset($r['country']) ? (string)$r['country'] : "na");
+            $name = mysqli_real_escape_string($mysql, $country."-".$r['name']);
+            $country = mysqli_real_escape_string($mysql, substr($country, 0, 2));
+            $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'YSF' AND Nick = '".$nick."'";
+            $result = mysqli_query($mysql, $query);
+            if (mysqli_num_rows($result) > 0)
+                $query = "UPDATE modem_host.reflectors SET ip4 = '".$ip4."', port = ".(int)$r['port'].", Name = '".$name."', Country = '".$country."' WHERE Nick = '".$nick."' AND refl_type = 'YSF'";
+            else
+                $query = "INSERT INTO modem_host.reflectors SET Nick = '".$nick."', ip4 = '".$ip4."', port = ".(int)$r['port'].", Name = '".$name."', Country = '".$country."', refl_type = 'YSF'";
+            mysqli_free_result($result);
+            mysqli_query($mysql, $query);
+        }
+}
+
 echo "Updating P25 Hosts.\n";
-updateP25Hosts();
+//updateP25Hosts();
+echo "Updating NXDN Hosts.\n";
+//updateNXDNHosts();
+echo "Updating YSF Hosts.\n";
+updateYSFHosts();
 echo "Updating M17 Hosts.\n";
-updateM17Hosts();
+//updateM17Hosts();
 echo "Updating DSTAR Hosts.\n";
-updateDSTARHosts();
+//updateDSTARHosts();
 echo "Updating DMR Id's.\n";
-updateDMRIds();
+//updateDMRIds();
 echo "\nUpdates complete.\n";
 
 mysqli_close($mysql);

@@ -1,0 +1,55 @@
+--- ../../nxdn/dashboard/updateHosts.php	2026-10-13 09:55:43.031119000 -0500
++++ updateHosts.php	2026-10-14 14:52:41.246745442 -0500
+@@ -155,6 +155,43 @@
+     }
+ }
+ 
++function updateYSFHosts()
++{
++    global $mysql;
++
++    // JSON list of the YSF reflectors (the same file as YSFHostsUpdate.sh)
++    $file = "https://hostfiles.refcheck.radio/YSFHosts.json";
++    $hosts = getHostFile($file);
++    if ($hosts != "error")
++    {
++        $list = json_decode($hosts, true);
++        if (!is_array($list) || !isset($list['reflectors']) || !is_array($list['reflectors']))
++            return;
++
++        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'YSF' AND status = 'Unlinked'");
++        foreach ($list['reflectors'] as $r)
++        {
++            if (!isset($r['designator']) || !isset($r['name']) || !isset($r['ipv4']) || !isset($r['port']))
++                continue;
++            if (!ctype_digit((string)$r['designator']) || !ctype_digit((string)$r['port']) || (int)$r['port'] == 0)
++                continue;
++            $nick = mysqli_real_escape_string($mysql, (string)$r['designator']);
++            $ip4 = mysqli_real_escape_string($mysql, (string)$r['ipv4']);
++            $country = (!empty($r['use_xx_prefix'])) ? "XX" : (isset($r['country']) ? (string)$r['country'] : "na");
++            $name = mysqli_real_escape_string($mysql, $country."-".$r['name']);
++            $country = mysqli_real_escape_string($mysql, substr($country, 0, 2));
++            $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'YSF' AND Nick = '".$nick."'";
++            $result = mysqli_query($mysql, $query);
++            if (mysqli_num_rows($result) > 0)
++                $query = "UPDATE modem_host.reflectors SET ip4 = '".$ip4."', port = ".(int)$r['port'].", Name = '".$name."', Country = '".$country."' WHERE Nick = '".$nick."' AND refl_type = 'YSF'";
++            else
++                $query = "INSERT INTO modem_host.reflectors SET Nick = '".$nick."', ip4 = '".$ip4."', port = ".(int)$r['port'].", Name = '".$name."', Country = '".$country."', refl_type = 'YSF'";
++            mysqli_free_result($result);
++            mysqli_query($mysql, $query);
++        }
++    }
++}
++
+ function updateDSTARHosts()
+ {
+     global $mysql;
+@@ -317,6 +354,8 @@
+ updateP25Hosts();
+ echo "Updating NXDN Hosts.\n";
+ updateNXDNHosts();
++echo "Updating YSF Hosts.\n";
++updateYSFHosts();
+ echo "Updating M17 Hosts.\n";
+ updateM17Hosts();
+ echo "Updating DSTAR Hosts.\n";

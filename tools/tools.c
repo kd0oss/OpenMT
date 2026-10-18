@@ -1562,7 +1562,7 @@ bool addGPS(const int id, const float latitude, const float longitude,
 
     char query[200];
     sprintf(query,"INSERT INTO modem_host.gps SET id = %d, latitude = %f, longitude = %f, altitude_meters = %d,\
- bearing = %d, speed_kph = %d", id, latitude, longitude, altitude, bearing, speed);
+                   bearing = %d, speed_kph = %d", id, latitude, longitude, altitude, bearing, speed);
 
     if (mysql_query(mysql_conn, query))
     {
@@ -1573,4 +1573,78 @@ bool addGPS(const int id, const float latitude, const float longitude,
 
     mysql_close(mysql_conn);
     return true;
+}
+
+// Function to populate the Raspberry Pi model name
+void get_pi_model(char* dest, size_t dest_size)
+{
+    FILE* fp = fopen("/proc/device-tree/model", "r");
+    if (fp == NULL)
+    {
+        strncpy(dest, "Unknown Hardware", dest_size);
+        return;
+    }
+
+    if (fgets(dest, dest_size, fp) == NULL)
+    {
+        strncpy(dest, "Unknown Model", dest_size);
+    }
+
+    // Remove potential trailing newline or garbage character
+    dest[strcspn(dest, "\n")] = '\0';
+    fclose(fp);
+}
+
+// Function to populate the Operating System Name
+void get_os_release(char* dest, size_t dest_size)
+{
+    FILE* fp = fopen("/etc/os-release", "r");
+    if (fp == NULL)
+    {
+        strncpy(dest, "Unknown Linux OS", dest_size);
+        return;
+    }
+
+    char line[256];
+    int found = 0;
+
+    while (fgets(line, sizeof(line), fp))
+    {
+        // Look for the PRETTY_NAME configuration line
+        if (strncmp(line, "PRETTY_NAME=", 12) == 0)
+        {
+            // Extract the value inside the quotes
+            char* start = strchr(line, '"');
+            if (start != NULL)
+            {
+                start++;  // Move past the first quote
+                char* end = strchr(start, '"');
+                if (end != NULL)
+                {
+                    *end = '\0';  // Terminate string at the closing quote
+                    strncpy(dest, start, dest_size - 1);
+                    dest[dest_size - 1] = '\0';  // Ensure null-termination
+                    found               = 1;
+                }
+            }
+            break;
+        }
+    }
+
+    if (!found)
+    {
+        strncpy(dest, "Unknown OS Line", dest_size);
+    }
+    fclose(fp);
+}
+
+// Interrogation function that packages both variables into a struct
+PiSystemInfo interrogate_pi()
+{
+    PiSystemInfo info;
+
+    get_pi_model(info.model, sizeof(info.model));
+    get_os_release(info.os_name, sizeof(info.os_name));
+
+    return info;
 }

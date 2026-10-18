@@ -125,7 +125,7 @@ extern bool m_dcd;
 // DEMOD_CLK = 6.1440 MHz (DMR, YSF_H, YSF_L, P25, M17)
 // DEMOD_CLK = 3.0720 MHz (NXDN)
 // DEMOD_CLK = 6.1440 MHz (POCSAG)
-define ADF7021_PFD              6144000.0
+#define ADF7021_PFD              6144000.0
 
 // PLL (REG 01)
 #define ADF7021_REG1_VHF1        0x021F5021

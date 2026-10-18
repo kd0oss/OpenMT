@@ -19,10 +19,11 @@
 
 #include <ADF7021.h>
 #include <RingBuffer.h>
-#include <arm_math.h>
+#include <dsp_compat.h> //<arm_math.h>
 #include <arpa/inet.h>
 #include <ctype.h>
 //#include <dmr_emb.h>
+#include <dmr_fec.h>
 #include <dmr_func.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -46,6 +47,17 @@
 #include <time.h>
 #include <tools.h>
 #include <unistd.h>
+#include <netinet/tcp.h>
+/* Disable Nagle: these programs talk over loopback TCP in small frames
+ * (200 bytes of samples, 3 byte requests).  With Nagle on, a small write
+ * waits for the ACK of the previous one, and the peer delays that ACK for
+ * ~40 ms, so the stream arrives in bursts with 40 ms gaps. */
+static void setNoDelay(int fd)
+{
+    int one = 1;
+
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+}
 
 #define VERSION "2026-01-21"
 #define BUFFER_SIZE 1024
@@ -131,6 +143,11 @@ bool debugM           = false;
 bool connected        = true;
 bool reflBusy         = false;
 bool modem_duplex     = false;
+/* Simplex: a call received from the radio is in progress. Duplex marks this
+ * with txOn, because the repeater relays what it hears; simplex never
+ * transmits what it receives, so txOn must stay off (it keys the downlink in
+ * SAMPLE and BIT mode) and this is used instead. */
+static bool dmrSimplexRf = false;
 bool dmrReflConnected = false;
 bool dmrGWConnected   = false;
 bool slotActive[2]    = {false, false};
@@ -179,6 +196,56 @@ static const uint8_t SETIDLE[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_IDLE};
 arm_biquad_casd_df1_inst_q31 dcFilter;
 q31_t dcState[4];
 
+/* --- DMR TX modulation (SAMPLE/BIT packet types) ---
+ * DMR uses 4-level FSK: 2 bits/symbol, 4800 symbols/s, a root-raised-cosine
+ * (sqrt, not plain raised-cosine) 0.2-rolloff pulse shape, and its own
+ * deviation table -- these are DMR's actual values from MMDVM's
+ * DMRDMOTX.cpp/DMRTX.cpp, not P25's (an earlier version of this file
+ * incorrectly reused the P25 RC_0_2_FILTER/levels; those are a different,
+ * plain-raised-cosine filter with different levels and do not apply here).
+ */
+static const unsigned int DMR_RADIO_SYMBOL_LENGTH = 5U;  // Samples per symbol at 24 kHz
+
+static const q15_t DMR_LEVELA =  1362;
+static const q15_t DMR_LEVELB =   454;
+static const q15_t DMR_LEVELC =  -454;
+static const q15_t DMR_LEVELD = -1362;
+
+// Generated using rcosdesign(0.2, 8, 5, 'sqrt') in MATLAB
+static q15_t DMR_RRC_FILTER[] = {0, 0, 0, 0, 850, 219, -720, -1548, -1795, -1172, 237, 1927, 3120, 3073, 1447, -1431, -4544, -6442,
+                                 -5735, -1633, 5651, 14822, 23810, 30367, 32767, 30367, 23810, 14822, 5651, -1633, -5735, -6442,
+                                 -4544, -1431, 1447, 3073, 3120, 1927, 237, -1172, -1795, -1548, -720, 219, 850}; // numTaps = 45, L = 5
+static const uint16_t DMR_RRC_FILTER_PHASE_LEN = 9U;      // phaseLength = numTaps/L
+
+arm_fir_interpolate_instance_q15 dmrModFilter;
+q15_t dmrModState[16U];  // blockSize + phaseLength - 1, 4 + 9 - 1 plus spare
+
+/* --- DMR dual-slot TX scheduler (SAMPLE/BIT packet types) ---
+ * A real DMR repeater transmits a continuous TDMA carrier made up of
+ * alternating slot 1 / CACH / slot 2 / CACH bursts (see MMDVM's
+ * CDMRTX::process()), whether or not either slot actually has traffic --
+ * a receiving subscriber radio needs that continuous structure (and the
+ * CACH's short-LC/AT/TC bits) to achieve and keep frame lock. decodeDMR()
+ * used to call processTx() directly and immediately whenever a frame
+ * arrived for TX, with no CACH and no idle-burst filler; that produced a
+ * sample stream with no TDMA structure at all, which a real radio cannot
+ * decode even though bytes were reaching the modem.
+ *
+ * dmrTxThread() (defined further down, after the dual-slot RX it also
+ * drives) is a free-running real-time scheduler that owns the actual
+ * on-air cadence; decodeDMR()'s TX call sites below now just push a
+ * completed 33-byte frame into the matching slot's FIFO for the scheduler
+ * to pick up and frame with CACH in its proper turn. */
+static RingBuffer dmrTxFifo[2U];
+static pthread_mutex_t dmrTxFifoMutex[2U] = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_MUTEX_INITIALIZER};
+pthread_t dmrTxThreadHandle;
+
+// Built once in main() from DMR_IDLE_DATA + DMRSlotType_encode(), and sent
+// in place of a real frame whenever a slot's FIFO is empty.
+static uint8_t dmrIdleFrame[33U];  // DMR_FRAME_LENGTH_BYTES (must be a literal: global array size)
+
+void* dmrTxThread(void* arg);
+
 typedef struct TIMERS
 {
     char name[20];
@@ -195,6 +262,12 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet);
 void sendDataToModem(uint8_t* data, uint8_t length, uint8_t slot, bool isNet);
 void sendCommToModem(uint8_t* data, uint8_t length);
 void* startTCPServer(void* arg);
+void writeBits(uint8_t c, bool isEOT);
+void writeSamples(uint8_t c, bool isEOT);
+void processTx(const uint8_t* data, uint8_t length, bool isEOT);
+void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet);
+void dmrRxSamples(const q15_t* samples, uint16_t length);
+void dmrRxBits(const uint8_t* bytes, uint8_t length);
 
 // error - wrapper for perror
 void error(char* msg)
@@ -389,12 +462,12 @@ void* timerThread(void* arg)
             }
             pthread_mutex_unlock(&timerMutex);
             // fprintf(stderr, "T: %d  N: %s D: %u C: %u\n", i, timer[i].name, timer[i].duration, timer[i].count);
-            if (txOn && strcasecmp(timer[i].name, "modeHang") == 0)
+            if ((txOn || dmrSimplexRf) && strcasecmp(timer[i].name, "modeHang") == 0)
             {
                 idle = false;
                 resetTimer("modeHang");
             }
-            else if (!txOn && strcasecmp(timer[i].name, "modeHang") == 0)
+            else if (!txOn && !dmrSimplexRf && strcasecmp(timer[i].name, "modeHang") == 0)
             {
                 if (!idle)
                 {
@@ -551,6 +624,16 @@ void sendDataToModem(uint8_t* data, uint8_t length, uint8_t slot, bool isNet)
 {
     if (!isNet && !modem_duplex) return;
 
+    /* DMD1/DMD2 packets (TYPE_DMR_START on/off, relayed frames) are
+     * FRAME-mode messages for MMDVM firmware: modem_host turns them into
+     * MMDVM serial frames (0xE0, length, 0x18/0x1A, payload). In SAMPLE and
+     * BIT mode there is no firmware to consume them -- modem_host logged
+     * them as "RX Mode buffer invalid header [E0] [04] ... [1D] [01]" --
+     * and this host keys the transmitter itself through the SAMP/BITS/EOT
+     * stream (dmrTxThread()), so they're not sent at all. */
+    if (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT)
+        return;
+
     uint8_t buf[length + 8];
 
     buf[0] = 0x61;
@@ -573,6 +656,2219 @@ void sendCommToModem(uint8_t* data, uint8_t length)
     write(sockfd, data, length);
 }
 
+void writeBits(uint8_t c, bool isEOT)
+{
+    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'B', 'I', 'T', 'S'};  // setup 8 byte header
+    static uint8_t bytePos    = 8;                                            // set first position after header
+
+    bytes[bytePos++] = c;
+    if (bytePos == 200)
+    {
+        write(sockfd, bytes, 200);
+        bytePos = 8;
+    }
+
+    if (bytePos > 8 && isEOT)  // If EOT and number of new bytes less than 200 pad out with 0.
+    {
+        memset(bytes + bytePos, 0, 200 - bytePos);
+        write(sockfd, bytes, 200);
+        bytePos = 8;
+    }
+}
+
+/* TX samples written since the current downlink started (reset by
+ * dmrTxThread() at downlink start). Lets a TX timing report from the
+ * bridge be sanity-checked: it names a TX sample that has already been
+ * written, so a report naming a later one belongs to some other stream. */
+static volatile uint32_t dmrTxSamplesWritten = 0U;
+
+void writeSamples(uint8_t c, bool isEOT)
+{
+    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'};  // setup 8 byte header
+    static uint8_t bytePos    = 8;                                            // set first position after header
+    q15_t inBuffer[4U];
+    q15_t outBuffer[DMR_RADIO_SYMBOL_LENGTH * 4U];
+
+    const uint8_t MASK = 0xC0U;
+
+    for (uint8_t i = 0U; i < 4U; i++, c <<= 2)
+    {
+        switch (c & MASK)
+        {
+            case 0xC0U:
+                inBuffer[i] = DMR_LEVELA;
+                break;
+            case 0x80U:
+                inBuffer[i] = DMR_LEVELB;
+                break;
+            case 0x00U:
+                inBuffer[i] = DMR_LEVELC;
+                break;
+            default:
+                inBuffer[i] = DMR_LEVELD;
+                break;
+        }
+    }
+
+    /* Single raised-cosine interpolation stage straight to the output --
+     * no secondary lowpass pass (see the P25 SAMPLE-mode fix this host
+     * family relies on: an extra filter stage there distorted the C4FM
+     * waveform enough that a real radio would not decode it). */
+    arm_fir_interpolate_q15(&dmrModFilter, inBuffer, outBuffer, 4U);
+    dmrTxSamplesWritten += DMR_RADIO_SYMBOL_LENGTH * 4U;
+
+    bytes[5] = 'A';
+    bytes[6] = 'M';
+    bytes[7] = 'P';
+
+    for (uint8_t i = 0U; i < DMR_RADIO_SYMBOL_LENGTH * 4U; i++)
+    {
+        bytes[bytePos++] = (outBuffer[i] & 0x00ff);
+        bytes[bytePos++] = (outBuffer[i] & 0xff00) >> 8;
+        if (bytePos == 200)
+        {
+            write(sockfd, bytes, 200);
+            bytePos = 8;
+            delay(500);
+        }
+    }
+
+    if (bytePos >= 8 && isEOT)  // If EOT and number of new bytes less than 200 pad out with 0.
+    {
+        bytes[5] = 'E';
+        bytes[6] = 'O';
+        bytes[7] = 'T';
+        memset(bytes + bytePos, 0, 200 - bytePos);
+        write(sockfd, bytes, 200);
+        bytePos = 8;
+    }
+}
+
+/* Modulate/queue an already-fully-formed DMR burst (sync, CACH, EMB, etc.
+ * already stamped in by the caller) for TX in SAMPLE or BIT packet mode.
+ * Every DMR burst is a complete, self-synchronized 33-byte (264-bit) unit
+ * transmitted in its own TDMA slot, so unlike D-STAR/P25/M17 there is no
+ * separate preamble to insert here. The caller passes isEOT=false during
+ * a live transmission -- the 200-byte modem socket packet fills naturally
+ * across successive bursts and flushes when full, same as P25/D-STAR/M17.
+ * isEOT=true is for the one-shot end-of-transmission flush only (see the
+ * txOn edge handling in dmrTxThread()); passing it on every burst would
+ * tag ~33 packets/sec with the EOT header and force the modem to tear
+ * down and re-key its TX chain each time, overflowing its RX buffer. */
+void processTx(const uint8_t* data, uint8_t length, bool isEOT)
+{
+    if (packetType != PACKET_TYPE_SAMP && packetType != PACKET_TYPE_BIT)
+        return;
+
+    for (uint8_t i = 0U; i < length; i++)
+    {
+        bool last = isEOT && (i == (length - 1U));
+        if (packetType == PACKET_TYPE_SAMP)
+            writeSamples(data[i], last);
+        else
+            writeBits(data[i], last);
+    }
+}
+
+
+/* =====================================================================
+ * DMR RX (SAMPLE and BIT packet types) -- true dual-slot version,
+ * single free-running correlator.
+ *
+ * decodeDMR() below expects an already-demodulated burst: an 8-byte wire
+ * header, a control byte (DMR_SYNC_DATA/DMR_SYNC_AUDIO flags + dataType
+ * in the low nibble), and the 33-byte DMR frame. In FRAME mode the modem
+ * firmware builds that for us; in SAMPLE/BIT mode this host has to do
+ * the demodulation itself, the same way dstar_host.c's samples()/
+ * processBits() do for D-STAR.
+ *
+ * Two different designs were tried here before this one:
+ *
+ *   1. A port of MMDVM's CDMRDMORX (DMO/hotspot-style single continuous
+ *      correlator over one 60ms ring buffer). It found sync reliably,
+ *      but had no way to tell slot 1 and slot 2 traffic apart and always
+ *      reported bursts as slot 1 -- not good enough for a true 2-slot
+ *      repeater.
+ *
+ *   2. A port of MMDVM's CDMRSlotRX/CDMRRX: two fully independent
+ *      correlators, each externally "armed" once per TDMA half-cycle by
+ *      dmrTxThread()'s own nanosleep()-paced scheduling loop, mirroring
+ *      how real MMDVM hardware shares one ISR between TX and RX timing.
+ *      On real hardware over the air, this locked sync exactly once and
+ *      then never reacquired it for the rest of a continuous voice call,
+ *      even though the TX scheduler kept running correctly throughout.
+ *      The reason: dmrTxThread() paces itself from CLOCK_MONOTONIC, which
+ *      has no real phase relationship to the rate at which the modem
+ *      actually delivers demodulated RX samples. Any drift between the
+ *      two -- even a few hundred ppm of difference -- eventually walks
+ *      the externally-armed scan window off the real burst position, and
+ *      once that happens there is no way back, because the window is
+ *      only re-armed by the (now out-of-phase) scheduler. This host is
+ *      "purely reactive, no tick" by design, so there is no shared clock
+ *      to lean on the way real hardware does.
+ *
+ * This version fixes that by giving RX no dependency on dmrTxThread() at
+ * all: it times itself purely from its own incoming samples, the one
+ * clock it can actually trust -- exactly the way a real subscriber radio
+ * has to, since it has no access to a repeater's internal TX timing
+ * either. On a TDMA DMR channel exactly one station's burst occupies the
+ * air at any instant, so a single, continuously free-running correlator
+ * (design #1 above) sees every burst from both slots, back-to-back, one
+ * roughly every 30ms. The only thing design #1 was missing was knowing
+ * which slot each burst belonged to; that is recovered here by timing
+ * each newly-locked burst's absolute sample position (dataPtr never
+ * resets -- it free-runs for the life of the process) against the first
+ * lock of the current "sync session":
+ *
+ *     slot = round((syncPtr - firstSyncPtr) / samplesPerSlot) % 2
+ *
+ * samplesPerSlot comes from the real RX sample clock itself (24 kHz),
+ * so this stays correct even though the TX scheduler never enters into
+ * it. If RX sync is lost for a long stretch (silence, dropout), the
+ * "first lock" reference is re-anchored on the next sync, which costs
+ * nothing worse than re-deciding which physical slot number a fresh
+ * burst sequence gets labelled -- both slots' content still flows
+ * through correctly either way.
+ *
+ * Update: one correlator turned out NOT to see both slots once coasting
+ * was added (voice bursts B-F have no sync, so a locked stream has to be
+ * followed 60ms at a time, looking only near its own expected sync). A
+ * real-hardware test with both slots keyed at once received only one
+ * radio. RX now has two tracking contexts sharing one sample front end;
+ * see DMR_RX_CTX below. */
+
+static uint8_t dmrCountBits8(uint8_t bits)
+{
+    return (uint8_t)__builtin_popcount(bits);
+}
+
+static uint8_t dmrCountBits32(uint32_t bits)
+{
+    return (uint8_t)__builtin_popcount(bits);
+}
+
+static uint8_t dmrCountBits64(uint64_t bits)
+{
+    return (uint8_t)__builtin_popcountll(bits);
+}
+
+// A sentinel well above anything dataPtr/syncPtr/startPtr/endPtr will
+// ever legitimately hold (those are free-running uint32_t sample
+// counts), meaning "no burst end scheduled yet".
+static const uint32_t DMR_RX_NOENDPTR = 0xFFFFFFFFU;
+
+static const uint8_t DMR_RX_CONTROL_NONE  = 0x00U;
+static const uint8_t DMR_RX_CONTROL_VOICE = 0x20U;
+static const uint8_t DMR_RX_CONTROL_DATA  = 0x40U;
+static const uint8_t DMR_RX_CONTROL_IDLE  = 0x80U;  // MMDVM CONTROL_IDLE: burst from the idle receiver
+
+static const uint8_t DMR_RXS_NONE  = 0U;
+static const uint8_t DMR_RXS_VOICE = 1U;
+static const uint8_t DMR_RXS_DATA  = 2U;
+
+/* p25_func.h's confirmed-working SAMPLE-mode correlator (same free-
+ * running architecture as this one, same P25_RADIO_SYMBOL_LENGTH = 5)
+ * uses Q15(0.57) here, not Q15(0.60) -- aligning to it since there's no
+ * other basis to justify a different value for DMR specifically. */
+static const q15_t DMR_RX_SCALING_FACTOR = 18750;  // Q15(0.57), was 19505/Q15(0.60)
+
+static const uint8_t DMR_MAX_SYNC_SYMBOLS_ERRS = 2U;
+static const uint8_t DMR_MAX_SYNC_BYTES_ERRS   = 4U;  // used by the separate BIT-mode RX path only
+static const uint8_t DMR_MAX_SYNC_LOST_FRAMES  = 13U;
+
+/* p25_func.h's correlator uses a DIFFERENT byte-error tolerance
+ * depending on whether it's acquiring sync from cold (stricter, 2
+ * errors -- avoid locking onto noise) or already tracking a burst
+ * sequence (looser, 4 errors -- context already supports a weaker
+ * match). This SAMPLE-mode DMR correlator used one flat value (3) for
+ * both cases; splitting it the same way p25 does. */
+static const uint8_t DMR_MAX_SYNC_BYTE_START_ERRS = 2U;
+static const uint8_t DMR_MAX_SYNC_BYTE_RUN_ERRS   = 4U;
+
+static const uint16_t DMR_SYNC_LENGTH_SYMBOLS_LOCAL = 24U;   // DMR_SYNC_LENGTH_BYTES * 4
+static const uint16_t DMR_SYNC_LENGTH_SAMPLES_LOCAL = DMR_SYNC_LENGTH_SYMBOLS_LOCAL * DMR_RADIO_SYMBOL_LENGTH;
+static const uint16_t DMR_FRAME_LENGTH_SYMBOLS_LOCAL = DMR_FRAME_LENGTH_BYTES * 4U;
+static const uint16_t DMR_FRAME_LENGTH_SAMPLES_LOCAL = DMR_FRAME_LENGTH_SYMBOLS_LOCAL * DMR_RADIO_SYMBOL_LENGTH;
+
+/* dmr_func.h's DMR_SLOT_TYPE_LENGTH_BITS/BYTES (8U/1U) describe a
+ * different field than MMDVM's DMRDefines.h constant of the same name
+ * (20U bits -- the slot type FEC block position within a burst), so
+ * these are defined locally from the authoritative MMDVM values rather
+ * than reused from dmr_func.h. */
+static const uint16_t DMR_SLOT_TYPE_LENGTH_SAMPLES_LOCAL = 50U;   // 10 symbols * 5 samples/symbol
+static const uint16_t DMR_INFO_LENGTH_SAMPLES_LOCAL      = 490U;  // 98 symbols * 5 samples/symbol
+
+// One TDMA slot period (CACH + burst): 30ms @ 24kHz.
+static const uint32_t DMR_SLOT_PERIOD_SAMPLES_LOCAL = 720U;
+
+/* Same slot, next TDMA frame: 2 x 30ms = 60ms @ 24kHz. Once a voice or
+ * data sequence is in progress, the next burst on this slot is expected
+ * exactly this far after the current one. Voice bursts B-F carry EMB
+ * instead of a sync pattern, so they can only be found by coasting this
+ * far forward -- never by searching for sync. */
+static const uint32_t DMR_RX_BURST_REPEAT_SAMPLES   = 2U * DMR_SLOT_PERIOD_SAMPLES_LOCAL;
+
+/* Symbol-domain (2 bits/symbol packed) forms of the MS-sourced sync
+ * patterns, used for amplitude-based SAMPLE-mode correlation. RX only
+ * ever looks for MS-sourced sync: whether this host is a true duplex
+ * repeater or a simplex hotspot, the thing transmitting on the other
+ * end of the RF link is always a subscriber radio (see MMDVM's
+ * DMRSlotRX.cpp and DMRDMORX.cpp, which both hardcode this). */
+static const uint32_t DMR_MS_DATA_SYNC_SYMBOLS  = 0x0076286EU;
+static const uint32_t DMR_MS_VOICE_SYNC_SYMBOLS = 0x0089D791U;
+static const uint32_t DMR_SYNC_SYMBOLS_MASK     = 0x00FFFFFFU;
+
+static const int8_t DMR_MS_DATA_SYNC_SYMBOLS_VALUES[]  = {-3, +3, +3, +3, -3, +3, +3, -3, -3, -3, +3, -3, +3, -3, -3, -3, -3, +3, +3, -3, +3, +3, +3, -3};
+static const int8_t DMR_MS_VOICE_SYNC_SYMBOLS_VALUES[] = {+3, -3, -3, -3, +3, -3, -3, +3, +3, +3, -3, +3, -3, +3, +3, +3, +3, -3, -3, +3, -3, -3, -3, +3};
+
+static const uint8_t DMR_RX_BIT_MASK_TABLE[] = {0x80U, 0x40U, 0x20U, 0x10U, 0x08U, 0x04U, 0x02U, 0x01U};
+#define DMR_WRITE_BIT1(p, i, b) \
+    (p)[(i) >> 3] = (b) ? ((p)[(i) >> 3] | DMR_RX_BIT_MASK_TABLE[(i) & 7]) : ((p)[(i) >> 3] & ~DMR_RX_BIT_MASK_TABLE[(i) & 7])
+
+uint8_t dmrColorCode = 1U;  // set from config in main()
+
+/* Shared sample front end: one ring buffer and one symbol-rate bit
+ * history, fed by every incoming sample. "buffer" is a true ring
+ * (indexed modulo its size) because dataPtr and every context's
+ * syncPtr/startPtr/endPtr are free-running absolute sample counts that
+ * never reset to 0 -- see the file comment above. */
+typedef struct DMR_RX_STATE
+{
+    uint32_t bitBuffer[5U];   // DMR_RADIO_SYMBOL_LENGTH (must be a literal: struct member array size)
+    q15_t    buffer[900U];    // ring buffer: a burst + lookback margin always fits
+    uint32_t bitPtr;
+    uint32_t dataPtr;
+} DMR_RX_STATE;
+
+/* One tracking context per TDMA slot. A single correlator can only
+ * follow one burst stream: once locked it coasts from burst to burst
+ * (60ms apart) and only looks at +/-1 sample around each expected sync,
+ * so a second radio on the other slot -- 30ms away -- is never examined.
+ * Real-hardware test with both slots keyed at once confirmed exactly
+ * that: only one radio was ever received. With two contexts, one can be
+ * locked onto each slot while the free scan keeps looking for the other
+ * whenever a context is idle. */
+typedef struct DMR_RX_CTX
+{
+    uint32_t syncPtr;
+    uint32_t startPtr;
+    uint32_t endPtr;
+    q31_t    maxCorr;
+    q15_t    centre[4U];
+    q15_t    threshold[4U];
+    uint8_t  averagePtr;
+    uint8_t  control;
+    uint8_t  syncCount;
+    uint8_t  state;
+    uint8_t  n;
+    uint8_t  type;
+    uint8_t  slot;    // TDMA slot label (0/1) this context's stream is delivered on
+    uint8_t  index;   // which context this is (0/1), for debug output only
+    uint32_t expectPtr;  // where this stream's next sync is expected (fixed centre of the tracking window)
+    int32_t  driftQ8;    // measured burst-position drift, 1/256 sample per burst
+    int32_t  driftAccQ8; // fractional drift carried between coasted bursts
+    uint8_t  sinceSync;  // bursts coasted since the last sync was found
+} DMR_RX_CTX;
+
+static DMR_RX_STATE dmrRx;
+static DMR_RX_CTX   dmrRxCtx[2U];
+
+/* A cold-scan sync candidate this close (modulo one TDMA frame) to a
+ * stream another context is already tracking belongs to that stream, not
+ * a new one. The other slot's bursts sit 720 samples away, far outside
+ * this guard. 120 samples = 5ms. */
+static const int32_t DMR_RX_STREAM_GUARD_SAMPLES = 120;
+
+/* While a voice/data sequence is being tracked, the next burst's sync is
+ * searched for within +/- this many samples of where it's expected, and
+ * the best correlation in that window wins. MMDVM uses +/-1 because its RX
+ * and TX share one hardware clock; here samples pass through modem_host
+ * and the network, and real-hardware logs showed the burst position
+ * drifting ~1 sample per superframe -- enough that a +/-1 window missed a
+ * call's voice syncs entirely, RX declared the call lost after 13 frames
+ * while the radio was still transmitting, and the repeater de-keyed.
+ * 12 samples is +/-2.4 symbols; the other slot is 720 samples away. */
+static const int32_t DMR_RX_TRACK_WINDOW_SAMPLES = 12;
+
+/* Drift tracking. A window alone only re-centres when a sync is found --
+ * once per voice superframe (burst A) -- so bursts B-F in between are read
+ * at a position that drifts further off with every burst. Each found sync's
+ * offset from where it was expected, divided by the bursts coasted since,
+ * is the residual drift per burst; half of it is folded into driftQ8 and
+ * coasting steps by 1440 + drift. Clamped to +/-2 samples per burst.
+ * One sync can move the estimate by at most DMR_RX_MAX_DRIFT_STEP_Q8, so a
+ * one-off jump in burst timing (re-centred by the window anyway) isn't
+ * mistaken for a steady drift, while a real drift still builds up over a
+ * few superframes. */
+static const int32_t DMR_RX_MAX_DRIFT_Q8      = 2 * 256;
+static const int32_t DMR_RX_MAX_DRIFT_STEP_Q8 = 64;  // 0.25 sample/burst per sync
+
+/* Slot identity from timing. An MS picks its timeslot from the repeater's
+ * own outbound timing (CACH TC bit), and its inbound bursts carry no slot
+ * number, so the only real source of slot identity is where a burst lands
+ * relative to our TX schedule: its "phase", modulo the 60ms TDMA frame,
+ * after dmrTxThread()'s slot-1 start time. TS1 and TS2 bursts sit 30ms
+ * apart in phase. Where the TS1 group sits depends on modem/network
+ * buffering, so it's a per-installation value: [DMR] SlotPhase in the
+ * host config, in ms. Real-hardware measurements (with the downlink always
+ * starting at a cycle boundary): stable to +/-0.5ms within a key-up, but
+ * varying between key-ups -- TS1 seen at 47.1-58.0ms, TS2 at 18.3-31.7ms,
+ * i.e. 47.1-61.7ms in TS1 terms. The default centre is the middle of that
+ * range. A burst is TS1 if its phase is within +/-15ms of the centre, else
+ * TS2, so the default leaves ~7ms of margin either side of what's been
+ * seen. The key-up-to-key-up variation comes from the modem's own TX
+ * start-up buffering, which this host can't observe. With debug on, every synced
+ * burst's phase is printed by dmrRxLogSlotPhase() so it can be re-measured.
+ *
+ * Sample timestamps: RX samples arrive in packets whose delivery is
+ * clumped by queueing, so "packet arrival time minus how far back the
+ * sample is" jitters by tens of ms (a first test showed two bursts that
+ * were exactly 6 x 60ms apart in the sample stream reading 13.2ms and
+ * 48.6ms). Standard fix for that: track the MINIMUM of (arrival time -
+ * nominal sample time) over a rolling window. The least-delayed packet
+ * gives the best estimate of the fixed offset between the sample clock
+ * and CLOCK_MONOTONIC; queueing delay only ever adds to it. */
+static int64_t         dmrRxClockOffsetNs      = INT64_MAX;  // min offset, current window
+static int64_t         dmrRxClockOffsetPrevNs  = INT64_MAX;  // min offset, previous window
+static int64_t         dmrRxClockWindowStartNs = 0;
+static const int64_t   DMR_RX_CLOCK_WINDOW_NS  = 2000000000LL;  // 2s
+static int64_t         dmrTxSlot1StartNs       = 0;   // written by dmrTxThread()
+static pthread_mutex_t dmrTxSlotTimeMutex      = PTHREAD_MUTEX_INITIALIZER;
+static int64_t         dmrRxTs1PhaseNs         = 54500000LL;  // [DMR] SlotPhase, set in main()
+
+/* Sample-exact slot timing (SAMPLE mode with the SX1255 bridge). The
+ * bridge drives capture and playback from one I2S clock, so it can report
+ * which RX sample was being captured as a given TX sample went out on air
+ * (an OPENMT_TX_TIMING frame, forwarded by modem_host as "TXTM"). That is
+ * the same relationship MMDVM firmware gets from sharing one ISR between
+ * DAC and ADC, and it lets this host place every RX sample within its own
+ * TDMA cycle exactly:
+ *
+ *   cycle position = (k + (rxPtr - refRxPtr)) mod 1440
+ *
+ * where TX sample 0 of a downlink is the start of the CACH before TX slot
+ * 1 (dmrTxThread() always starts there) and a cycle is 1440 samples. Then
+ * MMDVM's own windows apply: CDMRTX marks MARK_SLOT1 on the third byte of
+ * that CACH (cycle sample 50), and CDMRSlotRX for TS1 accepts a sync from
+ * 400 to 490 samples after the mark -- so a TS1 sync lands at cycle
+ * 450-540, centre 495, and TS2 one slot (720 samples) later. A burst is
+ * TS1 within +/-360 samples of 495, else TS2. [DMR] SlotDelay (samples,
+ * default 0) shifts the windows later, like MMDVM's DMR delay setting.
+ * Until a report arrives for the current downlink, the wall-clock phase
+ * estimate above is used instead. */
+static bool            dmrTxRefValid           = false;   // guarded by dmrTxSlotTimeMutex
+static uint32_t        dmrTxRefRxPtr           = 0U;      // RX sample on air with TX sample dmrTxRefK
+static uint32_t        dmrTxRefK               = 0U;
+static int32_t         dmrSlotDelaySamples     = 0;       // [DMR] SlotDelay, set in main()
+static const int32_t   DMR_CYCLE_SAMPLES       = 1440;
+static const int32_t   DMR_TS1_SYNC_CYCLE_POS  = 495;     // MMDVM: mark at 50 + scan 400-490
+
+/* TX hang (SAMPLE/BIT mode). The downlink stays up for dmrTxHangDurNs
+ * after the last reason to transmit ends -- a wake-up with no call after
+ * it, or the last active slot's call ending (terminator, lost signal or
+ * the slot watchdog) -- and dmrTxThread() un-keys only if no new call has
+ * made a slot active by then. Like a real MMDVM repeater, this lets radios
+ * reply without a fresh wake-up, and lets RX pick a still-transmitting
+ * radio back up after losing its sync instead of dropping straight to
+ * idle (where only a wake-up is accepted). dmrTxHangNs is when the hang
+ * started; 0 = no hang running. [DMR] TxHang in the host config, seconds. */
+static int64_t         dmrTxHangNs             = 0;
+static int64_t         dmrTxHangDurNs          = 3000000000LL;  // 3s default
+
+/* Slot activity watchdog (SAMPLE/BIT mode). decodeDMR() marks a slot
+ * active on any data-sync burst, CSBKs included, but only a terminator or
+ * a LOST clears it. A slot activated by a lone CSBK -- no call behind it,
+ * so no terminator and no RX coasting to produce a LOST -- stayed active
+ * forever and kept the repeater keyed (seen on real hardware). Every
+ * frame decodeDMR() sees refreshes its slot's timestamp; dmrSlotWatchdog()
+ * delivers a LOST for any active slot quiet for DMR_SLOT_IDLE_TIMEOUT_NS,
+ * which runs the normal end-of-call cleanup. A live call delivers a frame
+ * every 60ms (coasted or not), so it never trips this. */
+static int64_t         dmrSlotLastFrameNs[2]   = {0, 0};
+static pthread_mutex_t dmrSlotActivityMutex    = PTHREAD_MUTEX_INITIALIZER;
+static const int64_t   DMR_SLOT_IDLE_TIMEOUT_NS = 1500000000LL;  // 1.5s
+
+static int64_t dmrNowNs(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+// Refresh a slot's activity timestamp (see dmrSlotLastFrameNs).
+static void dmrSlotNoteFrame(uint8_t slot)
+{
+    int64_t now = dmrNowNs();
+    pthread_mutex_lock(&dmrSlotActivityMutex);
+    dmrSlotLastFrameNs[slot] = now;
+    pthread_mutex_unlock(&dmrSlotActivityMutex);
+}
+
+/* Called where the last active slot's call ends. FRAME mode: un-key now,
+ * as before (the MMDVM firmware handles any hang). SAMPLE/BIT mode: start
+ * the TX hang instead -- dmrTxThread() un-keys when it runs out. */
+static void dmrReleaseTx(void)
+{
+    if (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT)
+    {
+        dmrTxHangNs = dmrNowNs();
+        if (debugM)
+            fprintf(stderr, "DMR TX: last call ended, holding downlink for %lld ms\n",
+                    (long long)(dmrTxHangDurNs / 1000000LL));
+    }
+    else
+    {
+        txOn = false;
+    }
+}
+
+static int64_t dmrRxNominalSampleNs(uint32_t ptr)
+{
+    return ((int64_t)ptr * 1000000000LL) / 24000LL;
+}
+
+// Called once per incoming SAMP packet, before its samples are processed.
+// endPtr is dataPtr just past the packet's last sample.
+static void dmrRxNoteSamplePacket(int64_t arrivalNs, uint32_t endPtr)
+{
+    if (arrivalNs - dmrRxClockWindowStartNs >= DMR_RX_CLOCK_WINDOW_NS)
+    {
+        dmrRxClockOffsetPrevNs  = dmrRxClockOffsetNs;
+        dmrRxClockOffsetNs      = INT64_MAX;
+        dmrRxClockWindowStartNs = arrivalNs;
+    }
+
+    int64_t offset = arrivalNs - dmrRxNominalSampleNs(endPtr);
+    if (offset < dmrRxClockOffsetNs)
+        dmrRxClockOffsetNs = offset;
+}
+
+// Best estimate of when sample ptr arrived, in CLOCK_MONOTONIC ns, or 0
+// if no packet has been timed yet.
+static int64_t dmrRxSampleTimeNs(uint32_t ptr)
+{
+    int64_t best = (dmrRxClockOffsetNs < dmrRxClockOffsetPrevNs) ? dmrRxClockOffsetNs : dmrRxClockOffsetPrevNs;
+    if (best == INT64_MAX)
+        return 0;
+    return best + dmrRxNominalSampleNs(ptr);
+}
+
+// Phase of sample ptr, in ns within the 60ms TDMA frame, after TX slot-1
+// start; -1 if there's no timing yet.
+static int64_t dmrRxPhaseNs(uint32_t ptr)
+{
+    pthread_mutex_lock(&dmrTxSlotTimeMutex);
+    int64_t t1 = dmrTxSlot1StartNs;
+    pthread_mutex_unlock(&dmrTxSlotTimeMutex);
+
+    int64_t tSample = dmrRxSampleTimeNs(ptr);
+    if (t1 == 0 || tSample == 0)
+        return -1;
+
+    const int64_t cycleNs = 60000000LL;
+    int64_t phase = (tSample - t1) % cycleNs;
+    if (phase < 0)
+        phase += cycleNs;
+    return phase;
+}
+
+// Position of RX sample ptr within this host's TDMA cycle (0..1439, see
+// dmrTxRefValid), or -1 if there's no TX timing report for this downlink.
+static int32_t dmrRxCyclePos(uint32_t ptr)
+{
+    pthread_mutex_lock(&dmrTxSlotTimeMutex);
+    bool     valid = dmrTxRefValid;
+    uint32_t refRx = dmrTxRefRxPtr;
+    uint32_t refK  = dmrTxRefK;
+    pthread_mutex_unlock(&dmrTxSlotTimeMutex);
+
+    if (!valid)
+        return -1;
+
+    int64_t tx  = (int64_t)refK + (int64_t)(int32_t)(ptr - refRx);
+    int64_t pos = tx % DMR_CYCLE_SAMPLES;
+    if (pos < 0)
+        pos += DMR_CYCLE_SAMPLES;
+    return (int32_t)pos;
+}
+
+// 0 = TS1, 1 = TS2, -1 = no timing yet.
+static int dmrRxSlotFromPhase(uint32_t ptr)
+{
+    int32_t pos = dmrRxCyclePos(ptr);
+    if (pos >= 0)
+    {
+        // Distance from the TS1 sync position, folded into [-720, 720).
+        int32_t d = (pos - DMR_TS1_SYNC_CYCLE_POS - dmrSlotDelaySamples) % DMR_CYCLE_SAMPLES;
+        if (d < 0)
+            d += DMR_CYCLE_SAMPLES;
+        if (d >= DMR_CYCLE_SAMPLES / 2)
+            d -= DMR_CYCLE_SAMPLES;
+        return (d > -DMR_CYCLE_SAMPLES / 4 && d < DMR_CYCLE_SAMPLES / 4) ? 0 : 1;
+    }
+
+    // Fallback: wall-clock phase estimate.
+    int64_t phase = dmrRxPhaseNs(ptr);
+    if (phase < 0)
+        return -1;
+
+    // Distance from the TS1 centre, folded into [-30ms, +30ms).
+    const int64_t cycleNs = 60000000LL;
+    int64_t d = (phase - dmrRxTs1PhaseNs) % cycleNs;
+    if (d < 0)
+        d += cycleNs;
+    if (d >= cycleNs / 2)
+        d -= cycleNs;
+
+    return (d > -15000000LL && d < 15000000LL) ? 0 : 1;
+}
+
+static void dmrRxLogSlotPhase(const DMR_RX_CTX* c)
+{
+    int64_t phase = dmrRxPhaseNs(c->syncPtr);
+    if (phase < 0)
+        return;
+
+    int fromPhase = dmrRxSlotFromPhase(c->syncPtr);
+    int32_t pos   = dmrRxCyclePos(c->syncPtr);
+    if (pos >= 0)
+        fprintf(stderr, "DMR RX slot timing: sync at cycle sample %d (TS1 ~%d, TS2 ~%d) -> slot%d (ctx%u, assigned slot%u, control=0x%02X, txOn=%d)\n",
+                (int)pos, (int)(DMR_TS1_SYNC_CYCLE_POS + dmrSlotDelaySamples),
+                (int)(DMR_TS1_SYNC_CYCLE_POS + dmrSlotDelaySamples + DMR_CYCLE_SAMPLES / 2),
+                fromPhase + 1, c->index, c->slot + 1U, c->control, (int)txOn);
+    else
+        fprintf(stderr, "DMR RX slot phase: %lld.%lld ms after TX slot1 start (ctx%u, assigned slot%u, phase says slot%d, control=0x%02X, txOn=%d) [no TX timing report yet]\n",
+                (long long)(phase / 1000000LL), (long long)((phase / 100000LL) % 10LL),
+                c->index, c->slot + 1U, fromPhase + 1, c->control, (int)txOn);
+}
+
+#define DMR_RX_BUF(s, idx) ((s)->buffer[(idx) % 900U])  // 900U = sizeof(s->buffer)/sizeof(q15_t)
+
+// Mirrors CDMRSlotRX::reset() for one context: used at startup and
+// whenever that context's stream is lost.
+static void dmrRxCtxReset(DMR_RX_CTX* c)
+{
+    c->syncPtr   = 0U;
+    c->maxCorr   = 0;
+    c->control   = DMR_RX_CONTROL_NONE;
+    c->syncCount = 0U;
+    c->state     = DMR_RXS_NONE;
+    c->startPtr  = 0U;
+    c->endPtr    = DMR_RX_NOENDPTR;
+}
+
+// Full RX reset (startup). Does NOT touch dataPtr -- it free-runs for the
+// life of the process; only the lock-tracking fields reset.
+static void dmrRxReset(void)
+{
+    for (uint8_t i = 0U; i < 2U; i++)
+    {
+        dmrRxCtxReset(&dmrRxCtx[i]);
+        dmrRxCtx[i].index = i;
+        dmrRxCtx[i].slot  = i;
+    }
+}
+
+// Mirrors CDMRSlotRX::samplesToBits(). Buffer access is modulo the ring
+// size since start/count are absolute, free-running sample counts.
+static void dmrRxSamplesToBits(uint32_t start, uint16_t count, uint8_t* buffer, uint16_t offset, q15_t centre, q15_t threshold)
+{
+    DMR_RX_STATE* s = &dmrRx;
+
+    for (uint16_t i = 0U; i < count; i++, start += DMR_RADIO_SYMBOL_LENGTH)
+    {
+        q15_t sample = DMR_RX_BUF(s, start) - centre;
+
+        if (sample < -threshold)
+        {
+            DMR_WRITE_BIT1(buffer, offset, false);
+            offset++;
+            DMR_WRITE_BIT1(buffer, offset, true);
+            offset++;
+        }
+        else if (sample < 0)
+        {
+            DMR_WRITE_BIT1(buffer, offset, false);
+            offset++;
+            DMR_WRITE_BIT1(buffer, offset, false);
+            offset++;
+        }
+        else if (sample < threshold)
+        {
+            DMR_WRITE_BIT1(buffer, offset, true);
+            offset++;
+            DMR_WRITE_BIT1(buffer, offset, false);
+            offset++;
+        }
+        else
+        {
+            DMR_WRITE_BIT1(buffer, offset, true);
+            offset++;
+            DMR_WRITE_BIT1(buffer, offset, true);
+            offset++;
+        }
+    }
+}
+
+// The other of the two contexts -- used to give a newly locked stream the
+// opposite slot label when the other context is already tracking one.
+static DMR_RX_CTX* dmrRxOtherCtx(const DMR_RX_CTX* c)
+{
+    return &dmrRxCtx[c->index ^ 1U];
+}
+
+static bool dmrRxCtxActive(const DMR_RX_CTX* c)
+{
+    return c->endPtr != DMR_RX_NOENDPTR || c->state != DMR_RXS_NONE;
+}
+
+// True if dataPtr lines up (within the guard, modulo one TDMA frame) with
+// the sync position of a stream some active context is already tracking.
+static bool dmrRxNearTrackedStream(uint32_t dataPtr)
+{
+    for (uint8_t i = 0U; i < 2U; i++)
+    {
+        const DMR_RX_CTX* a = &dmrRxCtx[i];
+        if (a->endPtr == DMR_RX_NOENDPTR)
+            continue;
+
+        int32_t diff = (int32_t)(dataPtr - a->syncPtr);
+        int32_t m    = diff % (int32_t)DMR_RX_BURST_REPEAT_SAMPLES;
+        if (m < 0)
+            m += (int32_t)DMR_RX_BURST_REPEAT_SAMPLES;
+        if (m > (int32_t)DMR_RX_BURST_REPEAT_SAMPLES / 2)
+            m = (int32_t)DMR_RX_BURST_REPEAT_SAMPLES - m;
+
+        if (m < DMR_RX_STREAM_GUARD_SAMPLES)
+            return true;
+    }
+    return false;
+}
+
+// Diagnostic only (gated on debugM): tracks how close the symbol-level
+// pre-screen (dmrCountBits32() below) is coming to a sync match even
+// when it doesn't pass, so a run with no accepted locks can still show
+// whether the correlator is seeing a near-miss (a tuning/threshold
+// problem) or nothing resembling sync at all (a signal-path problem).
+// Reported once per DMR_RX_DIAG_PERIOD_SAMPLES_LOCAL of real RX samples.
+static const uint32_t DMR_RX_DIAG_PERIOD_SAMPLES_LOCAL = 24000U;  // ~1s @ 24kHz
+static uint8_t  dmrRxDiagBestDist   = 255U;
+static uint32_t dmrRxDiagWindowBase = 0U;
+
+// Mirrors CDMRSlotRX::correlateSync() for one context, plus the slot
+// labelling decision, made exactly once per freshly locked stream (the
+// "first" branch).
+static void dmrRxCorrelateSync(DMR_RX_CTX* c, bool first)
+{
+    DMR_RX_STATE* s = &dmrRx;
+
+    uint8_t errs = dmrCountBits32((s->bitBuffer[s->bitPtr % DMR_RADIO_SYMBOL_LENGTH] & DMR_SYNC_SYMBOLS_MASK) ^ DMR_MS_DATA_SYNC_SYMBOLS);
+
+    // The voice sync is the complement of the data sync
+    bool isData  = (errs <= DMR_MAX_SYNC_SYMBOLS_ERRS);
+    bool isVoice = (errs >= (DMR_SYNC_LENGTH_SYMBOLS_LOCAL - DMR_MAX_SYNC_SYMBOLS_ERRS));
+
+    if (debugM)
+    {
+        // Distance to whichever of the two accept thresholds is closer:
+        // 0 means "would have passed"; small numbers mean a near-miss.
+        uint8_t distToData  = (errs > DMR_MAX_SYNC_SYMBOLS_ERRS) ? (uint8_t)(errs - DMR_MAX_SYNC_SYMBOLS_ERRS) : 0U;
+        uint8_t voiceThresh = (uint8_t)(DMR_SYNC_LENGTH_SYMBOLS_LOCAL - DMR_MAX_SYNC_SYMBOLS_ERRS);
+        uint8_t distToVoice = (errs < voiceThresh) ? (uint8_t)(voiceThresh - errs) : 0U;
+        uint8_t dist = (distToData < distToVoice) ? distToData : distToVoice;
+        if (dist < dmrRxDiagBestDist)
+            dmrRxDiagBestDist = dist;
+
+        if (s->dataPtr - dmrRxDiagWindowBase >= DMR_RX_DIAG_PERIOD_SAMPLES_LOCAL)
+        {
+            fprintf(stderr, "DMR RX diag: closest symbol-sync miss this window = %u (0 = would lock)\n", dmrRxDiagBestDist);
+            dmrRxDiagBestDist   = 255U;
+            dmrRxDiagWindowBase = s->dataPtr;
+        }
+    }
+
+    if (!isData && !isVoice)
+        return;
+
+    uint32_t ptr = s->dataPtr - DMR_SYNC_LENGTH_SAMPLES_LOCAL + DMR_RADIO_SYMBOL_LENGTH;
+
+    q31_t corr = 0;
+    q15_t minV =  16000;
+    q15_t maxV = -16000;
+
+    for (uint16_t i = 0U; i < DMR_SYNC_LENGTH_SYMBOLS_LOCAL; i++)
+    {
+        q15_t val = DMR_RX_BUF(s, ptr);
+
+        if (val > maxV) maxV = val;
+        if (val < minV) minV = val;
+
+        int8_t corrVal = isData ? DMR_MS_DATA_SYNC_SYMBOLS_VALUES[i] : DMR_MS_VOICE_SYNC_SYMBOLS_VALUES[i];
+
+        switch (corrVal)
+        {
+            case 3:
+                corr -= (val + val + val);
+                break;
+            case 1:
+                corr -= val;
+                break;
+            case -1:
+                corr += val;
+                break;
+            default:  // -3
+                corr += (val + val + val);
+                break;
+        }
+
+        ptr += DMR_RADIO_SYMBOL_LENGTH;
+    }
+
+    if (corr <= c->maxCorr)
+        return;
+
+    q15_t centre = (maxV + minV) >> 1;
+    q31_t v1 = (maxV - centre) * DMR_RX_SCALING_FACTOR;
+    q15_t threshold = (q15_t)(v1 >> 15);
+
+    uint8_t sync[DMR_SYNC_BYTES_LENGTH];
+    uint32_t syncPtr = s->dataPtr - DMR_SYNC_LENGTH_SAMPLES_LOCAL + DMR_RADIO_SYMBOL_LENGTH;
+    dmrRxSamplesToBits(syncPtr, DMR_SYNC_LENGTH_SYMBOLS_LOCAL, sync, 4U, centre, threshold);
+
+    const uint8_t* syncBytes = isData ? DMR_MS_DATA_SYNC_BYTES : DMR_MS_VOICE_SYNC_BYTES;
+    uint8_t errs2 = 0U;
+    for (uint8_t i = 0U; i < DMR_SYNC_BYTES_LENGTH; i++)
+        errs2 += dmrCountBits8((sync[i] & SYNC_MASK[i]) ^ syncBytes[i]);
+
+    // Stricter while acquiring sync from cold (avoid locking onto noise);
+    // looser once already tracking a burst sequence (context already
+    // supports a slightly weaker match) -- see p25_func.h's
+    // MAX_SYNC_BIT_START_ERRS/MAX_SYNC_BIT_RUN_ERRS, which this mirrors.
+    uint8_t maxByteErrs = (c->state == DMR_RXS_NONE) ? DMR_MAX_SYNC_BYTE_START_ERRS : DMR_MAX_SYNC_BYTE_RUN_ERRS;
+    if (errs2 > maxByteErrs)
+        return;
+
+    if (first)
+    {
+        c->threshold[0U] = c->threshold[1U] = c->threshold[2U] = c->threshold[3U] = threshold;
+        c->centre[0U]    = c->centre[1U]    = c->centre[2U]    = c->centre[3U]    = centre;
+        c->averagePtr    = 0U;
+
+        // Slot label for a newly locked stream. If the other context is
+        // already tracking a stream, this one is by definition on the
+        // other slot. Otherwise the slot comes from where the burst lands
+        // relative to our own TX slot-1 timing (see dmrRxSlotFromPhase()).
+        // While the repeater is un-keyed the label doesn't matter: the MS
+        // isn't timed to us yet, and dmrRxCtxBurstEnd() only passes a
+        // wake-up CSBK in that state.
+        DMR_RX_CTX* other = dmrRxOtherCtx(c);
+        if (dmrRxCtxActive(other))
+        {
+            c->slot = other->slot ^ 1U;
+        }
+        else
+        {
+            int fromPhase = txOn ? dmrRxSlotFromPhase(s->dataPtr) : -1;
+            c->slot = (fromPhase >= 0) ? (uint8_t)fromPhase : 0U;
+        }
+
+        if (debugM)
+            fprintf(stderr, "DMR RX ctx%u: new sync lock, dataPtr=%u assigned slot%u\n", c->index, s->dataPtr, c->slot + 1U);
+    }
+    else
+    {
+        c->threshold[c->averagePtr] = threshold;
+        c->centre[c->averagePtr]    = centre;
+
+        c->averagePtr++;
+        if (c->averagePtr >= 4U)
+            c->averagePtr = 0U;
+    }
+
+    c->maxCorr  = corr;
+    c->control  = isData ? DMR_RX_CONTROL_DATA : DMR_RX_CONTROL_VOICE;
+    c->syncPtr  = s->dataPtr;
+    if (first)
+    {
+        c->expectPtr  = s->dataPtr;
+        c->driftQ8    = 0;
+        c->driftAccQ8 = 0;
+        c->sinceSync  = 0U;
+    }
+    c->startPtr = s->dataPtr - DMR_SLOT_TYPE_LENGTH_SAMPLES_LOCAL / 2U - DMR_INFO_LENGTH_SAMPLES_LOCAL / 2U - DMR_SYNC_LENGTH_SAMPLES_LOCAL;
+    c->endPtr   = s->dataPtr + DMR_SLOT_TYPE_LENGTH_SAMPLES_LOCAL / 2U + DMR_INFO_LENGTH_SAMPLES_LOCAL / 2U - 1U;
+}
+
+// Hand a completed, already-demodulated 33-byte DMR burst to the existing
+// FRAME-mode protocol logic, exactly as if it had arrived as a DMD1/DML1
+// (slot 0) or DMD2/DML2 (slot 1) network packet (see the FRAME branch in
+// startClient()).
+static void dmrRxDeliverFrame(uint8_t slot, const uint8_t* frame33, uint8_t controlByte, bool lost)
+{
+    // frame33 must point at the 33-byte frame PAYLOAD (no leading control
+    // byte) -- matching what decodeDMR() expects at buffer[9..41]. Total
+    // packet size is 4 (0x61/lenHi/lenLo/typeLen) + 4 (type) + 1 (control)
+    // + 33 (frame) = 42 bytes -- i.e. 9U + DMR_FRAME_LENGTH_BYTES, NOT
+    // 8U + DMR_FRAME_LENGTH_BYTES (that undercounts the control byte at
+    // buf[8] and was a pre-existing off-by-one here: buf[41] is in bounds
+    // for a 42-byte array but was one past the end of a 41-byte one).
+    uint8_t buf[9U + DMR_FRAME_LENGTH_BYTES];
+    const char* type = (slot == 0U) ? (lost ? TYPE_LOST1 : TYPE_DATA1) : (lost ? TYPE_LOST2 : TYPE_DATA2);
+
+    buf[0U] = 0x61;
+    buf[1U] = 0x00;
+    buf[2U] = 9U + DMR_FRAME_LENGTH_BYTES;
+    buf[3U] = 0x04;
+    memcpy(buf + 4U, type, 4U);
+    buf[8U] = controlByte;
+    memcpy(buf + 9U, frame33, DMR_FRAME_LENGTH_BYTES);
+    decodeDMR(buf, 9U + DMR_FRAME_LENGTH_BYTES, false);
+}
+
+// See dmrSlotLastFrameNs. Runs on the RX thread, like every other
+// decodeDMR() call this host makes for RF traffic.
+static void dmrSlotWatchdog(void)
+{
+    if (packetType != PACKET_TYPE_SAMP && packetType != PACKET_TYPE_BIT)
+        return;
+
+    int64_t now = dmrNowNs();
+    for (uint8_t i = 0U; i < 2U; i++)
+    {
+        if (!slotActive[i])
+            continue;
+
+        pthread_mutex_lock(&dmrSlotActivityMutex);
+        int64_t last = dmrSlotLastFrameNs[i];
+        pthread_mutex_unlock(&dmrSlotActivityMutex);
+
+        if (last != 0 && now - last < DMR_SLOT_IDLE_TIMEOUT_NS)
+            continue;
+
+        if (debugM)
+            fprintf(stderr, "DMR: slot%u active but quiet, ending it\n", i + 1U);
+
+        uint8_t blank[DMR_FRAME_LENGTH_BYTES];
+        memset(blank, 0, sizeof(blank));
+        dmrRxDeliverFrame(i, blank, 0x00U, true);
+    }
+}
+
+// Read out and decode the burst a context has just finished receiving
+// (dataPtr == c->endPtr), then either coast to the next burst on the same
+// slot or go back to idle.
+/* Diagnostic only (debugM). Called when a tracked voice call reaches a
+ * position where burst A -- and so an MS voice sync -- is expected but none
+ * was found. Demodulates the 24-symbol sync field at every sample offset
+ * in +/-24 around where it should be and compares each against all the
+ * ETSI TS 102 361-1 Table 9.2 sync patterns, then prints the closest
+ * match: tells apart "the radio sent a different sync" (pattern name),
+ * "the right sync, further off than the tracking window" (offset), and
+ * "nothing sync-like" (high bit-error count). */
+static void dmrRxDiagMissingSync(const DMR_RX_CTX* c, q15_t centre, q15_t threshold)
+{
+    static const struct
+    {
+        const char* name;
+        uint64_t    bits;
+    } patterns[] = {
+        {"MS voice",      0x7F7D5DD57DFDULL},
+        {"MS data",       0xD5D7F77FD757ULL},
+        {"BS voice",      0x755FD7DF75F7ULL},
+        {"BS data",       0xDFF57D75DF5DULL},
+        {"RC",            0x77D55F7DFD77ULL},
+        {"DM TS1 voice",  0x5D577F7757FFULL},
+        {"DM TS1 data",   0xF7FDD5DDFD55ULL},
+        {"DM TS2 voice",  0x7DFFD5F55D5FULL},
+        {"DM TS2 data",   0xD7557F5FF7F5ULL},
+        {"reserved",      0xDD7FF5D757DDULL},
+    };
+    const uint64_t mask48 = 0xFFFFFFFFFFFFULL;
+
+    uint8_t  bestPat  = 0U;
+    uint8_t  bestDist = 255U;
+    int32_t  bestOff  = 0;
+    uint8_t  msVoiceAt0 = 255U;
+
+    uint32_t base = c->syncPtr - DMR_SYNC_LENGTH_SAMPLES_LOCAL + DMR_RADIO_SYMBOL_LENGTH;
+    for (int32_t off = -24; off <= 24; off++)
+    {
+        uint8_t bytes[6];
+        memset(bytes, 0, sizeof(bytes));
+        dmrRxSamplesToBits((uint32_t)((int32_t)base + off), DMR_SYNC_LENGTH_SYMBOLS_LOCAL, bytes, 0U, centre, threshold);
+
+        uint64_t v = 0ULL;
+        for (uint8_t i = 0U; i < 6U; i++)
+            v = (v << 8) | bytes[i];
+
+        for (uint8_t p = 0U; p < sizeof(patterns) / sizeof(patterns[0]); p++)
+        {
+            uint8_t dist = dmrCountBits64((v ^ patterns[p].bits) & mask48);
+            if (off == 0 && p == 0U)
+                msVoiceAt0 = dist;
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                bestPat  = p;
+                bestOff  = off;
+            }
+        }
+    }
+
+    fprintf(stderr, "DMR RX ctx%u slot%u: no sync where burst A expected -- closest: %s, %u/48 bits wrong at offset %+d (MS voice at offset 0: %u/48 wrong)\n",
+            c->index, c->slot + 1U, patterns[bestPat].name, bestDist, (int)bestOff, msVoiceAt0);
+}
+
+static void dmrRxCtxBurstEnd(DMR_RX_CTX* c)
+{
+    uint8_t slot = c->slot;
+
+    // A sync found while tracking: fold its offset into the drift estimate.
+    if (c->state != DMR_RXS_NONE && c->control != DMR_RX_CONTROL_NONE && c->sinceSync > 0U)
+    {
+        int32_t offset = (int32_t)(c->syncPtr - c->expectPtr);
+        int32_t delta  = (offset * 256) / (int32_t)c->sinceSync / 2;
+        if (delta > DMR_RX_MAX_DRIFT_STEP_Q8)
+            delta = DMR_RX_MAX_DRIFT_STEP_Q8;
+        if (delta < -DMR_RX_MAX_DRIFT_STEP_Q8)
+            delta = -DMR_RX_MAX_DRIFT_STEP_Q8;
+        c->driftQ8 += delta;
+        if (c->driftQ8 > DMR_RX_MAX_DRIFT_Q8)
+            c->driftQ8 = DMR_RX_MAX_DRIFT_Q8;
+        if (c->driftQ8 < -DMR_RX_MAX_DRIFT_Q8)
+            c->driftQ8 = -DMR_RX_MAX_DRIFT_Q8;
+    }
+
+    if (debugM)
+    {
+        fprintf(stderr, "DMR RX ctx%u slot%u: burst end, dataPtr=%u control=0x%02X state=%u syncCount=%u",
+                c->index, slot + 1U, dmrRx.dataPtr, c->control, c->state, c->syncCount);
+        if (c->state != DMR_RXS_NONE && c->control != DMR_RX_CONTROL_NONE)
+            fprintf(stderr, " sync offset=%d drift=%d.%02d/burst", (int)(int32_t)(c->syncPtr - c->expectPtr),
+                    (int)(c->driftQ8 / 256), (int)(((c->driftQ8 < 0 ? -c->driftQ8 : c->driftQ8) % 256) * 100 / 256));
+        fprintf(stderr, "\n"); }
+        if (c->control != DMR_RX_CONTROL_NONE)
+            dmrRxLogSlotPhase(c);
+  //  }
+
+    q15_t centre    = (c->centre[0U]    + c->centre[1U]    + c->centre[2U]    + c->centre[3U])    >> 2;
+    q15_t threshold = (c->threshold[0U] + c->threshold[1U] + c->threshold[2U] + c->threshold[3U]) >> 2;
+
+    uint8_t frame[DMR_FRAME_LENGTH_BYTES + 1U];
+    frame[0U] = c->control;
+
+    uint32_t ptr = c->endPtr - DMR_FRAME_LENGTH_SAMPLES_LOCAL + DMR_RADIO_SYMBOL_LENGTH + 1U;
+    dmrRxSamplesToBits(ptr, DMR_FRAME_LENGTH_SYMBOLS_LOCAL, frame, 8U, centre, threshold);
+
+    if (debugM && txOn && c->state == DMR_RXS_VOICE && c->control == DMR_RX_CONTROL_NONE && c->n >= 5U)
+        dmrRxDiagMissingSync(c, centre, threshold);
+
+    // Default: go idle. If the decode below leaves a voice/data sequence
+    // in progress, the coast block after it re-arms the window one TDMA
+    // frame later instead.
+    uint32_t burstEndPtr = c->endPtr;
+    c->endPtr  = DMR_RX_NOENDPTR;
+    c->maxCorr = 0;
+
+    /* Simplex has no wake-up: a radio talking to a simplex hotspot starts its
+     * call straight away with a voice header, so there is no idle state to
+     * filter and the gate below only applies to a duplex repeater.
+     *
+     * Repeater un-keyed: behave like MMDVM's DMRIdleRX. A subscriber radio
+     * isn't timed to our slots until it hears our downlink, so the only
+     * thing that matters here is its wake-up CSBK (BS_Dwn_Act). Pass that
+     * on flagged CONTROL_IDLE (0x80) -- 0xC3 -- exactly as MMDVM firmware
+     * delivers it in FRAME mode, so decodeDMR() keys up without marking
+     * any slot active. Everything else is ignored, and no call sequence
+     * starts. Previously the wake-up arrived as a plain 0x43 CSBK, which
+     * marked slot 1 active regardless of the radio's real slot; a call
+     * that then ran on slot 2 left slot 1 active with no terminator ever
+     * coming, i.e. a stuck key. */
+    if (modem_duplex && !txOn && c->state == DMR_RXS_NONE)
+    {
+        if (c->control == DMR_RX_CONTROL_DATA)
+        {
+            uint8_t colorCode, dataType;
+            DMRSlotType_decode(frame + 1U, &colorCode, &dataType);
+            if (colorCode == dmrColorCode && dataType == DT_CSBK)
+            {
+                if (debugM)
+                    fprintf(stderr, "DMR RX ctx%u: wake-up CSBK while idle\n", c->index);
+                dmrRxDeliverFrame(0U, frame + 1U, DMR_RX_CONTROL_IDLE | DMR_RX_CONTROL_DATA | DT_CSBK, false);
+            }
+        }
+        c->control = DMR_RX_CONTROL_NONE;
+        return;
+    }
+
+    if (c->control == DMR_RX_CONTROL_DATA)
+    {
+        uint8_t colorCode, dataType;
+        DMRSlotType_decode(frame + 1U, &colorCode, &dataType);
+
+        if (colorCode == dmrColorCode)
+        {
+            c->syncCount = 0U;
+            c->n         = 0U;
+
+            frame[0U] |= dataType;
+
+            switch (dataType)
+            {
+                case DT_TERMINATOR_WITH_LC:
+                    if (c->state == DMR_RXS_VOICE)
+                    {
+                        dmrRxDeliverFrame(slot, frame + 1U, frame[0U], false);
+                        c->state = DMR_RXS_NONE;
+                    }
+                    break;
+                case DT_VOICE_LC_HEADER:
+                    dmrRxDeliverFrame(slot, frame + 1U, frame[0U], false);
+                    c->state = DMR_RXS_VOICE;
+                    break;
+                case DT_VOICE_PI_HEADER:
+                    if (c->state == DMR_RXS_VOICE)
+                        dmrRxDeliverFrame(slot, frame + 1U, frame[0U], false);
+                    c->state = DMR_RXS_VOICE;
+                    break;
+                case DT_DATA_HEADER:
+                    dmrRxDeliverFrame(slot, frame + 1U, frame[0U], false);
+                    c->state = DMR_RXS_DATA;
+                    c->type  = 0x00U;
+                    break;
+                case DT_RATE_12_DATA:
+                case DT_RATE_34_DATA:
+                case DT_RATE_1_DATA:
+                    if (c->state == DMR_RXS_DATA)
+                    {
+                        dmrRxDeliverFrame(slot, frame + 1U, frame[0U], false);
+                        c->type = dataType;
+                    }
+                    break;
+                default:  // DT_CSBK and others
+                    /* A radio repeats its wake-up CSBK (BS_Dwn_Act) until it
+                     * hears the downlink, so one can still arrive after we've
+                     * keyed -- not yet timed to our slots, so its slot label
+                     * is meaningless. Relaying it marked a random slot active
+                     * with no call behind it (seen on real hardware: the
+                     * repeater never de-keyed). MMDVMHost ignores BS_Dwn_Act
+                     * once keyed; so does this. */
+                    if (dataType == DT_CSBK && CSBK_decode(frame + 1U, slot) && CSBK_getCSBKO(slot) == CSBKO_BSDWNACT)
+                    {
+                        if (debugM)
+                            fprintf(stderr, "DMR RX ctx%u: repeated wake-up CSBK while keyed, ignored\n", c->index);
+                    }
+                    else
+                    {
+                        dmrRxDeliverFrame(slot, frame + 1U, frame[0U], false);
+                    }
+                    c->state = DMR_RXS_NONE;
+                    break;
+            }
+        }
+    }
+    else if (c->control == DMR_RX_CONTROL_VOICE)
+    {
+        dmrRxDeliverFrame(slot, frame + 1U, frame[0U], false);
+        c->state     = DMR_RXS_VOICE;
+        c->syncCount = 0U;
+        c->n         = 0U;
+    }
+    else
+    {
+        if (c->state != DMR_RXS_NONE)
+        {
+            c->syncCount++;
+            if (c->syncCount >= DMR_MAX_SYNC_LOST_FRAMES)
+            {
+                dmrRxDeliverFrame(slot, frame + 1U, 0x00U, true);
+                c->state = DMR_RXS_NONE;
+            }
+        }
+
+        if (c->state == DMR_RXS_VOICE)
+        {
+            if (c->n >= 5U)
+            {
+                frame[0U] = DMR_RX_CONTROL_VOICE;
+                c->n = 0U;
+            }
+            else
+            {
+                frame[0U] = ++c->n;
+            }
+
+            dmrRxDeliverFrame(slot, frame + 1U, frame[0U], false);
+        }
+        else if (c->state == DMR_RXS_DATA)
+        {
+            if (c->type != 0x00U)
+                dmrRxDeliverFrame(slot, frame + 1U, DMR_RX_CONTROL_DATA | c->type, false);
+        }
+    }
+
+    /* Coast: a voice/data sequence is still in progress, so the next
+     * burst on this slot arrives exactly one TDMA frame (60ms) later.
+     * Re-arm the window there instead of going idle. control goes back
+     * to NONE so that, unless the +/-1-sample refine around the new
+     * syncPtr finds a real sync (voice burst A, terminator, etc.), the
+     * burst is read out as a sync-less voice B-F / data continuation by
+     * the "else" branch above. Lost-sync handling (syncCount >=
+     * DMR_MAX_SYNC_LOST_FRAMES) drops state to NONE, which ends coasting
+     * and frees this context for the cold scan. */
+    if (c->state != DMR_RXS_NONE)
+    {
+        // One TDMA frame on, plus the measured drift (see driftQ8).
+        if (c->control != DMR_RX_CONTROL_NONE)
+            c->sinceSync = 0U;
+        c->driftAccQ8 += c->driftQ8;
+        int32_t extra  = (c->driftAccQ8 >= 0) ? ((c->driftAccQ8 + 128) / 256) : -((-c->driftAccQ8 + 128) / 256);
+        c->driftAccQ8 -= extra * 256;
+        uint32_t step  = (uint32_t)((int32_t)DMR_RX_BURST_REPEAT_SAMPLES + extra);
+
+        c->control   = DMR_RX_CONTROL_NONE;
+        c->syncPtr  += step;
+        c->startPtr += step;
+        c->endPtr    = burstEndPtr + step;
+        c->expectPtr = c->syncPtr;
+        if (c->sinceSync < 255U)
+            c->sinceSync++;
+    }
+}
+
+// Diagnostic only (gated on debugM): raw incoming-sample level stats,
+// reported once per DMR_RX_DIAG_PERIOD_SAMPLES_LOCAL. If this never
+// shows meaningful swing (minVal/maxVal close together, or stuck near
+// one extreme), the samples reaching dmrRxSamples() aren't a real
+// demodulated 4FSK signal and the correlator has nothing to lock onto
+// no matter how its thresholds are tuned.
+static q15_t  dmrRxDiagMin = 32767;
+static q15_t  dmrRxDiagMax = -32768;
+static int64_t dmrRxDiagSumAbs = 0;
+static uint32_t dmrRxDiagSampleWindowBase = 0U;
+
+/* A real DMR burst can be far shorter than the 1-second window above --
+ * a single 30ms-60ms burst averaged in with 940ms+ of surrounding
+ * silence/noise would barely move a 1-second average at all. This
+ * short-window "envelope" detector catches that case: it tracks a slow
+ * moving baseline of the ambient noise level and flags (and only
+ * flags, to avoid flooding the log) any short window that rises well
+ * above that baseline -- i.e. "something happened here briefly",
+ * whether or not the correlator ever locked onto it. */
+static const uint32_t DMR_RX_DIAG_SHORT_WINDOW_SAMPLES = 240U;  // 10ms @ 24kHz
+static q15_t   dmrRxDiagShortMin        = 32767;
+static q15_t   dmrRxDiagShortMax        = -32768;
+static int64_t dmrRxDiagShortSumAbs     = 0;
+static uint32_t dmrRxDiagShortWindowBase = 0U;
+static int32_t  dmrRxDiagBaselineAvgAbs  = -1;  // -1 = not yet seeded
+
+// Per-sample RX: one shared front end, then each context's refine/burst
+// handling, plus a free cold scan whenever a context is idle. Like
+// CDMRSlotRX::processSample(), but free-running: there is no external
+// "start()" that rewinds dataPtr once per cycle.
+static bool dmrRxProcessSample(q15_t sample)
+{
+    DMR_RX_STATE* s = &dmrRx;
+
+    if (debugM)
+    {
+        int64_t absSample = (sample < 0) ? -(int64_t)sample : (int64_t)sample;
+
+        if (sample < dmrRxDiagMin) dmrRxDiagMin = sample;
+        if (sample > dmrRxDiagMax) dmrRxDiagMax = sample;
+        dmrRxDiagSumAbs += absSample;
+
+        if (s->dataPtr - dmrRxDiagSampleWindowBase >= DMR_RX_DIAG_PERIOD_SAMPLES_LOCAL)
+        {
+            uint32_t n = s->dataPtr - dmrRxDiagSampleWindowBase;
+            fprintf(stderr, "DMR RX diag: raw samples min=%d max=%d avgAbs=%lld (n=%u)\n",
+                    (int)dmrRxDiagMin, (int)dmrRxDiagMax, (long long)(dmrRxDiagSumAbs / (n ? n : 1U)), n);
+            dmrRxDiagMin = 32767;
+            dmrRxDiagMax = -32768;
+            dmrRxDiagSumAbs = 0;
+            dmrRxDiagSampleWindowBase = s->dataPtr;
+        }
+
+        if (sample < dmrRxDiagShortMin) dmrRxDiagShortMin = sample;
+        if (sample > dmrRxDiagShortMax) dmrRxDiagShortMax = sample;
+        dmrRxDiagShortSumAbs += absSample;
+
+        if (s->dataPtr - dmrRxDiagShortWindowBase >= DMR_RX_DIAG_SHORT_WINDOW_SAMPLES)
+        {
+            uint32_t n = s->dataPtr - dmrRxDiagShortWindowBase;
+            int32_t shortAvgAbs = (int32_t)(dmrRxDiagShortSumAbs / (n ? n : 1U));
+
+            if (dmrRxDiagBaselineAvgAbs < 0)
+                dmrRxDiagBaselineAvgAbs = shortAvgAbs;  // seed on the very first window
+            else
+                dmrRxDiagBaselineAvgAbs = (dmrRxDiagBaselineAvgAbs * 15 + shortAvgAbs) / 16;  // slow EMA, ~160ms time constant
+
+            if (dmrRxDiagBaselineAvgAbs > 50 && shortAvgAbs > (dmrRxDiagBaselineAvgAbs * 3) / 2)
+                fprintf(stderr, "DMR RX diag: envelope bump at dataPtr=%u: short avgAbs=%d (baseline~%d) min=%d max=%d\n",
+                        s->dataPtr, shortAvgAbs, dmrRxDiagBaselineAvgAbs, (int)dmrRxDiagShortMin, (int)dmrRxDiagShortMax);
+
+            dmrRxDiagShortMin        = 32767;
+            dmrRxDiagShortMax        = -32768;
+            dmrRxDiagShortSumAbs     = 0;
+            dmrRxDiagShortWindowBase = s->dataPtr;
+        }
+    }
+
+    DMR_RX_BUF(s, s->dataPtr) = sample;
+
+    s->bitBuffer[s->bitPtr % DMR_RADIO_SYMBOL_LENGTH] <<= 1;
+    if (sample < 0)
+        s->bitBuffer[s->bitPtr % DMR_RADIO_SYMBOL_LENGTH] |= 0x01U;
+
+    // Refine: right after a cold lock, re-check within +/-1 sample of it
+    // (same as MMDVM). While tracking a sequence, search the wider window
+    // around where the next sync is expected (DMR_RX_TRACK_WINDOW_SAMPLES).
+    for (uint8_t i = 0U; i < 2U; i++)
+    {
+        DMR_RX_CTX* c = &dmrRxCtx[i];
+        if (c->endPtr == DMR_RX_NOENDPTR)
+            continue;
+
+        uint32_t centre = (c->state == DMR_RXS_NONE) ? c->syncPtr : c->expectPtr;
+        int32_t  window = (c->state == DMR_RXS_NONE) ? 1 : DMR_RX_TRACK_WINDOW_SAMPLES;
+        int32_t  d      = (int32_t)(s->dataPtr - centre);
+        if (d >= -window && d <= window)
+            dmrRxCorrelateSync(c, false);
+    }
+
+    // Cold scan: free-running over every sample whenever a context is
+    // idle, but never at positions belonging to a stream already tracked
+    // (those are the refine's job, and locking them twice would deliver
+    // the same burst on both slots).
+    DMR_RX_CTX* idle = NULL;
+    for (uint8_t i = 0U; i < 2U; i++)
+    {
+        if (dmrRxCtx[i].endPtr == DMR_RX_NOENDPTR)
+        {
+            idle = &dmrRxCtx[i];
+            break;
+        }
+    }
+    if (idle != NULL && !dmrRxNearTrackedStream(s->dataPtr))
+        dmrRxCorrelateSync(idle, true);
+
+    for (uint8_t i = 0U; i < 2U; i++)
+    {
+        DMR_RX_CTX* c = &dmrRxCtx[i];
+        if (c->endPtr != DMR_RX_NOENDPTR && s->dataPtr == c->endPtr)
+            dmrRxCtxBurstEnd(c);
+    }
+
+    s->dataPtr++;
+
+    s->bitPtr++;
+    if (s->bitPtr >= DMR_RADIO_SYMBOL_LENGTH)
+        s->bitPtr = 0U;
+
+    return dmrRxCtxActive(&dmrRxCtx[0U]) || dmrRxCtxActive(&dmrRxCtx[1U]);
+}
+
+// Entry point for SAMPLE-mode RX: feed demodulated C4FM samples in here.
+void dmrRxSamples(const q15_t* samples, uint16_t length)
+{
+    for (uint16_t i = 0U; i < length; i++)
+        dmrRxProcessSample(samples[i]);
+
+    // Roughly every 10ms of samples.
+    if ((dmrRx.dataPtr % 240U) < length)
+        dmrSlotWatchdog();
+}
+
+
+/* --- DMR TX scheduler: the real-time TDMA clock ---
+ * This is the piece that was missing before: a free-running thread that
+ * owns the actual on-air cadence, generating CACH bursts and idle-filler
+ * data bursts so the transmitted signal has the continuous TDMA structure
+ * a real radio needs to lock onto, and that also arms the dual-slot RX
+ * correlators above at the right moments (see CDMRTX::process() /
+ * CDMRTX::createCACH() in MMDVM, which this follows closely). Per the
+ * user's answers: this is a true 2-slot repeater (both slots need
+ * independent idle-filled bursts, not just whichever one has traffic),
+ * and there is no external timing tick from modem_host, so this thread
+ * is the only clock there is -- it has to pace itself in real time. */
+
+// This codebase has no upstream source for short-LC content (no
+// writeShortLC()-equivalent exists anywhere here), so the CACH's short-LC
+// field is always the all-zero "empty" pattern -- a deliberate,
+// documented simplification; CACH's AT/TC/LS0/LS1/Hamming bits (the part
+// a radio actually needs for slot timing/activity) are still generated
+// correctly below.
+static const uint8_t DMR_EMPTY_SHORT_LC[12U] = {0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+                                                 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U};
+static const uint16_t DMR_CACH_LENGTH_BYTES_LOCAL = 3U;
+
+static const uint32_t DMR_TX_STARTUP_COUNT = 20U;  // CDMRTX::STARTUP_COUNT
+static const uint32_t DMR_TX_ABORT_COUNT   = 6U;   // CDMRTX::ABORT_COUNT
+
+static uint8_t  dmrShortLC[12U];
+static uint8_t  dmrCachPtr        = 0U;
+static uint32_t dmrTxFrameCount   = 0U;
+static uint32_t dmrTxAbortCount[2U] = {0U, 0U};
+
+/* True while the downlink is actually being written to the modem. Only
+ * dmrTxThread() changes it: it goes true at the first cycle start
+ * (PRECACH1) after txOn goes true, and false as soon as txOn drops.
+ *
+ * Why not just gate on txOn: the modem starts transmitting once enough
+ * samples have arrived, and how long that takes depends on which part of
+ * the cycle we start writing in (a slot burst arrives as one ~1320-byte
+ * block, a CACH as 120 bytes). Starting wherever the scheduler happened to
+ * be when txOn went true made the on-air timing -- and so the RX slot
+ * phase -- shift by up to ~20ms from one key-up to the next, while
+ * staying rock-stable within a key-up. Always starting at the same point
+ * in the cycle makes every key-up line up the same way. */
+static bool dmrTxStreaming = false;
+
+// Mirrors CDMRTX::createCACH(). txSlotIndex is the slot about to be
+// transmitted after this CACH; rxSlotIndex is the slot whose correlator
+// this CACH's last byte arms, matching MMDVM's own (slightly
+// counter-intuitive, but authoritative) m_markBuffer[2] assignment.
+static void dmrSendCACH(uint8_t txSlotIndex, uint8_t rxSlotIndex)
+{
+    dmrTxFrameCount++;
+    dmrTxAbortCount[0U]++;
+    dmrTxAbortCount[1U]++;
+
+    if (dmrCachPtr >= 12U)
+        dmrCachPtr = 0U;
+
+    if (dmrCachPtr == 0U)
+        memcpy(dmrShortLC, DMR_EMPTY_SHORT_LC, 12U);
+
+    uint8_t cach[3U];
+    memcpy(cach, dmrShortLC + dmrCachPtr, 3U);
+
+    bool at = false;
+    if (dmrTxFrameCount >= DMR_TX_STARTUP_COUNT)
+    {
+        pthread_mutex_lock(&dmrTxFifoMutex[rxSlotIndex]);
+        at = RingBuffer_dataSize(&dmrTxFifo[rxSlotIndex]) > 0;
+        pthread_mutex_unlock(&dmrTxFifoMutex[rxSlotIndex]);
+    }
+    bool tc  = (txSlotIndex == 1U);
+    bool ls0 = true;
+    bool ls1 = true;
+    if (dmrCachPtr == 0U)
+        ls1 = false;
+    else if (dmrCachPtr == 9U)
+        ls0 = false;
+
+    bool h0 = at ^ tc ^ ls1;
+    bool h1 =      tc ^ ls1 ^ ls0;
+    bool h2 = at ^ tc       ^ ls0;
+
+    cach[0U] |= at  ? 0x80U : 0x00U;
+    cach[0U] |= tc  ? 0x08U : 0x00U;
+    cach[1U] |= ls1 ? 0x80U : 0x00U;
+    cach[1U] |= ls0 ? 0x08U : 0x00U;
+    cach[1U] |= h0  ? 0x02U : 0x00U;
+    cach[2U] |= h1  ? 0x20U : 0x00U;
+    cach[2U] |= h2  ? 0x02U : 0x00U;
+
+    dmrCachPtr += 3U;
+
+    // Only actually modulate/send when the repeater is keyed. The CACH
+    // bookkeeping above (cachPtr, frameCount, abortCount) still has to
+    // happen every cycle regardless -- see the dmrTxThread() comment on
+    // why the scheduler can't gate on txOn.
+    //
+    // RX used to be "armed" from right here, once per half-cycle, the
+    // same way real MMDVM hardware shares one ISR between its TX symbol
+    // clock and its RX correlator window. That dependency is gone now:
+    // dmrRxSamples()/dmrRxProcessSample() time themselves purely from
+    // the real incoming RX sample stream and no longer need anything
+    // from this scheduler (see the file comment above dmrRxProcessSample()
+    // for why that External-clock design didn't survive contact with
+    // real hardware).
+    /* CACH is part of the same continuous TDMA stream as the slot bursts
+     * that frame it -- isEOT=false, exactly like dmrSendSlotBurst() just
+     * below. The old isEOT=true here flushed a short partial 'EOT' packet
+     * twice per 60ms cycle (every CACH), which combined with the slot's
+     * own EOT gave the modem ~4 "end of transmission" markers per cycle
+     * and prevented it from ever actually entering DMR TX mode. */
+    if (dmrTxStreaming)
+        processTx(cach, DMR_CACH_LENGTH_BYTES_LOCAL, false);
+}
+
+// Mirrors CDMRTX::createData(): pull a real frame from this slot's FIFO
+// when there is one (and startup/abort hysteresis allows it), otherwise
+// transmit the idle frame so the slot keeps its TDMA structure. Only
+// actually sent to the modem while keyed -- see dmrSendCACH().
+static void dmrSendSlotBurst(uint8_t slotIndex)
+{
+    uint8_t frame[33U];  // DMR_FRAME_LENGTH_BYTES
+    bool haveFrame = false;
+
+    pthread_mutex_lock(&dmrTxFifoMutex[slotIndex]);
+    if (RingBuffer_dataSize(&dmrTxFifo[slotIndex]) >= (int)DMR_FRAME_LENGTH_BYTES &&
+        dmrTxFrameCount >= DMR_TX_STARTUP_COUNT && dmrTxAbortCount[slotIndex] >= DMR_TX_ABORT_COUNT)
+    {
+        RingBuffer_getData(&dmrTxFifo[slotIndex], frame, DMR_FRAME_LENGTH_BYTES);
+        haveFrame = true;
+    }
+    pthread_mutex_unlock(&dmrTxFifoMutex[slotIndex]);
+
+    if (!haveFrame)
+        memcpy(frame, dmrIdleFrame, DMR_FRAME_LENGTH_BYTES);
+
+    if (dmrTxStreaming)
+    {
+        if (debugM)
+            fprintf(stderr, "DMR TX slot%u: sending %s frame\n", slotIndex + 1U, haveFrame ? "RELAYED" : "idle");
+        /* isEOT=false: this burst is one chunk of a continuous keyed TDMA
+         * stream, not the end of a transmission. The one-shot EOT flush
+         * when txOn drops is handled by dmrTxThread()'s edge detector. */
+        processTx(frame, DMR_FRAME_LENGTH_BYTES, false);
+    }
+}
+
+/* --- Simplex (DMO) downlink ---
+ * A simplex hotspot does not transmit the repeater's CACH + two slot
+ * structure.  MMDVM's CDMRDMOTX (the firmware's simplex transmitter) sends one
+ * 33 byte burst followed by 39 bytes of pseudo-random fill, 72 bytes or 60 ms
+ * in all, and a subscriber radio simply locks to the MS sourced sync in each
+ * burst.  A capture of a radio's own simplex transmission shows the same
+ * 60 ms cadence: MS sync, a voice superframe of six bursts, 360 ms between
+ * voice syncs.  Before the first burst the firmware sends a run of 0x5F bytes
+ * (a plain two-symbol tone) so the receiving radio's squelch and AFC settle.
+ *
+ * Only used when modem_duplex is false.  Everything for the radio comes from
+ * the slot 1 FIFO: whichever slot the gateway names, a simplex hotspot has
+ * just the one (decodeDMR() queues slot 2 traffic there too). */
+static const uint8_t DMR_DMO_PR_FILL[39U] = {
+    0x63U, 0xEAU, 0x00U, 0x76U, 0x6CU, 0x76U, 0xC4U, 0x52U, 0xC8U, 0x78U,
+    0x09U, 0x2DU, 0xB8U, 0x79U, 0x27U, 0x57U, 0x9BU, 0x31U, 0xBCU, 0x3EU,
+    0xEAU, 0x45U, 0xC3U, 0x30U, 0x49U, 0x17U, 0x93U, 0xAEU, 0x8BU, 0x6DU,
+    0xA4U, 0xA5U, 0xADU, 0xA2U, 0xF1U, 0x35U, 0xB5U, 0x3CU, 0x1EU};
+
+static const uint8_t DMR_DMO_PREAMBLE_BYTE = 0x5FU;     // CDMRDMOTX DMR_SYNC
+static const long    DMR_DMO_PERIOD_US     = 60000L;    // one burst + fill
+
+/* [DMR] DmoPreamble, in ms. The frames the gateway sends meanwhile wait in
+ * the FIFO (12 frames, 720 ms), so keep it well below that. */
+static uint32_t dmrDmoPreambleMs = 360U;
+
+static void dmrSendDmoPreamble(void)
+{
+    uint8_t chunk[32U];
+
+    /* One byte is 4 symbols at 4800 baud, 5/6 ms. */
+    uint32_t bytes = (dmrDmoPreambleMs * 6U) / 5U;
+
+    memset(chunk, DMR_DMO_PREAMBLE_BYTE, sizeof chunk);
+    while (bytes > 0U)
+    {
+        uint32_t n = (bytes > sizeof chunk) ? (uint32_t)sizeof chunk : bytes;
+        processTx(chunk, (uint8_t)n, false);
+        bytes -= n;
+    }
+    if (debugM)
+        fprintf(stderr, "DMR TX (simplex): preamble %u ms sent\n", (unsigned)dmrDmoPreambleMs);
+}
+
+// One 60 ms period: a queued frame (or the idle frame when there is none, so
+// the carrier and burst structure carry on between frames) plus the fill.
+static void dmrSendDmoPeriod(void)
+{
+    uint8_t frame[33U];  // DMR_FRAME_LENGTH_BYTES
+    bool haveFrame = false;
+
+    /* Keep the duplex scheduler's start-up bookkeeping advancing at its usual
+     * rate (two CACHs per 60 ms), so switching to duplex later behaves as if
+     * this thread had been running in duplex all along. */
+    dmrTxFrameCount += 2U;
+    dmrTxAbortCount[0U] += 2U;
+    dmrTxAbortCount[1U] += 2U;
+
+    if (!dmrTxStreaming)
+        return;
+
+    pthread_mutex_lock(&dmrTxFifoMutex[0U]);
+    if (RingBuffer_dataSize(&dmrTxFifo[0U]) >= (int)DMR_FRAME_LENGTH_BYTES)
+    {
+        RingBuffer_getData(&dmrTxFifo[0U], frame, DMR_FRAME_LENGTH_BYTES);
+        haveFrame = true;
+    }
+    pthread_mutex_unlock(&dmrTxFifoMutex[0U]);
+
+    if (!haveFrame)
+    {
+        memcpy(frame, dmrIdleFrame, DMR_FRAME_LENGTH_BYTES);
+        addDMRDataSync(frame, false);  // MS sourced, like everything else sent in simplex
+    }
+
+    if (debugM)
+        fprintf(stderr, "DMR TX (simplex): sending %s frame\n", haveFrame ? "RELAYED" : "idle");
+
+    processTx(frame, DMR_FRAME_LENGTH_BYTES, false);
+    processTx(DMR_DMO_PR_FILL, sizeof DMR_DMO_PR_FILL, false);
+}
+
+/* The TDMA scheduler itself: CACH(0,1) -> SLOT1 -> CACH(1,0) -> SLOT2 ->
+ * repeat, exactly like CDMRTX::process()'s state machine, paced in real
+ * time with an absolute-deadline clock so the 30ms/slot, 60ms/cycle
+ * cadence doesn't drift even though processTx() below it also spends
+ * real wall-clock time of its own doing per-packet socket pacing (that
+ * pacing is flow control, not a precise symbol clock -- see
+ * writeSamples()/writeBits()).
+ *
+ * This loop runs continuously regardless of txOn -- it is NOT gated on
+ * "are we keyed?" the way an earlier version of this function was. That
+ * earlier version skipped the whole cycle (including arming the RX
+ * correlators, back when RX needed arming from here) whenever txOn was
+ * false, which deadlocked the repeater: RX could never scan for an
+ * incoming burst until txOn was already true -- but txOn only ever
+ * becomes true as a RESULT of RX decoding a voice/data LC header.
+ * RX no longer depends on this thread at all (see the file comment
+ * above dmrRxProcessSample()), but the loop still always runs
+ * unconditionally: dmrSendCACH()/dmrSendSlotBurst() are what gate the
+ * actual modulated output to the modem on txOn, not the scheduler
+ * itself, so the on-air TDMA structure (idle bursts, CACH) stays
+ * continuous even while nothing is being relayed. */
+void* dmrTxThread(void* arg)
+{
+    (void)arg;
+
+    enum { DMR_TXSCHED_PRECACH1, DMR_TXSCHED_SLOT1, DMR_TXSCHED_PRECACH2, DMR_TXSCHED_SLOT2 } state = DMR_TXSCHED_PRECACH1;
+
+    const long DMR_CACH_PERIOD_US = 2500L;   // 12 symbols (3 bytes) at 4800 sym/s
+    const long DMR_SLOT_PERIOD_US = 27500L;  // 132 symbols (33 bytes) at 4800 sym/s
+
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+
+    uint32_t debugCycleCount = 0U;
+
+    while (connected)
+    {
+        if (debugM && state == DMR_TXSCHED_PRECACH1)
+        {
+            // Once per 60ms cycle -- confirms the scheduler thread itself
+            // is still alive and ticking, independent of whether RX is
+            // finding anything.
+            debugCycleCount++;
+            if ((debugCycleCount % 17U) == 0U)  // roughly once a second
+                fprintf(stderr, "DMR TX scheduler: cycle %u, txOn=%d\n", debugCycleCount, (int)txOn);
+        }
+
+        /* TX hang expired: nothing has made a slot active since the hang
+         * started (see dmrTxHangNs) -- un-key. */
+        if (txOn && dmrTxHangNs != 0 && !slotActive[0] && !slotActive[1] &&
+            dmrNowNs() - dmrTxHangNs > dmrTxHangDurNs)
+        {
+            uint8_t buf[2];
+            buf[0] = TYPE_DMR_START;
+            buf[1] = 0;
+            txOn        = false;
+            dmrTxHangNs = 0;
+            sendDataToModem(buf, 2, 1, false);
+            fprintf(stderr, "DMR TX: hang time over, un-keying\n");
+        }
+
+        /* Downlink stop: the first time txOn drops back to false while
+         * streaming (both slots done), send one SAMP/BITS packet carrying
+         * the EOT header to the modem so it stops keying and resets.
+         * During a transmission every burst goes to the modem with
+         * isEOT=false (see dmrSendSlotBurst() above) -- mirrors
+         * P25/M17/D-STAR, where the EOT flush happens exactly once per
+         * transmission. */
+        if (dmrTxStreaming && !txOn)
+        {
+            dmrTxStreaming = false;
+            pthread_mutex_lock(&dmrTxSlotTimeMutex);
+            dmrTxRefValid = false;
+            pthread_mutex_unlock(&dmrTxSlotTimeMutex);
+            if (packetType == PACKET_TYPE_SAMP)
+                writeSamples(0x00U, true);
+            else if (packetType == PACKET_TYPE_BIT)
+                writeBits(0x00U, true);
+            if (debugM)
+                fprintf(stderr, "DMR TX: txOn dropped, flushed EOT to modem\n");
+        }
+
+        /* Downlink start: only ever at the top of a TDMA cycle, so every
+         * key-up feeds the modem the same sequence (see dmrTxStreaming). */
+        if (txOn && !dmrTxStreaming && state == DMR_TXSCHED_PRECACH1)
+        {
+            // New downlink: TX sample 0 is the CACH about to be sent, and
+            // any earlier timing report belonged to the previous one.
+            pthread_mutex_lock(&dmrTxSlotTimeMutex);
+            dmrTxRefValid       = false;
+            dmrTxSamplesWritten = 0U;
+            pthread_mutex_unlock(&dmrTxSlotTimeMutex);
+            dmrTxStreaming = true;
+            if (debugM)
+                fprintf(stderr, "DMR TX: downlink start at cycle boundary\n");
+
+            if (!modem_duplex)
+            {
+                /* Simplex: preamble first, then the 60 ms cadence starts from
+                 * the moment it is out (it took real time to write). */
+                dmrSendDmoPreamble();
+                clock_gettime(CLOCK_MONOTONIC, &next);
+            }
+        }
+
+        long periodUs;
+        if (!modem_duplex)
+        {
+            /* Simplex: no CACH, one burst per 60 ms. The duplex state
+             * machine below is left alone and picks up from PRECACH1 if the
+             * modem later says duplex. */
+            state = DMR_TXSCHED_PRECACH1;
+            dmrSendDmoPeriod();
+            periodUs = DMR_DMO_PERIOD_US;
+        }
+        else
+        switch (state)
+        {
+            case DMR_TXSCHED_PRECACH1:
+                dmrSendCACH(0U, 1U);
+                state = DMR_TXSCHED_SLOT1;
+                periodUs = DMR_CACH_PERIOD_US;
+                break;
+            case DMR_TXSCHED_SLOT1:
+            {
+                // "next" is this state's scheduled start time -- record it
+                // as the slot-1 reference for dmrRxLogSlotPhase().
+                int64_t t = (int64_t)next.tv_sec * 1000000000LL + (int64_t)next.tv_nsec;
+                pthread_mutex_lock(&dmrTxSlotTimeMutex);
+                dmrTxSlot1StartNs = t;
+                pthread_mutex_unlock(&dmrTxSlotTimeMutex);
+            }
+                dmrSendSlotBurst(0U);
+                state = DMR_TXSCHED_PRECACH2;
+                periodUs = DMR_SLOT_PERIOD_US;
+                break;
+            case DMR_TXSCHED_PRECACH2:
+                dmrSendCACH(1U, 0U);
+                state = DMR_TXSCHED_SLOT2;
+                periodUs = DMR_CACH_PERIOD_US;
+                break;
+            case DMR_TXSCHED_SLOT2:
+            default:
+                dmrSendSlotBurst(1U);
+                state = DMR_TXSCHED_PRECACH1;
+                periodUs = DMR_SLOT_PERIOD_US;
+                break;
+        }
+
+        next.tv_nsec += periodUs * 1000L;
+        while (next.tv_nsec >= 1000000000L)
+        {
+            next.tv_nsec -= 1000000000L;
+            next.tv_sec++;
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long diffNs = (long)(next.tv_sec - now.tv_sec) * 1000000000L + (next.tv_nsec - now.tv_nsec);
+        if (diffNs > 0)
+        {
+            struct timespec req = {diffNs / 1000000000L, diffNs % 1000000000L};
+            nanosleep(&req, NULL);
+        }
+    }
+
+    return NULL;
+}
+
+/* --- BIT-mode RX ---
+ * In BIT mode the modem hardware does its own 4FSK symbol slicing and
+ * just streams the resulting hard bit decisions; there is no amplitude
+ * information, so burst timing is pure bit counting and sync is pure
+ * bit-pattern correlation against the 48-bit MS-sourced sync words
+ * (DMR_MS_DATA_SYNC_BITS / DMR_MS_VOICE_SYNC_BITS / DMR_SYNC_BITS_MASK).
+ *
+ * What the modem sends (openmt_hs firmware, DMR mode): it watches for the
+ * MS data sync or its paired MS voice sync and, on a match, starts the
+ * stream with the 192 bits up to and including that sync, then every
+ * following bit. It keeps streaming while syncs keep arriving (a voice
+ * superframe has one every 360 ms) and stops 1.5 s after the last one. The
+ * modem's clock is recovered from the signal, so the stream is bit-exact:
+ * a TDMA slot repeats every 576 bits, 60 ms.
+ *
+ * A DMR burst is 264 bits with its 48-bit sync in the middle (bits 108 to
+ * 155), so the burst is only complete 108 bits after the sync match, and
+ * its first 108 bits come from before it. This code therefore keeps the
+ * last 1024 bits in a ring and, when a burst is due, cuts the 264 bits out
+ * of it:
+ *
+ *   - a sync match at stream position p schedules a burst that ends at
+ *     p + 108 (start = end - 264);
+ *   - once a call is being followed (state VOICE or DATA), the next burst
+ *     of the same slot is expected exactly 576 bits after the previous
+ *     one. That covers voice bursts B-F and data blocks that carry no
+ *     usable sync: at the expected position the burst is cut out whether
+ *     or not a sync was seen there. Like the SAMPLE-mode path, DMR_MAX_
+ *     SYNC_LOST_FRAMES such bursts in a row without a sync end the call;
+ *   - sync matches that do not line up with the followed slot (the other
+ *     slot's bursts, noise) are ignored while a call is being followed.
+ *
+ * The per-burst decisions (what to hand to decodeDMR() and with which
+ * control byte) are the same as the per-context ones in the SAMPLE-mode RX
+ * above, so decodeDMR() sees the same thing from either front end.
+ *
+ * Still single-slot: with no amplitude information there is nothing to
+ * tell TS1 from TS2 against dmrTxThread()'s slot timing, so everything is
+ * reported as slot 1 (slot argument 0).
+ */
+#define DMR_BIT_RING_BITS        1024U   // power of two; must hold one 264-bit burst
+#define DMR_BIT_BURST_REPEAT     576U    // 60 ms at 9600 bit/s
+#define DMR_BIT_SYNC_TO_END      108U    // bits after the sync until the burst is complete
+#define DMR_BIT_SYNC_FROM_START  156U    // 108 + 48: burst start to the end of its sync
+#define DMR_BIT_COAST_SLACK      16      // bits either side of the expected burst end
+#define DMR_BIT_STREAM_GAP_NS    400000000LL  // longer than this between BITS packets: a new stream
+
+static uint8_t  dmrBitRing[DMR_BIT_RING_BITS / 8U];
+static uint64_t dmrBitWindow     = 0U;     // last 64 bits, newest in bit 0
+static uint64_t dmrBitTotal      = 0U;     // bits received so far
+static uint64_t dmrBitSinceStart = 0U;     // bits received since the stream (re)started
+static int64_t  dmrBitLastNs     = 0;
+
+/* Two independent call trackers, one per time slot. Their bursts are 288 bits
+ * apart in the bit stream, so they never overlap: one pending burst at a time
+ * is enough, and each slot has its own expected-next-burst position. */
+typedef struct
+{
+    bool     coast;      // the next burst of this slot is expected at coastEnd
+    uint64_t coastEnd;
+    uint8_t  state;      // DMR_RXS_*
+    uint8_t  n;          // voice burst counter, B-F = 1..5
+    uint8_t  syncCount;  // bursts in a row without a sync
+    uint8_t  dataType;   // data type of the data call being followed
+} DmrBitCtx;
+
+static DmrBitCtx dmrBitCtx[2];
+
+static bool     dmrBitPending    = false;  // a burst found by sync is waiting for its last bits
+static uint64_t dmrBitPendEnd    = 0U;     // stream position (exclusive) where it completes
+static bool     dmrBitPendVoice  = false;
+static uint8_t  dmrBitPendSlot   = 0U;     // the slot it belongs to
+
+static int32_t  dmrBitPhaseNow   = -1;     // TX stream position (0..575) at the bit being processed, -1 unknown
+static int32_t  dmrBitPendPhase  = -1;     // the same, at the end of the sync that started the pending burst
+static int32_t  dmrSlotPhase     = -1;     // [DMR] slotPhase: TX phase at which a TS1 uplink sync ends, -1 unset
+
+/* Which time slot an uplink burst is in. The radio times its uplink to the
+ * downlink this modem sends, so the burst's position in the downlink's
+ * 60 ms two-slot cycle says which slot it belongs to. The modem reports that
+ * position with every BITS packet. dmrSlotPhase is the position at which a
+ * TS1 sync typically ends (measured once per setup: run with debug on and look at
+ * "sync end at TX phase"); TS2 is half a cycle (288 bits) later. The value
+ * is the typical position for TS1, so a few bits of jitter either way is
+ * harmless. */
+static uint8_t dmrBitSlotFromPhase(int32_t phase)
+{
+    if (phase < 0 || dmrSlotPhase < 0)
+        return 0U;
+
+    int32_t d = (phase - dmrSlotPhase + 144 + 576) % 576;
+    return (d < 288) ? 0U : 1U;
+}
+
+static bool dmrBitAnyCall(void)
+{
+    return dmrBitCtx[0].state != DMR_RXS_NONE || dmrBitCtx[1].state != DMR_RXS_NONE;
+}
+
+static void dmrBitReset(void)
+{
+    dmrBitPending = false;
+    memset(dmrBitCtx, 0, sizeof(dmrBitCtx));
+}
+
+// Copy the 264 bits ending at stream position 'end' (exclusive) out of the ring.
+static void dmrBitCutBurst(uint64_t end, uint8_t* frame)
+{
+    uint64_t start = end - DMR_FRAME_LENGTH_BITS;
+
+    memset(frame, 0x00U, DMR_FRAME_LENGTH_BYTES);
+    for (uint16_t i = 0U; i < DMR_FRAME_LENGTH_BITS; i++)
+    {
+        uint32_t pos = (uint32_t)((start + i) & (DMR_BIT_RING_BITS - 1U));
+        bool b = (dmrBitRing[pos >> 3] & DMR_RX_BIT_MASK_TABLE[pos & 7U]) != 0U;
+        if (b)
+            frame[i >> 3] |= DMR_RX_BIT_MASK_TABLE[i & 7U];
+    }
+}
+
+/* One complete burst of slot 'slot'. 'control' is DMR_RX_CONTROL_DATA /
+ * _VOICE when a sync was found at the burst's centre, DMR_RX_CONTROL_NONE when
+ * it was cut out at its expected position without one. Mirrors
+ * dmrRxFinishBurst() above. */
+static void dmrBitBurst(uint8_t* frame, uint8_t control, uint64_t end, uint8_t slot)
+{
+    DmrBitCtx* c = &dmrBitCtx[slot];
+    uint8_t ctl = control;
+
+    if (modem_duplex && !txOn && !dmrBitAnyCall())
+    {
+        /* Not keyed and no call in progress: like MMDVM's DMRIdleRX, the
+         * only interesting thing is a radio's wake-up CSBK (BS_Dwn_Act),
+         * passed on flagged CONTROL_IDLE so decodeDMR() keys up without
+         * marking a slot active. Everything else is ignored. */
+        if (debugM)
+        {
+            if (control == DMR_RX_CONTROL_DATA)
+            {
+                uint8_t cc, dt;
+                DMRSlotType_decode(frame, &cc, &dt);
+                bool ok = (dt == DT_CSBK) && CSBK_decode(frame, 0U);
+                fprintf(stderr, "DMR RX bits: idle, data sync burst cc=%u (want %u) type=%u%s csbkOK=%d csbko=%u\n",
+                        cc, dmrColorCode, dt, dt == DT_CSBK ? " (CSBK)" : "", ok ? 1 : 0, ok ? (unsigned)CSBK_getCSBKO(0U) : 0U);
+            }
+            else
+            {
+                fprintf(stderr, "DMR RX bits: idle, voice sync burst (ignored, no wake-up seen)\n");
+            }
+        }
+
+        if (control == DMR_RX_CONTROL_DATA)
+        {
+            uint8_t colorCode, dataType;
+            DMRSlotType_decode(frame, &colorCode, &dataType);
+            if (colorCode == dmrColorCode && dataType == DT_CSBK)
+            {
+                if (debugM)
+                    fprintf(stderr, "DMR RX bits: wake-up CSBK while idle\n");
+                dmrRxDeliverFrame(0U, frame, DMR_RX_CONTROL_IDLE | DMR_RX_CONTROL_DATA | DT_CSBK, false);
+            }
+        }
+        c->coast = false;
+        return;
+    }
+
+    if (c->state == DMR_RXS_NONE && control != DMR_RX_CONTROL_NONE && debugM)
+        fprintf(stderr, "DMR RX bits: call starts, sync end at TX phase %d, slot %u\n", (int)dmrBitPendPhase, slot + 1U);
+
+    if (control == DMR_RX_CONTROL_DATA)
+    {
+        uint8_t colorCode, dataType;
+        DMRSlotType_decode(frame, &colorCode, &dataType);
+
+        if (debugM)
+            fprintf(stderr, "DMR RX bits: slot %u data sync burst cc=%u (want %u) type=%u state=%u txOn=%d\n",
+                    slot + 1U, colorCode, dmrColorCode, dataType, c->state, txOn ? 1 : 0);
+
+        if (colorCode == dmrColorCode)
+        {
+            c->syncCount = 0U;
+            c->n         = 0U;
+            ctl          = DMR_RX_CONTROL_DATA | dataType;
+
+            switch (dataType)
+            {
+                case DT_TERMINATOR_WITH_LC:
+                    if (c->state == DMR_RXS_VOICE)
+                    {
+                        dmrRxDeliverFrame(slot, frame, ctl, false);
+                        c->state = DMR_RXS_NONE;
+                    }
+                    break;
+                case DT_VOICE_LC_HEADER:
+                    dmrRxDeliverFrame(slot, frame, ctl, false);
+                    c->state = DMR_RXS_VOICE;
+                    break;
+                case DT_VOICE_PI_HEADER:
+                    if (c->state == DMR_RXS_VOICE)
+                        dmrRxDeliverFrame(slot, frame, ctl, false);
+                    c->state = DMR_RXS_VOICE;
+                    break;
+                case DT_DATA_HEADER:
+                    dmrRxDeliverFrame(slot, frame, ctl, false);
+                    c->state    = DMR_RXS_DATA;
+                    c->dataType = 0x00U;
+                    break;
+                case DT_RATE_12_DATA:
+                case DT_RATE_34_DATA:
+                case DT_RATE_1_DATA:
+                    if (c->state == DMR_RXS_DATA)
+                    {
+                        dmrRxDeliverFrame(slot, frame, ctl, false);
+                        c->dataType = dataType;
+                    }
+                    break;
+                default:  // DT_CSBK and others
+                    if (dataType == DT_CSBK && CSBK_decode(frame, slot) && CSBK_getCSBKO(slot) == CSBKO_BSDWNACT)
+                    {
+                        if (debugM)
+                            fprintf(stderr, "DMR RX bits: repeated wake-up CSBK while keyed, ignored\n");
+                    }
+                    else
+                    {
+                        dmrRxDeliverFrame(slot, frame, ctl, false);
+                    }
+                    c->state = DMR_RXS_NONE;
+                    break;
+            }
+        }
+    }
+    else if (control == DMR_RX_CONTROL_VOICE)
+    {
+        if (debugM)
+            fprintf(stderr, "DMR RX bits: slot %u voice sync burst\n", slot + 1U);
+        dmrRxDeliverFrame(slot, frame, DMR_RX_CONTROL_VOICE, false);
+        c->state     = DMR_RXS_VOICE;
+        c->syncCount = 0U;
+        c->n         = 0U;
+    }
+    else
+    {
+        if (c->state != DMR_RXS_NONE)
+        {
+            c->syncCount++;
+            if (c->syncCount >= DMR_MAX_SYNC_LOST_FRAMES)
+            {
+                if (debugM)
+                    fprintf(stderr, "DMR RX bits: slot %u: %u bursts in a row without sync, ending the call\n", slot + 1U, c->syncCount);
+                dmrRxDeliverFrame(slot, frame, 0x00U, true);
+                c->state = DMR_RXS_NONE;
+            }
+        }
+
+        if (c->state == DMR_RXS_VOICE)
+        {
+            if (c->n >= 5U)
+            {
+                ctl  = DMR_RX_CONTROL_VOICE;
+                c->n = 0U;
+            }
+            else
+            {
+                ctl = ++c->n;
+            }
+
+            dmrRxDeliverFrame(slot, frame, ctl, false);
+        }
+        else if (c->state == DMR_RXS_DATA)
+        {
+            if (c->dataType != 0x00U)
+                dmrRxDeliverFrame(slot, frame, DMR_RX_CONTROL_DATA | c->dataType, false);
+        }
+    }
+
+    // Still following a call: the next burst of this slot is 60 ms away
+    if (c->state != DMR_RXS_NONE)
+    {
+        c->coast    = true;
+        c->coastEnd = end + DMR_BIT_BURST_REPEAT;
+    }
+    else
+    {
+        c->coast = false;
+    }
+}
+
+static void dmrProcessBit(bool bit)
+{
+    uint8_t frame[33U];  // DMR_FRAME_LENGTH_BYTES (must be a literal: global array size)
+
+    uint32_t pos = (uint32_t)(dmrBitTotal & (DMR_BIT_RING_BITS - 1U));
+    if (bit)
+        dmrBitRing[pos >> 3] |= DMR_RX_BIT_MASK_TABLE[pos & 7U];
+    else
+        dmrBitRing[pos >> 3] &= (uint8_t)~DMR_RX_BIT_MASK_TABLE[pos & 7U];
+
+    dmrBitTotal++;
+    dmrBitSinceStart++;
+    dmrBitWindow = (dmrBitWindow << 1) | (bit ? 1U : 0U);
+
+    // A sync match this bit: the burst it belongs to ends 108 bits from now
+    if (!dmrBitPending && dmrBitSinceStart >= DMR_BIT_SYNC_FROM_START)
+    {
+        uint64_t window = dmrBitWindow & DMR_SYNC_BITS_MASK;
+        bool isData  = dmrCountBits64(window ^ DMR_MS_DATA_SYNC_BITS)  <= DMR_MAX_SYNC_BYTES_ERRS;
+        bool isVoice = dmrCountBits64(window ^ DMR_MS_VOICE_SYNC_BITS) <= DMR_MAX_SYNC_BYTES_ERRS;
+
+        if (isData || isVoice)
+        {
+            uint64_t end = dmrBitTotal + DMR_BIT_SYNC_TO_END;
+
+            /* Which slot is it? A sync that lands where a followed slot's
+             * next burst is expected belongs to that slot (this needs no
+             * timing information at all). Otherwise it is the start of a
+             * call: the modem's TX phase says which slot. A slot that is
+             * already being followed rejects syncs outside its window. */
+            int8_t  slot   = -1;
+            int64_t bestDiff = 0;
+            for (uint8_t sl = 0U; sl < 2U; sl++)
+            {
+                if (!dmrBitCtx[sl].coast)
+                    continue;
+                int64_t diff = (int64_t)(end - dmrBitCtx[sl].coastEnd);
+                if (diff >= -DMR_BIT_COAST_SLACK && diff <= DMR_BIT_COAST_SLACK)
+                {
+                    slot     = (int8_t)sl;
+                    bestDiff = diff;
+                }
+            }
+
+            bool wanted = true;
+            if (slot >= 0)
+            {
+                if (debugM && bestDiff != 0)
+                    fprintf(stderr, "DMR RX bits: slot %d %s sync off the coast position by %lld bits\n",
+                            slot + 1, isVoice && !isData ? "voice" : "data", (long long)bestDiff);
+                /* No snapping to the expected position: the radio's burst
+                 * rate differs a little from the bit count here (about 0.5
+                 * bit per voice superframe was measured), and snapping let
+                 * the error pile up. Re-align to where the sync really is. */
+            }
+            else
+            {
+                slot = (int8_t)dmrBitSlotFromPhase(dmrBitPhaseNow);
+                if (dmrBitCtx[slot].coast)
+                {
+                    wanted = false;
+                    if (debugM)
+                        fprintf(stderr, "DMR RX bits: slot %d %s sync REJECTED, outside its window\n",
+                                slot + 1, isVoice && !isData ? "voice" : "data");
+                }
+            }
+
+            if (wanted)
+            {
+                dmrBitPending   = true;
+                dmrBitPendPhase = dmrBitPhaseNow;
+                dmrBitPendEnd   = end;
+                dmrBitPendVoice = isVoice && !isData;
+                dmrBitPendSlot  = (uint8_t)slot;
+            }
+        }
+    }
+
+    if (dmrBitPending && dmrBitTotal == dmrBitPendEnd)
+    {
+        dmrBitPending = false;
+        dmrBitCutBurst(dmrBitPendEnd, frame);
+        dmrBitBurst(frame, dmrBitPendVoice ? DMR_RX_CONTROL_VOICE : DMR_RX_CONTROL_DATA, dmrBitPendEnd, dmrBitPendSlot);
+    }
+    else if (!dmrBitPending)
+    {
+        // An expected burst's position, and no sync was found for it
+        for (uint8_t sl = 0U; sl < 2U; sl++)
+        {
+            if (dmrBitCtx[sl].coast && dmrBitTotal == dmrBitCtx[sl].coastEnd)
+            {
+                uint64_t end = dmrBitCtx[sl].coastEnd;
+                dmrBitCtx[sl].coast = false;
+                dmrBitCutBurst(end, frame);
+                dmrBitBurst(frame, DMR_RX_CONTROL_NONE, end, sl);
+                break;
+            }
+        }
+    }
+}
+
+// Entry point for BIT-mode RX: feed raw hard-sliced dibit bytes in here
+// (8 bits = 4 symbols per byte, MSB first), same packing as writeBits().
+void dmrRxBits(const uint8_t* bytes, uint8_t length)
+{
+    int64_t now = dmrNowNs();
+
+    /* The modem only streams while it hears sync; a gap in the BITS packets
+     * means the stream ended, and what arrives next is a new one starting
+     * with its own history. Forget the old stream. */
+    if (dmrBitLastNs != 0 && now - dmrBitLastNs > DMR_BIT_STREAM_GAP_NS)
+    {
+        if (dmrBitAnyCall() && debugM)
+            fprintf(stderr, "DMR RX bits: stream restarted, dropping the old call state\n");
+        dmrBitReset();
+        dmrBitSinceStart = 0U;
+    }
+    dmrBitLastNs = now;
+
+    static int64_t lastPktNs = 0;
+    if (debugM && lastPktNs != 0 && dmrBitAnyCall() && now - lastPktNs > 250000000LL)
+        fprintf(stderr, "DMR RX bits: %lld ms between BITS packets during a call\n", (long long)((now - lastPktNs) / 1000000LL));
+    lastPktNs = now;
+
+    /* BIT mode firmware appends 2 bytes to every BITS packet: the TX stream
+     * position (0..575) when the packet's last bit arrived, 0xFFFF while the
+     * modem is not transmitting. */
+    int32_t tailPhase = -1;
+    if (length >= 2U)
+    {
+        uint16_t ph = (uint16_t)((bytes[length - 2U] << 8) | bytes[length - 1U]);
+        tailPhase = (ph == 0xFFFFU) ? -1 : (int32_t)(ph % 576U);
+        length   -= 2U;
+    }
+    int32_t totalBits = (int32_t)length * 8;
+    int32_t bitIndex  = 0;
+
+    for (uint8_t i = 0U; i < length; i++)
+        for (int8_t b = 7; b >= 0; b--)
+        {
+            dmrBitPhaseNow = (tailPhase < 0) ? -1 : (tailPhase - (totalBits - 1 - bitIndex) % 576 + 576) % 576;
+            bitIndex++;
+            dmrProcessBit((bytes[i] & (1U << b)) != 0U);
+        }
+
+    if (debugM)
+    {
+        int64_t took = dmrNowNs() - now;
+        if (took > 20000000LL)
+            fprintf(stderr, "DMR RX bits: processing one BITS packet took %lld ms\n", (long long)(took / 1000000LL));
+    }
+}
+
+/* RF voice regeneration.  Each voice burst received from the radio carries
+ * three AMBE+2 frames protected by Golay codes.  They are decoded and encoded
+ * again (see dmr_fec.h), which gives the number of channel bit errors for the
+ * BER figure and, when DMR_FEC_REGENERATE is set, replaces correctable frames
+ * with their corrected version before they are relayed.  Frames with more
+ * errors than DMR_FEC_MAX_ERRORS go out as received, so the receiving radio's
+ * own error handling still sees damage that can not be repaired.  Network
+ * traffic never went over the air here, so it is left alone. */
+#ifndef DMR_FEC_REGENERATE
+#define DMR_FEC_REGENERATE 1
+#endif
+
+static unsigned int dmrRfErrs[2] = {0U, 0U}; // bit errors found in this RF call, per slot
+static unsigned int dmrRfBits[2] = {0U, 0U}; // protected bits checked in this RF call, per slot
+
+static void dmrRfVoice(unsigned int slot, uint8_t* buffer, uint8_t length, bool isNet)
+{
+    if (isNet || length < 8U + 1U + DMR_FRAME_LENGTH_BYTES)
+    {
+        return;
+    }
+
+    dmrRfErrs[slot] += dmrFecErrors(buffer + 8 + 1, DMR_FEC_REGENERATE != 0);
+    dmrRfBits[slot] += DMR_FEC_BITS_PER_BURST;
+}
+
+/* Print the BER of the RF call that just ended on this slot and return it
+ * (0 if there was none). */
+static float dmrRfBer(unsigned int slot, bool isNet)
+{
+    float ber = 0.0f;
+
+    /* A network call has no BER and must not disturb the counters of an RF
+     * call on the same slot. */
+    if (isNet)
+    {
+        return ber;
+    }
+
+    if (dmrRfBits[slot] > 0U)
+    {
+        ber = (float)dmrRfErrs[slot] / (float)dmrRfBits[slot];
+        fprintf(stderr, "BER slot %u: %.6f (%u errors / %u bits)\n", slot + 1U, ber, dmrRfErrs[slot], dmrRfBits[slot]);
+    }
+
+    dmrRfErrs[slot] = 0U;
+    dmrRfBits[slot] = 0U;
+
+    return ber;
+}
+
 void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
 {
     static uint8_t activeSlots = 0;
@@ -582,6 +2878,32 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
     char cType[4] = "RF";
     if (isNet)
         strcpy(cType, "NET");
+
+    /* Simplex works on slot 1 only. A radio talking to a simplex hotspot
+     * has no slot (the modem's DMO receiver reports slot 2, and in SAMPLE and
+     * BIT mode the slot would be guessed from timing against a downlink that
+     * is not there), so everything heard from the radio is slot 1. It is
+     * only passed on to the gateway, never retransmitted. */
+    const bool simplexRF = !isNet && !modem_duplex;
+    if (simplexRF)
+    {
+        if (memcmp((buffer + 4), TYPE_DATA2, 4) == 0)
+        {
+            memcpy(buffer + 4, TYPE_DATA1, 4);
+            if (packetType == PACKET_TYPE_FRAME)
+                sendCommToModem((uint8_t*)SETMODE, 5); // as the slot 2 branch did for simplex
+        }
+        else if (memcmp((buffer + 4), TYPE_LOST2, 4) == 0)
+        {
+            memcpy(buffer + 4, TYPE_LOST1, 4);
+        }
+    }
+
+    // Any traffic for a slot keeps it alive (see dmrSlotWatchdog()).
+    if (memcmp((buffer + 4), TYPE_DATA1, 4) == 0 || memcmp((buffer + 4), TYPE_LOST1, 4) == 0)
+        dmrSlotNoteFrame(0U);
+    else if (memcmp((buffer + 4), TYPE_DATA2, 4) == 0 || memcmp((buffer + 4), TYPE_LOST2, 4) == 0)
+        dmrSlotNoteFrame(1U);
 
     if (memcmp((buffer + 4), TYPE_DATA1, 4) == 0)
     {
@@ -595,6 +2917,21 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
             buf[1] = 1;
             sendDataToModem(buf, 2, 1, isNet);
             isGroup[0] = true;
+
+            /* In FRAME mode the MMDVM firmware starts the downlink itself on
+             * TYPE_DMR_START. In SAMPLE/BIT mode this host generates the
+             * downlink (dmrTxThread()), so key it here: the waking radio
+             * needs to hear our CACH/idle bursts to time itself to a slot
+             * before it sends its call. No slot is marked active -- the
+             * call that follows does that, on whichever slot it's really
+             * on. dmrTxThread() drops txOn again if no call follows. */
+            if (!simplexRF && (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT))
+            {
+                dmrTxHangNs = dmrNowNs();
+                txOn        = true;
+                if (debugM)
+                    fprintf(stderr, "DMR: wake-up CSBK, keying downlink\n");
+            }
         }
         else
         {
@@ -618,7 +2955,10 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                 if (!slotActive[0])
                 {
                     slotActive[0] = true;
-                    txOn = true;
+                    if (simplexRF)
+                        dmrSimplexRf = true;
+                    else
+                        txOn = true;
                     if (activeSlots == 0)
                     {
                         activeSlots = 1;
@@ -630,6 +2970,11 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                         slotRow[0]  = 2;
                     }
                     fprintf(stderr, "Slot 1 active\n");
+                    if (!isNet)
+                    {
+                        dmrRfErrs[0] = 0U;
+                        dmrRfBits[0] = 0U;
+                    }
                 }
 
                 uint8_t dataType = buffer[8] & 0x0FU;
@@ -657,19 +3002,32 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                         }
                         else
                         {
+                            if (packetType == PACKET_TYPE_BIT)
+                            {
+                                strcpy(slot1_call, "N0CALL");
+                                bzero(slot1_name, 15);
+                                fprintf(stderr, "DMR Slot 1: Id %u not found in dmr_ids table, using N0CALL\n", slot1_srcId);
+                            }
                             sprintf(tmp, "%u", slot1_srcId);
                             char tmp1[11];
                             sprintf(tmp1, "TG %u", slot1_dstId);
                             saveLastCall(slotRow[0], modemName, "DMR TS1", cType, "N0CALL", tmp, tmp1, "", NULL, "", true);
                         }
                     }
+                    else
+                    {
+                        if (packetType == PACKET_TYPE_BIT)
+                            fprintf(stderr, "DMR: voice LC header FullLC decode FAILED (slot 1)\n");
+                    }
                 }
                 else if (dataType == DT_TERMINATOR_WITH_LC)
                 {
                     slotActive[0] = false;
-                    if (!slotActive[1])
+                    if (simplexRF)
+                        dmrSimplexRf = false;
+                    if (!slotActive[1] && !simplexRF)
                     {
-                        txOn = false;
+                        dmrReleaseTx();
                         uint8_t buf[2];
                         buf[0] = TYPE_DMR_START;
                         buf[1] = 0;
@@ -679,10 +3037,12 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                     sprintf(tmp, "%u", slot1_srcId);
                     char tmp1[11];
                     sprintf(tmp1, "TG %u", slot1_dstId);
-                    float loss_BER = 0.0f;
+                    float loss_BER = dmrRfBer(0, isNet);
                     slot1_duration = difftime(time(NULL), slot1_starttime);
                     saveLastCall(slotRow[0], modemName, "DMR TS1", cType, slot1_call, tmp, tmp1, "", NULL, "", false);
                     saveHistory(modemName, "DMR TS1", cType, slot1_call, tmp, tmp1, loss_BER, "", slot1_duration);
+                    if (packetType == PACKET_TYPE_BIT)
+                        slot1_starttime = 0;
                     if (activeSlots == 1)
                     {
                         activeSlots = 0;
@@ -700,9 +3060,13 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                 {
                 }
             }
-            else if (audioSync || txOn)
+            else if (audioSync || txOn || dmrSimplexRf)
             {
-                txOn = true;
+                if (simplexRF)
+                    dmrSimplexRf = true;
+                else
+                    txOn = true;
+                dmrRfVoice(0U, buffer, length, isNet);
                 if (buffer[8] == 0x20)
                 {
                     /* NOW modify sync pattern (after EMB extracted) */
@@ -727,6 +3091,8 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                         {
                             isGroup[0] = true;
                             slot1_srcId = DMRLC_getSrcId(0);
+                            if (packetType == PACKET_TYPE_BIT && slot1_starttime == 0)
+                                slot1_starttime = time(NULL);
                             fprintf(stderr, "Slot 1 Voice: Src: %u ColorCode=%u PI=%d LCSS=%u\n", slot1_srcId, cc, pi, lcss);
                             slot1_dstId = DMRLC_getDstId(0);
                             char tmp[100];
@@ -743,6 +3109,12 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                             }
                             else
                             {
+                                if (packetType == PACKET_TYPE_BIT)
+                                {
+                                    strcpy(slot1_call, "N0CALL");
+                                    bzero(slot1_name, 15);
+                                    fprintf(stderr, "DMR Slot 1: Id %u not found in dmr_ids table, using N0CALL\n", slot1_srcId);
+                                }
                                 sprintf(tmp, "%u", slot1_srcId);
                                 char tmp1[11];
                                 sprintf(tmp1, "TG %u", slot1_dstId);
@@ -757,12 +3129,40 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                 }
             }
 
-            if (txOn && slotActive[0])
+            if (txOn && slotActive[0] && !simplexRF)
             {
-                uint8_t buf[34 + 1];
-                buf[0] = TYPE_DMR_DATA1;
-                memcpy(buf + 1, buffer + 8, 34);
-                sendDataToModem(buf, 34 + 1, 1, isNet);
+                /* Re-transmitted data bursts (voice LC header, terminator,
+                 * CSBK, data) must carry the BS-sourced data sync, the same
+                 * way voice burst A gets the BS-sourced voice sync above --
+                 * MMDVMHost does this for every data burst it relays. This
+                 * was never done here, so headers and terminators went back
+                 * out with the radio's MS-sourced sync, which a radio
+                 * listening to a repeater doesn't look for: no ID, and no
+                 * call set-up, on the receiving radio. */
+                if ((buffer[8] & DMR_SYNC_DATA) == DMR_SYNC_DATA)
+                    addDMRDataSync(buffer + 8 + 1, modem_duplex);
+
+                if (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT)
+                {
+                    // Hand the frame to dmrTxThread()'s slot 1 FIFO instead
+                    // of modulating it immediately: a real DMR burst has to
+                    // go out inside its own 30ms TDMA slot, interleaved
+                    // with CACH and slot 2's traffic, not back-to-back with
+                    // whatever arrives here from the network/CSBK logic
+                    // above (see dmrTxThread()/dmrSendSlotBurst()).
+                    pthread_mutex_lock(&dmrTxFifoMutex[0]);
+                    RingBuffer_addData(&dmrTxFifo[0], buffer + 8 + 1, DMR_FRAME_LENGTH_BYTES);
+                    pthread_mutex_unlock(&dmrTxFifoMutex[0]);
+                    if (debugM)
+                        fprintf(stderr, "DMR relay slot1: queued frame, control=0x%02X\n", buffer[8]);
+                }
+                else
+                {
+                    uint8_t buf[34 + 1];
+                    buf[0] = TYPE_DMR_DATA1;
+                    memcpy(buf + 1, buffer + 8, 34);
+                    sendDataToModem(buf, 34 + 1, 1, isNet);
+                }
             }
 
             if (dmrGWConnected && !isNet)
@@ -785,9 +3185,11 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
     }
     else if (memcmp((buffer + 4), TYPE_LOST1, 4) == 0)
     {
-        if (!slotActive[1])
+        if (simplexRF)
+            dmrSimplexRf = false;
+        if (!slotActive[1] && !simplexRF)
         {
-            txOn = false;
+            dmrReleaseTx();
             uint8_t buf[2];
             buf[0] = TYPE_DMR_START;
             buf[1] = 0;
@@ -799,10 +3201,12 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
         sprintf(tmp, "%u", slot1_srcId);
         char tmp1[11];
         sprintf(tmp1, "TG %u", slot1_dstId);
-        float loss_BER = 0.0f;
+        float loss_BER = dmrRfBer(0, isNet);
         slot1_duration = difftime(time(NULL), slot1_starttime);
         saveLastCall(slotRow[0], modemName, "DMR TS1", cType, slot1_call, tmp, tmp1, "", NULL, "", false);
         saveHistory(modemName, "DMR TS1", cType, slot1_call, tmp, tmp1, loss_BER, "", slot1_duration);
+        if (packetType == PACKET_TYPE_BIT)
+            slot1_starttime = 0;
         if (activeSlots == 1)
         {
             activeSlots = 0;
@@ -854,6 +3258,11 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                     slotRow[1]  = 2;
                 }
                 fprintf(stderr, "Slot 2 active\n");
+                if (!isNet)
+                {
+                    dmrRfErrs[1] = 0U;
+                    dmrRfBits[1] = 0U;
+                }
             }
 
             uint8_t dataType = buffer[8] & 0x0FU;
@@ -869,7 +3278,12 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                     slot2_dstId = DMRLC_getDstId(1);
                     char tmp[100];
                     bzero(tmp, 100);
-                    findDMRId(slot2_srcId, slot2_call, tmp);
+                    if (!findDMRId(slot2_srcId, slot2_call, tmp) && packetType == PACKET_TYPE_BIT)
+                    {
+                        strcpy(slot2_call, "N0CALL");
+                        tmp[0] = 0;
+                        fprintf(stderr, "DMR Slot 2: Id %u not found in dmr_ids table, using N0CALL\n", slot2_srcId);
+                    }
                     bzero(slot2_name, 15);
                     memcpy(slot2_name, tmp, 14);
                     fprintf(stderr, "========= DMR Slot 2 Call: %s  Name: %s  Id: %u  Dst: %u\n", slot2_call, slot2_name, slot2_srcId, slot2_dstId);
@@ -884,7 +3298,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                 slotActive[1] = false;
                 if (!slotActive[0])
                 {
-                    txOn = false;
+                    dmrReleaseTx();
                     uint8_t buf[2];
                     buf[0] = TYPE_DMR_START;
                     buf[1] = 0;
@@ -894,10 +3308,12 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                 sprintf(tmp, "%u", slot2_srcId);
                 char tmp1[11];
                 sprintf(tmp1, "TG %u", slot2_dstId);
-                float loss_BER = 0.0f;
+                float loss_BER = dmrRfBer(1, isNet);
                 slot2_duration = difftime(time(NULL), slot2_starttime);
                 saveLastCall(slotRow[1], modemName, "DMR TS2", cType, slot2_call, tmp, tmp1, "", NULL, "", false);
                 saveHistory(modemName, "DMR TS2", cType, slot2_call, tmp, tmp1, loss_BER, "", slot2_duration);
+                if (packetType == PACKET_TYPE_BIT)
+                    slot2_starttime = 0;
                 if (activeSlots == 1)
                 {
                     activeSlots = 0;
@@ -915,6 +3331,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
         else if (audioSync || txOn)
         {
             txOn = true;
+            dmrRfVoice(1U, buffer, length, isNet);
 
             if (buffer[8] == 0x20)
             {
@@ -955,6 +3372,12 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                         }
                         else
                         {
+                            if (packetType == PACKET_TYPE_BIT)
+                            {
+                                strcpy(slot2_call, "N0CALL");
+                                bzero(slot2_name, 15);
+                                fprintf(stderr, "DMR Slot 2: Id %u not found in dmr_ids table, using N0CALL\n", slot2_srcId);
+                            }
                             sprintf(tmp, "%u", slot2_srcId);
                             char tmp1[11];
                             sprintf(tmp1, "TG %u", slot2_dstId);
@@ -971,10 +3394,29 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
 
         if (txOn && slotActive[1])
         {
-            uint8_t buf[34 + 1];
-            buf[0] = TYPE_DMR_DATA2;
-            memcpy(buf + 1, buffer + 8, 34);
-            sendDataToModem(buf, 34 + 1, 2, isNet);
+            // BS-sourced data sync on relayed data bursts -- see slot 1.
+            if ((buffer[8] & DMR_SYNC_DATA) == DMR_SYNC_DATA)
+                addDMRDataSync(buffer + 8 + 1, modem_duplex);
+
+            if (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT)
+            {
+                // See the slot 1 FIFO-push comment above -- same reasoning,
+                // slot 2's FIFO.
+                // In simplex there is only the slot 1 FIFO (see dmrSendDmoPeriod()).
+                const uint8_t fifo = modem_duplex ? 1U : 0U;
+                pthread_mutex_lock(&dmrTxFifoMutex[fifo]);
+                RingBuffer_addData(&dmrTxFifo[fifo], buffer + 8 + 1, DMR_FRAME_LENGTH_BYTES);
+                pthread_mutex_unlock(&dmrTxFifoMutex[fifo]);
+                if (debugM)
+                    fprintf(stderr, "DMR relay slot2: queued frame, control=0x%02X\n", buffer[8]);
+            }
+            else
+            {
+                uint8_t buf[34 + 1];
+                buf[0] = TYPE_DMR_DATA2;
+                memcpy(buf + 1, buffer + 8, 34);
+                sendDataToModem(buf, 34 + 1, 2, isNet);
+            }
         }
 
         if (dmrGWConnected && !isNet)
@@ -998,7 +3440,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
     {
         if (!slotActive[0])
         {
-            txOn = false;
+            dmrReleaseTx();
             uint8_t buf[2];
             buf[0] = TYPE_DMR_START;
             buf[1] = 0;
@@ -1010,10 +3452,12 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
         sprintf(tmp, "%u", slot2_srcId);
         char tmp1[11];
         sprintf(tmp1, "TG %u", slot2_dstId);
-        float loss_BER = 0.0f;
+        float loss_BER = dmrRfBer(1, isNet);
         slot2_duration = difftime(time(NULL), slot2_starttime);
         saveLastCall(slotRow[1], modemName, "DMR TS2", cType, slot2_call, tmp, tmp1, "", NULL, "", false);
         saveHistory(modemName, "DMR TS2", cType, slot2_call, tmp, tmp1, loss_BER, "", slot2_duration);
+        if (packetType == PACKET_TYPE_BIT)
+            slot2_starttime = 0;
         if (activeSlots == 1)
         {
             activeSlots = 0;
@@ -1055,6 +3499,7 @@ void* startClient(void* arg)
     uint8_t buffer[BUFFER_SIZE] = {0};
     char hostAddress[80];
     strcpy(hostAddress, (char*)arg);
+
     // Create socket file descriptor
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
@@ -1084,6 +3529,7 @@ void* startClient(void* arg)
     }
 
     // Connect to the server
+    setNoDelay(sockfd);
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
     {
         if (errno != EINPROGRESS)
@@ -1135,8 +3581,7 @@ void* startClient(void* arg)
     uint16_t offset   = 0;
     uint16_t respLen  = 0;
     uint8_t typeLen   = 0;
-    uint8_t configLen = 4 + 4 + 11 + 6 + 1 + 40 + 16 + 1 +
-                        1;  // 1 + 1 + 1 + 1 + 12 + 1 + 1 + 1 + 1 + 15;
+    uint8_t configLen = 4 + 4 + 11 + 6 + 1 + 40 + 16 + 1 + 1;  // 1 + 1 + 1 + 1 + 12 + 1 + 1 + 1 + 1 + 15;
 
     txOn = false;
 
@@ -1154,14 +3599,60 @@ void* startClient(void* arg)
     uint32_t reg3  = 0x2A4C80D3;
     uint32_t reg10 = 0x049E472A;
 
+    /* reg3/reg10 (PLL synth) and reg4's mode/invert bits below are
+     * shared byte-for-byte with p25_host.c's confirmed-working ADF7021
+     * config -- DMR and P25 are both 4-level-FSK-family, 12.5kHz-channel
+     * protocols with comparable deviation, so that's the best available
+     * reference for this radio. Post Dem BW and the IF filter select
+     * were NOT carried over correctly, though: this host had Post Dem
+     * BW = 80 and a 25kHz IF filter, wildly wider than EITHER confirmed
+     * working protocol on this same hardware (D-STAR uses Post Dem
+     * BW = 10, P25 uses 6; both use the 12.5kHz IF filter). That
+     * mismatch -- not dmr_host.c's RX correlator -- is what explains
+     * the symptom seen on real hardware: raw RX sample diagnostics
+     * (added to investigate a stuck TX/no-RX-sync report) showed
+     * noise-level statistics that never changed even while a real DMR
+     * voice burst was confirmed on the air, exactly what an
+     * excessively wide IF/post-demod filter bandwidth would produce
+     * (far more out-of-band noise passed through than the discriminator
+     * output a correctly-tuned narrowband demod should give). Lining
+     * these two fields up with P25's confirmed-good values. */
     // K=32
     uint32_t reg4 = (uint32_t)0b0100 << 0;  // register 4
     reg4 |= (uint32_t)0b011 << 4;           // mode, 4FSK
     reg4 |= (uint32_t)0b0 << 7;
     reg4 |= (uint32_t)0b11 << 8;
     reg4 |= (uint32_t)393U << 10;  // Disc BW
-    reg4 |= (uint32_t)80U << 20;   // Post dem BW
-    reg4 |= (uint32_t)0b10 << 30;  // IF filter (25 kHz)
+    /* Receiver filters. Default as before: post-demod BW 6, 12.5 kHz IF.
+     * MMDVM_HS uses post-demod BW 80 and the 25 kHz IF filter, which is much
+     * more forgiving of a radio that is off frequency. Optional [DMR] keys,
+     * BIT mode only:  rxWide=1  selects the MMDVM_HS values;
+     *                 postDemBW (1..1023) and ifFilter (0=12.5k, 1=18.75k, 2=25k)
+     * override them individually. */
+    uint32_t postDemBW = 6U;
+    uint32_t ifFilter  = 0U;
+    if (packetType == PACKET_TYPE_BIT)
+    {
+        char v[16];
+        memset(v, 0, sizeof(v));
+        readHostConfig(modemName, "DMR", "rxWide", v);
+        if (atoi(v) == 1)
+        {
+            postDemBW = 80U;
+            ifFilter  = 2U;
+        }
+        memset(v, 0, sizeof(v));
+        readHostConfig(modemName, "DMR", "postDemBW", v);
+        if (atoi(v) >= 1 && atoi(v) <= 1023)
+            postDemBW = (uint32_t)atoi(v);
+        memset(v, 0, sizeof(v));
+        readHostConfig(modemName, "DMR", "ifFilter", v);
+        if (v[0] >= '0' && v[0] <= '2' && v[1] == 0)
+            ifFilter = (uint32_t)(v[0] - '0');
+        fprintf(stderr, "DMR: RX post-demod BW %u, IF filter %u (0=12.5k 1=18.75k 2=25k)\n", postDemBW, ifFilter);
+    }
+    reg4 |= postDemBW << 20;       // Post dem BW
+    reg4 |= ifFilter << 30;        // IF filter
 
     uint32_t reg2 = (uint32_t)0b10 << 28;  // invert data (and RC alpha = 0.5)
     reg2 |= (uint32_t)0b111 << 4;          // modulation (4FSK)
@@ -1169,14 +3660,37 @@ void* startClient(void* arg)
     uint32_t reg13 = (uint32_t)0b1101 << 0;         // register 13
     reg13 |= (uint32_t)ADF7021_SLICER_TH_DMR << 4;  // slicer threshold
 
-    ifConf(bytes, reg2, reg3, reg4, reg10, reg13, atol(modem_rxFrequency),
-           atol(modem_txFrequency), txLevel, rfPower, 0, true);
+    ifConf(bytes, reg2, reg3, reg4, reg10, reg13, atol(modem_rxFrequency), atol(modem_txFrequency), txLevel, rfPower, 0, true);
 
     memcpy(buffer + 26, bytes, 40);
     uint64_t tmp[2] = {DMR_MS_DATA_SYNC_BITS, DMR_SYNC_BITS_MASK};
     memcpy(buffer + 66, (uint8_t*)tmp, 16);
     buffer[82] = 0x8a;
-    buffer[83] = 0x02;  // TX LSB fisrt / scan multiplier
+    /* BIT mode (openmths): bytes go out in symbol order, MSB first (0x12).
+     * SAMPLE and FRAME mode keep the original value. */
+    buffer[83] = (packetType == PACKET_TYPE_BIT) ? 0x12 : 0x02;
+    if (packetType == PACKET_TYPE_BIT)
+    {
+        /* Optional [DMR] scanMult (1..15): how long the modem listens for DMR
+         * each time it scans through its modes (low nibble of byte 83).
+         * Default 2, as before. A longer dwell makes a short wake-up from
+         * the idle repeater more likely to be heard. */
+        char sm[16];
+        memset(sm, 0, sizeof(sm));
+        readHostConfig(modemName, "DMR", "scanMult", sm);
+        int mult = atoi(sm);
+        if (mult >= 1 && mult <= 15)
+            buffer[83] = (uint8_t)(0x10 | mult);
+        buffer[83] |= 0x20;   // ask the modem to append its TX stream position to each BITS packet
+        memset(sm, 0, sizeof(sm));
+        readHostConfig(modemName, "DMR", "slotPhase", sm);
+        /* Default 197: measured on the first test setup (TS1 197, TS2 485).
+         * The value comes from the modem's fixed timing, so it should hold
+         * for the same firmware; override with [DMR] slotPhase if not. */
+        dmrSlotPhase = (sm[0] != 0) ? (atoi(sm) % 576 + 576) % 576 : 197;
+        fprintf(stderr, "DMR: slot phase %d (TS1 sync end; TS2 is 288 later)%s\n", (int)dmrSlotPhase, sm[0] != 0 ? "" : " [default]");
+        fprintf(stderr, "DMR: BIT mode scan multiplier %d\n", (mult >= 1 && mult <= 15) ? mult : 2);
+    }
     write(sockfd, buffer, configLen);
 
     dump((char*)"MODE", buffer, configLen);
@@ -1200,17 +3714,14 @@ void* startClient(void* arg)
         if (len != 1)
         {
             fprintf(stderr,
-                    "DMR_Service: error when reading from server, errno=%d\n",
-                    errno);
+                    "DMR_Service: error when reading from server, errno=%d\n", errno);
             break;
         }
 
         if (buffer[0] != 0x61)
         {
-            fprintf(stderr, "DMR_Service: unknown byte from server, 0x%02X\n",
-                    buffer[0]);
+            fprintf(stderr, "DMR_Service: unknown byte from server, 0x%02X\n", buffer[0]);
             continue;
-            ;
         }
 
         offset = 0;
@@ -1245,8 +3756,8 @@ void* startClient(void* arg)
         uint8_t type[typeLen];
         memcpy(type, buffer + 4, typeLen);
 
-        if (debugM)
-            dump((char*)"DMR host data", (unsigned char*)buffer, respLen);
+ //       if (debugM)
+   //         dump((char*)"DMR host data", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -1254,15 +3765,71 @@ void* startClient(void* arg)
                 modem_duplex = true;
             else if (buffer[8] == COMM_SET_SIMPLEX)
                 modem_duplex = false;
+            // Duplex decides whether relayed bursts get BS- or MS-sourced
+            // sync, so a wrong setting here silences the whole downlink.
+            fprintf(stderr, "DMR: modem_host says %s\n", modem_duplex ? "DUPLEX (BS sync on relayed bursts)" : "SIMPLEX (MS sync on relayed bursts)");
+        }
+        else if (typeLen == 4U && memcmp(type, "TXTM", 4) == 0 && respLen >= 8U + 8U)
+        {
+            /* TX timing report (see dmrTxRefValid). Offset is relative to
+             * the next RX sample this host will receive -- which, since
+             * every earlier SAMP packet has already been processed, is
+             * dmrRx.dataPtr. */
+            int32_t  offset = (int32_t)(((uint32_t)buffer[8] << 24) | ((uint32_t)buffer[9] << 16) |
+                                        ((uint32_t)buffer[10] << 8) | (uint32_t)buffer[11]);
+            uint32_t k      = ((uint32_t)buffer[12] << 24) | ((uint32_t)buffer[13] << 16) |
+                              ((uint32_t)buffer[14] << 8) | (uint32_t)buffer[15];
+
+            /* The modem repeats this report every ~0.3 s while keyed, so
+             * RX samples lost on the way here (which shift dmrRx.dataPtr
+             * against the TX clock) are corrected within a fraction of a
+             * second.  Log only the first report and any that move the
+             * reference by more than a few samples. */
+            pthread_mutex_lock(&dmrTxSlotTimeMutex);
+            bool plausible = dmrTxStreaming && k <= dmrTxSamplesWritten;
+            bool hadRef    = dmrTxRefValid;
+            int32_t oldPos = 0;
+            int32_t newPos = 0;
+            if (plausible)
+            {
+                uint32_t newRef = dmrRx.dataPtr + (uint32_t)offset;
+                int64_t  m;
+                m = ((int64_t)dmrTxRefK + (int64_t)(int32_t)(newRef - dmrTxRefRxPtr)) % DMR_CYCLE_SAMPLES;
+                oldPos = (int32_t)(m < 0 ? m + DMR_CYCLE_SAMPLES : m);
+                newPos = (int32_t)(k % DMR_CYCLE_SAMPLES);
+                dmrTxRefRxPtr = newRef;
+                dmrTxRefK     = k;
+                dmrTxRefValid = true;
+            }
+            pthread_mutex_unlock(&dmrTxSlotTimeMutex);
+
+            int32_t shift = newPos - oldPos;
+            if (shift > DMR_CYCLE_SAMPLES / 2)
+                shift -= DMR_CYCLE_SAMPLES;
+            else if (shift < -DMR_CYCLE_SAMPLES / 2)
+                shift += DMR_CYCLE_SAMPLES;
+            if (!plausible || !hadRef || shift > 4 || shift < -4)
+                fprintf(stderr, "DMR: TX timing report: tx sample %u on air at rx sample %u (offset %+d)%s",
+                        k, dmrRx.dataPtr + (uint32_t)offset, (int)offset,
+                        plausible ? "" : " -- ignored, doesn't match this downlink");
+            if (plausible && hadRef && (shift > 4 || shift < -4))
+                fprintf(stderr, " -- RX stream had drifted %+d samples, re-anchored", (int)-shift);
+            if (!plausible || !hadRef || shift > 4 || shift < -4)
+                fprintf(stderr, "\n");
         }
         else if (memcmp(type, TYPE_SAMPLE, typeLen) == 0)
         {
             packetType = PACKET_TYPE_SAMP;
-            q15_t smp[2];
+            dmrRxNoteSamplePacket(dmrNowNs(), dmrRx.dataPtr + (uint32_t)((respLen - 8) / 2));
             q15_t in[2];
             for (uint16_t i = 8; i < respLen; i = i + 4)
             {
                 memcpy(in, buffer + i, 4);
+                q31_t res1 = in[0] * (50 * 128);
+                in[0] = __SSAT((res1 >> 15), 16);
+                res1 = in[1] * (50 * 128);
+                in[1] = __SSAT((res1 >> 15), 16);
+
                 if (USE_DC_FILTER)
                 {
                     q31_t q31Samples[2];
@@ -1281,19 +3848,20 @@ void* startClient(void* arg)
                     q15_t dcSamples[2];
                     for (uint8_t i = 0U; i < 2; i++)
                         dcSamples[i] = in[i] - offset;
-                    //           arm_fir_fast_q15(&rxGaussianFilter, dcSamples, smp, 2);
-                }
-                //       else
-                //           arm_fir_fast_q15(&rxGaussianFilter, in, smp, 2);
 
-                //        samples(smp, NULL, 2);
+                    dmrRxSamples(dcSamples, 2);
+                }
+                else
+                {
+                    dmrRxSamples(in, 2);
+                }
             }
-            //       write(sockfd, buffer, respLen);
         }
         else if (memcmp(type, TYPE_BITS, typeLen) == 0)
         {
             packetType = PACKET_TYPE_BIT;
-            //   processBits(buffer + 8, respLen - 8);
+            dmrRxBits(buffer + 8, respLen - 8);
+            dmrSlotWatchdog();
         }
         else if (memcmp(type, "DMD", 3) == 0)
         {
@@ -1330,6 +3898,10 @@ void* processGatewaySocket(void* arg)
 
     dmrGWConnected = true;
     addGateway(modemName, "main", "DMR");
+    // Un-keys the repeater if a gateway (re)connects mid-call -- say so,
+    // since it would otherwise look like a de-key with no cause.
+    if (txOn)
+        fprintf(stderr, "DMR gateway connected while keyed: dropping txOn\n");
     txOn = false;
 
     pthread_t txid;
@@ -1473,6 +4045,8 @@ void* startTCPServer(void* arg)
     int sockFd;
 
     sockFd = socket(AF_INET, SOCK_STREAM, 0);
+
+    setNoDelay(sockFd);
     if (sockFd < 0)
     {
         fprintf(stderr, "DMR_Service: error when creating the socket: %s\n", strerror(errno));
@@ -1534,6 +4108,8 @@ void* startTCPServer(void* arg)
          * accept: wait for a connection request
          */
         childfd = accept(sockFd, (struct sockaddr*)&clientaddr, &clientlen);
+        if (childfd >= 0)
+            setNoDelay(childfd);
         if (childfd < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
             perror("accept failed");
@@ -1674,6 +4250,12 @@ int main(int argc, char** argv)
     dcFilter.pCoeffs   = DC_FILTER;
     dcFilter.postShift = 0;
 
+    memset(dmrModState, 0x00U, 16U * sizeof(q15_t));
+    dmrModFilter.L           = DMR_RADIO_SYMBOL_LENGTH;
+    dmrModFilter.phaseLength = DMR_RRC_FILTER_PHASE_LEN;
+    dmrModFilter.pCoeffs     = DMR_RRC_FILTER;
+    dmrModFilter.pState      = dmrModState;
+
     char tmp[15];
     readHostConfig(modemName, "config", "modem", tmp);
     if (strcasecmp(tmp, "openmt") == 0)
@@ -1706,6 +4288,67 @@ int main(int argc, char** argv)
     readHostConfig(modemName, "DMR", "rfPower", tmp);
     rfPower = atoi(tmp);
 
+    readHostConfig(modemName, "DMR", "ColorCode", tmp);
+    if (strlen(tmp) > 0)
+        dmrColorCode = (uint8_t)atoi(tmp);
+
+    // Where TS1 bursts land relative to our TX slot-1 timing, in ms (see
+    // dmrRxSlotFromPhase()). Per-installation; re-measure with debug on.
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DMR", "SlotPhase", tmp);
+    if (strlen(tmp) > 0)
+        dmrRxTs1PhaseNs = (int64_t)(atof(tmp) * 1000000.0);
+
+    // Shift of the sample-exact TS1/TS2 windows, in samples (see
+    // dmrTxRefValid); like MMDVM's DMR delay setting. Normally 0.
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DMR", "SlotDelay", tmp);
+    if (strlen(tmp) > 0)
+        dmrSlotDelaySamples = (int32_t)atoi(tmp);
+
+    // Simplex only: length of the tone sent before the first burst, in ms
+    // (see dmrSendDmoPreamble()).
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DMR", "DmoPreamble", tmp);
+    if (strlen(tmp) > 0)
+    {
+        long ms = atol(tmp);
+        dmrDmoPreambleMs = (ms < 0L) ? 0U : (ms > 600L) ? 600U : (uint32_t)ms;
+    }
+
+    // How long the downlink stays up after the last call ends (SAMPLE/BIT
+    // mode), in seconds -- see dmrTxHangNs.
+    tmp[0] = '\0';
+    readHostConfig(modemName, "DMR", "TxHang", tmp);
+    if (strlen(tmp) > 0)
+        dmrTxHangDurNs = (int64_t)(atof(tmp) * 1000000000.0);
+
+    /* Dual-slot TX scheduler setup: per-slot FIFOs that decodeDMR() feeds
+     * and dmrTxThread() drains, plus the colour-code-stamped idle frame
+     * dmrSendSlotBurst() falls back to when a slot's FIFO is empty (see
+     * CDMRTX::setColorCode() -- DMR_IDLE_DATA here is byte-for-byte the
+     * same as MMDVM's IDLE_DATA[], just with a 2-byte TAG_DATA prefix). */
+    // Slot 1 holds 12 frames: in simplex the preamble (dmrSendDmoPreamble())
+    // delays the first burst, and the frames the gateway sends meanwhile
+    // wait here. Slot 2's stays at 4.
+    RingBuffer_Init(&dmrTxFifo[0], DMR_FRAME_LENGTH_BYTES * 12);
+    RingBuffer_Init(&dmrTxFifo[1], DMR_FRAME_LENGTH_BYTES * 4);
+    memcpy(dmrIdleFrame, DMR_IDLE_DATA + 2, DMR_FRAME_LENGTH_BYTES);
+    DMRSlotType_encode(dmrColorCode, DT_IDLE, dmrIdleFrame);
+
+    /* dmrRx is a plain static struct, so it starts out zero-filled --
+     * that leaves endPtr at 0 instead of DMR_RX_NOENDPTR. Since dataPtr
+     * also starts at 0, dmrRxProcessSample()'s very first sample sees
+     * dataPtr == endPtr and treats it as a completed burst before any
+     * real sync has ever been found, computing the frame's start position
+     * as endPtr - DMR_FRAME_LENGTH_SAMPLES_LOCAL (an unsigned underflow)
+     * and reading dmrRx.buffer far past its 900-sample bounds -- a
+     * segfault on literally the first demodulated sample the modem ever
+     * sends. dmrRxReset() sets the same safe starting state
+     * (endPtr = DMR_RX_NOENDPTR, state = DMR_RXS_NONE, ...) that an
+     * explicit "= 0xFFFFFFFFU" initializer would have given it. */
+    dmrRxReset();
+
     clearReflLinkStatus(modemName, "DMR");
 
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);
@@ -1717,6 +4360,17 @@ int main(int argc, char** argv)
     else
     {
         if (debugM) fprintf(stderr, "Modem host thread created successfully\n");
+    }
+
+    err = pthread_create(&(dmrTxThreadHandle), NULL, &dmrTxThread, NULL);
+    if (err != 0)
+    {
+        fprintf(stderr, "Can't create DMR TX scheduler thread :[%s]", strerror(err));
+        return 1;
+    }
+    else
+    {
+        if (debugM) fprintf(stderr, "DMR TX scheduler thread created successfully\n");
     }
 
     while (connected)

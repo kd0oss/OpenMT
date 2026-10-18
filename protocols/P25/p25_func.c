@@ -30,6 +30,7 @@
 
 #include "p25_func.h"
 #include <dsp_tools.h>
+#include "p25_fec.h"
 
 uint8_t p25duid;
 uint8_t p25lsd1;
@@ -1001,4 +1002,50 @@ void audip25decode(const uint8_t* data, uint8_t* imbe, unsigned int n)
         WRITE_BIT(imbe, offset, bit[i + 122U]);
     for (unsigned int i = 0U; i < 7U; i++, offset++)
         WRITE_BIT(imbe, offset, bit[i + 137U]);
+}
+
+/*
+ * Check the nine IMBE voice frames of an LDU (data is the LDU as it comes off
+ * the air, without the 8 byte packet prefix).  Returns the number of bit
+ * errors the FEC found in the 1233 protected bits.  When "rewrite" is true
+ * every frame with at most P25_FEC_MAX_ERRORS errors is replaced by its
+ * re-encoded, corrected version; the rest are left as received.
+ */
+unsigned int p25RegenerateLDU(uint8_t* data, bool rewrite)
+{
+    static const unsigned int start[9U] = {114U, 262U, 452U, 640U, 830U, 1020U, 1208U, 1398U, 1578U};
+
+    assert(data != NULL);
+
+    unsigned int errors = 0U;
+
+    for (unsigned int n = 0U; n < 9U; n++)
+    {
+        uint8_t temp[18U];
+        bool    bit[144U];
+
+        decode(data, temp, start[n], start[n] + 148U);
+
+        /*  De-interleave */
+        for (unsigned int i = 0U; i < 144U; i++)
+        {
+            bit[i] = READ_BIT(temp, IMBE_INTERLEAVE[i]) != 0U;
+        }
+
+        unsigned int e = p25FecFrame(bit, rewrite);
+        errors += e;
+
+        if (rewrite && P25_FEC_REWRITE_OK(e))
+        {
+            /*  Interleave */
+            for (unsigned int i = 0U; i < 144U; i++)
+            {
+                WRITE_BIT(temp, IMBE_INTERLEAVE[i], bit[i]);
+            }
+
+            encode(temp, data, start[n], start[n] + 148U);
+        }
+    }
+
+    return errors;
 }

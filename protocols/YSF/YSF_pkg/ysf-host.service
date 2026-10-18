@@ -1,0 +1,18 @@
+# /etc/systemd/system/ysf-host.service
+[Unit]
+Description=YSF Service
+After=modem-host.service
+Requires=modem-host.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/YSF
+ExecStart=/home/pi/OpenMT/protocols/YSF/build/ysf_host
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

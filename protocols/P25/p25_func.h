@@ -24,7 +24,7 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <arm_math.h>
+#include <dsp_compat.h> //<arm_math.h>
 
 static const uint8_t BIT_MASK_TABLE[] = { 0x80U, 0x40U, 0x20U, 0x10U, 0x08U, 0x04U, 0x02U, 0x01U };
 
@@ -344,5 +344,9 @@ void setLCF(uint8_t lcf);
 void setDstId(unsigned int id);
 void audip25encode(uint8_t* data, const uint8_t* imbe, unsigned int n);
 void audip25decode(const uint8_t* data, uint8_t* imbe, unsigned int n);
+
+#define P25_FEC_BITS_PER_LDU 1233U  // 9 voice frames x 137 protected bits
+
+unsigned int p25RegenerateLDU(uint8_t* data, bool rewrite);
 
 #endif

@@ -1,0 +1,30 @@
+YSF on OpenMT_HS (ADF7021) and MMDVM_HS
+
+MMDVM_HS  (config/modem = mmdvmhs) and MMDVM
+  The same frame path as the other modes, checked against the MMDVM_HS firmware source (SerialPort.cpp, YSFRX/YSFTX):
+    - Mode YSF = 3, data 0x20 / lost 0x21, 1 flag byte + 120 byte frame (+ 2 RSSI bytes from the modem).
+    - SET_CONFIG: YSF enable bit 0x04 in buffer[4], low deviation bit 0x08 in buffer[3] (YSF/loDev), TX level buffer[14].
+    - GET_STATUS: the YSF space is buffer[9], in frames (the FIFO holds 10).
+  patched/ adds the host side of this (enable/disable YSF, space, frame pacing); see the *.ysf.patch files.
+
+OpenMT_HS (config/modem = openmths)
+  The ADF7021 slices the 4FSK itself and the host passes BITS packets.
+    RX   ysfBitRxBytes() in ysf_dsp.c is the MMDVM_HS YSFRX state machine: 40 bit sync word D4 71 C9 63 4D (2 bit errors
+         to start a lock, 4 while locked, searched +-2 bits), 960 bit frames.
+    TX   preamble of 0x77 bytes (txDelay ms at 1200 bytes/s), the 120 byte frames, last BITS packet zero padded.
+    MODE registration carries the ADF7021 registers (ifConf() from tools/ADF7021.c), 14.7456 MHz TCXO (12.288 MHz):
+         REG3  0x2A4CC093 high deviation, 0x2A4C80D3 low (0x29ECA093)
+         REG4  4FSK, discriminator 516 / 393 low (430 / 491), post demodulator 20, 25 kHz IF
+         REG2  deviation 32 / 16 low (19 / 10) at TX level 50
+         REG10 0x049E472A (0x049E556A)
+         sync  D471C9634D, mask FFFFFFFFFF
+    Host configuration (module YSF): loDev (true = 0.45 kHz per level), txLevel (50), txDelay (500 ms), rfPower,
+    bitFlags0 (0x00), bitFlags1 (0x12).
+  bitFlags are the last two bytes of the mode data (OpenMT.h, ADD_MODE, from the OPENMT_HS firmware source):
+    byte 56 (bitFlags0)  reserved, stored and not used by the firmware
+    byte 57 (bitFlags1)  bit 4 (0x10) send TX bits MSB first (YSF needs this), bit 5 (0x20) append the TX phase to every
+                         received BIT frame (not wanted), low nibble scan dwell multiplier (0 = 1).
+  The dwell is 1920 ADF7021 clock edges x multiplier before the modem scans on to the next registered mode.  A YSF sync
+  comes once per 960 bits = 1920 edges, so 1 would sometimes miss it when several modes are registered; 2 is used.
+  The firmware ends a transmission by itself when its TX buffer runs empty (no end packet), which is what the host assumes.
+  The modem allows (mask bits - 16) / 16 bit errors in the sync match: one for the 40 bit YSF sync.

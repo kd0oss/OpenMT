@@ -32,6 +32,15 @@
 extern "C" {
 #endif
 
+#define MAX_STR_LEN 128
+
+// Struct to hold the system details
+typedef struct
+{
+    char model[MAX_STR_LEN];
+    char os_name[MAX_STR_LEN];
+} PiSystemInfo;
+
 /* Bit counting functions */
 uint8_t countBits8(uint8_t bits);
 uint8_t countBits16(uint16_t bits);
@@ -89,6 +98,8 @@ bool delStatus(const char* modem_name, const char* module, const char* property)
 /* Database functions - GPS */
 bool addGPS(const int id, const float latitude, const float longitude,
             const uint16_t altitude, const uint16_t bearing, const uint16_t speed);
+
+PiSystemInfo interrogate_pi();
 
 #ifdef __cplusplus
 }

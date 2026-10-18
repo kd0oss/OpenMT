@@ -1,0 +1,37 @@
+--- a/modem/mmdvm.h	2026-10-12 09:20:11.327283000 -0500
++++ modem/mmdvm.h
+@@ -56,6 +56,8 @@
+ #define TYPE_P25_HDR       0x30U
+ #define TYPE_P25_LDU       0x31U
+ #define TYPE_P25_LOST      0x32U
++#define TYPE_YSF_DATA      0x20U
++#define TYPE_YSF_LOST      0x21U
+ #define TYPE_NXDN_DATA     0x40U
+ #define TYPE_NXDN_LOST     0x41U
+ #define TYPE_DMR_DATA1     0x18U
+@@ -67,6 +69,7 @@
+ #define TYPE_DMR_ABORT     0x1EU
+ 
+ #define MODE_IDLE          0x00
++#define MODE_YSF           0x03
+ #define MODE_NXDN          0x05
+ #define MODE_FM            0x0A
+ #define MODE_LOCKOUT       0x63
+@@ -95,6 +98,8 @@
+ void disableDSTAR(const char* modem_name);
+ void enableP25(const char* modem_name);
+ void disableP25(const char* modem_name);
++void enableYSF(const char* modem_name);
++void disableYSF(const char* modem_name);
+ void enableNXDN(const char* modem_name);
+ void disableNXDN(const char* modem_name);
+ void enableFM(const char* modem_name);
+@@ -109,6 +114,8 @@
+ uint8_t getDSTARSpace();
+ void setP25Space(uint8_t space);
+ uint8_t getP25Space();
++void setYSFSpace(uint8_t space);
++uint8_t getYSFSpace();
+ void setNXDNSpace(uint8_t space);
+ uint8_t getNXDNSpace();
+ void setDMRSpace(uint8_t space1, uint8_t space2);
