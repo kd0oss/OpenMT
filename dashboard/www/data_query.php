@@ -54,6 +54,58 @@ function connect_db()
     return mysqli_connect($mysql_host, $mysql_username, $mysql_password);
 }  /** end connect_db **/
 
+/* ---- Manage Data helpers: only these tables can be viewed or trimmed ---- */
+function manage_table($name)
+{
+    $allowed = array('errors', 'gps', 'history', 'sms_messages');
+    return in_array($name, $allowed, true) ? $name : null;
+}
+
+/* Only a logged in dashboard session may use the Manage Data commands */
+function manage_require_auth()
+{
+    global $mysql;
+    session_start();
+    $ok = !empty($_SESSION['openmt_auth']);
+    session_write_close();
+    if (!$ok)
+    {
+        echo "unauthorized";
+        mysqli_close($mysql);
+        exit;
+    }
+}
+
+/* Name of the column that holds the record time, or "" when the table has none */
+function manage_date_column($table)
+{
+    global $mysql;
+    $col = "";
+    $stmt = mysqli_prepare($mysql, "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = 'modem_host' AND TABLE_NAME = ? AND DATA_TYPE IN ('datetime', 'timestamp', 'date') ORDER BY (COLUMN_NAME = 'datetime') DESC, ORDINAL_POSITION LIMIT 1");
+    mysqli_stmt_bind_param($stmt, "s", $table);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_bind_result($stmt, $name);
+    if (mysqli_stmt_fetch($stmt))
+        $col = $name;
+    mysqli_stmt_close($stmt);
+    return $col;
+}
+
+function manage_quote($col)
+{
+    return "`".str_replace("`", "``", $col)."`";
+}
+
+/* YYYY-MM-DD that is a real date, else null */
+function manage_date($text)
+{
+    if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $text, $m))
+        return null;
+    if (!checkdate((int)$m[2], (int)$m[3], (int)$m[1]))
+        return null;
+    return $text;
+}
+
 $mysql = connect_db();
 $command = "";
 
@@ -82,7 +134,11 @@ if ($command == "auth")
     mysqli_stmt_execute($stmt);
     mysqli_stmt_store_result($stmt);
     if (mysqli_stmt_num_rows($stmt) > 0)
+    {
+        session_start();                      /* the Manage Data commands check this on the server */
+        $_SESSION['openmt_auth'] = true;
         echo "authpassed";
+    }
     else
         echo "authfailed";
     mysqli_stmt_close($stmt);
@@ -161,89 +217,32 @@ if ($command == "saveGeneral")
 {
     global $mysql;
 
-    if (isset($_GET['title']) && isset($_GET['modem_name']) && isset($_GET['moduleName']))
+    foreach ($_GET as $key => $value)
     {
-        $modem_name = $_GET['modem_name'];
-        $module_name = $_GET['moduleName'];
-        $value = htmlspecialchars($_GET['title']);
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE module = '".$module_name."' ";
-        $query .= "AND modem_name = '".$modem_name."' AND parameter = 'title'";
+        $safeKey   = htmlspecialchars($key);
+        $safeValue = htmlspecialchars($value);
+
+        if ($safeKey == "command")
+            continue;
+
+        if ($safeKey == "modem_name")
+        {
+            $modem_name = $safeValue;
+            continue;
+        }
+
+        if ($safeKey == "moduleName")
+        {
+            $module_name = $safeValue;
+            continue;
+        }
+
+        $query = "UPDATE modem_host.config SET value = '".$safeValue."' WHERE modem_name = '".$modem_name."' ";
+        $query .= "AND module = '".$module_name."' AND parameter = '".$safeKey."'";
         if (mysqli_query($mysql, $query) == false)
         {
             mysqli_close($mysql);
-            exit("failed title");
-        }
-    }
-
-    if (isset($_GET['callsign']) && isset($_GET['modem_name']) && isset($_GET['moduleName']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $module_name = $_GET['moduleName'];
-        $value = $_GET['callsign'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE module = '".$module_name."' ";
-        $query .= "AND modem_name = '".$modem_name."' AND parameter = 'callsign'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed callsign");
-        }
-    }
-
-    if (isset($_GET['username']) && isset($_GET['modem_name']) && isset($_GET['moduleName']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $module_name = $_GET['moduleName'];
-        $value = htmlspecialchars($_GET['username']);
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE module = '".$module_name."' ";
-        $query .= "AND modem_name = '".$modem_name."' AND parameter = 'username'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed username");
-        }
-    }
-
-    if (isset($_GET['latitude']) && isset($_GET['modem_name']) && isset($_GET['moduleName']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $module_name = $_GET['moduleName'];
-        $value = htmlspecialchars($_GET['latitude']);
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE module = '".$module_name."' ";
-        $query .= "AND modem_name = '".$modem_name."' AND parameter = 'latitude'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed latitude");
-        }
-    }
-
-    if (isset($_GET['longitude']) && isset($_GET['modem_name']) && isset($_GET['moduleName']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $module_name = $_GET['moduleName'];
-        $value = htmlspecialchars($_GET['longitude']);
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE module = '".$module_name."' ";
-        $query .= "AND modem_name = '".$modem_name."' AND parameter = 'longitude'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed longitude");
-        }
-    }
-
-    if (isset($_POST['username']) && isset($_POST['passwd']))
-    {
-        $user = htmlspecialchars($_POST['username']);
-        $pass = htmlspecialchars($_POST['passwd']);
-        $query = "UPDATE modem_host.auth SET username = '".$user."', password = PASSWORD('".$pass."')";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            $query = "INSERT INTO modem_host.auth SET username = '".$user."', password = PASSWORD('".$pass."')";
-            if (mysqli_query($mysql, $query) == false)
-            {
-                mysqli_close($mysql);
-                exit("failed username or password");
-            }
+            exit("failed ".$safeKey);
         }
     }
 
@@ -254,211 +253,27 @@ if ($command == "saveModem")
 {
     global $mysql;
 
-    if (isset($_GET['rxInvert']) && isset($_GET['modem_name']))
+    foreach ($_GET as $key => $value)
     {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['rxInvert'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'rxInvert'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed rxinvert");
-        }
-    }
+        $safeKey   = htmlspecialchars($key);
+        $safeValue = htmlspecialchars($value);
 
-    if (isset($_GET['txInvert']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['txInvert'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'txInvert'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed txinvert");
-        }
-    }
+        if ($safeKey == "command")
+            continue;
 
-    if (isset($_GET['pttInvert']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['pttInvert'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'pttInvert'";
-        if (mysqli_query($mysql, $query) == false)
+        if ($safeKey == "modem_name")
         {
-            mysqli_close($mysql);
-            exit("failed pttinvert");
+            $modem_name = $safeValue;
+            continue;
         }
-    }
 
-    if (isset($_GET['useCOSAsLockout']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['useCOSAsLockout'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'useCOSAsLockout'";
+//        echo "Parameter: " . $safeKey . " | Value: " . $safeValue . "<br>\n";
+        $query = "UPDATE modem_host.config SET value = '".$safeValue."' WHERE modem_name = '".$modem_name."' ";
+        $query .= "AND module = 'config' AND parameter = '".$safeKey."'";
         if (mysqli_query($mysql, $query) == false)
         {
             mysqli_close($mysql);
-            exit("failed useCOSAsLockout");
-        }
-    }
-
-    if (isset($_GET['debug']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['debug'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'debug'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed debug");
-        }
-    }
-
-    if (isset($_GET['txDelay']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['txDelay'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'txDelay'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed txDelay");
-        }
-    }
-
-    if (isset($_GET['rxLevel']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['rxLevel'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'rxLevel'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed rxLevel");
-        }
-    }
-
-    if (isset($_GET['rfTXLevel']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['rfTXLevel'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'rfTXLevel'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed rfTXLevel");
-        }
-    }
-
-    if (isset($_GET['rxFrequency']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['rxFrequency'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'rxFrequency'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed rxFrequency");
-        }
-    }
-
-    if (isset($_GET['txFrequency']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['txFrequency'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'txFrequency'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed txFrequency");
-        }
-    }
-
-    if (isset($_GET['rxDCOffset']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['rxDCOffset'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'rxDCOffset'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed rxDCOffset");
-        }
-    }
-
-    if (isset($_GET['txDCOffset']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['txDCOffset'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'txDCOffset'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed txDCOffset");
-        }
-    }
-
-    if (isset($_GET['modem']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = htmlspecialchars($_GET['modem']);
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'modem'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed modem");
-        }
-    }
-
-    if (isset($_GET['baud']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['baud'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'baud'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed baud");
-        }
-    }
-
-    if (isset($_GET['port']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = htmlspecialchars($_GET['port']);
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'port'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed port");
-        }
-    }
-
-    if (isset($_GET['mode']) && isset($_GET['modem_name']))
-    {
-        $modem_name = $_GET['modem_name'];
-        $value = $_GET['mode'];
-        $query = "UPDATE modem_host.config SET value = '".$value."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = 'mode'";
-        if (mysqli_query($mysql, $query) == false)
-        {
-            mysqli_close($mysql);
-            exit("failed mode");
+            exit("failed ".$safeKey);
         }
     }
 
@@ -651,7 +466,7 @@ if ($command == "getModeOptions")
         $modem_name = $_GET['modem_name'];
         $mode = htmlspecialchars($_GET['mode']);
         $data = "";
-        $query = "SELECT parameter, display_type, value FROM modem_host.config WHERE modem_name = '".$modem_name."' AND module = '".$mode."'";
+        $query = "SELECT parameter, display_type, value FROM modem_host.config WHERE modem_name = '".$modem_name."' AND module = '".$mode."' AND display_type != 'misc'";
         $result = mysqli_query($mysql, $query);
         while ($row = mysqli_fetch_row($result))
         {
@@ -690,6 +505,174 @@ if ($command == "saveModeOption")
     else
     {
         echo "failed";
+    }
+}
+
+else
+if ($command == "getMiscOptions")
+{
+    global $mysql;
+
+    if (isset($_GET['modem_name']))
+    {
+        $modem_name = $_GET['modem_name'];
+        $data = "";
+        $stmt = mysqli_prepare($mysql, "SELECT module, parameter, value FROM modem_host.config WHERE modem_name = ? AND display_type = 'misc' ORDER BY module, id");
+        mysqli_stmt_bind_param($stmt, "s", $modem_name);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_bind_result($stmt, $module, $parameter, $value);
+        while (mysqli_stmt_fetch($stmt))
+        {
+            if ($data != "") $data .= "\x1E";
+            $data .= $module."\x1D".$parameter."\x1D".$value;
+        }
+        mysqli_stmt_close($stmt);
+        if ($data != "")
+            echo $data;     /* raw: the page puts it into input fields as text */
+        else
+            echo "none";
+    }
+    else
+        echo "error";
+}
+else
+if ($command == "saveMiscOption")
+{
+    global $mysql;
+
+    if (isset($_GET['modem_name']) && isset($_GET['module']) && isset($_GET['parameter']) && isset($_GET['value']))
+    {
+        $stmt = mysqli_prepare($mysql, "UPDATE modem_host.config SET value = ? WHERE modem_name = ? AND module = ? AND parameter = ? AND display_type = 'misc'");
+        mysqli_stmt_bind_param($stmt, "ssss", $_GET['value'], $_GET['modem_name'], $_GET['module'], $_GET['parameter']);
+        if (mysqli_stmt_execute($stmt) && mysqli_stmt_errno($stmt) == 0)
+            echo "success";
+        else
+            echo "failed";
+        mysqli_stmt_close($stmt);
+    }
+    else
+    {
+        echo "failed";
+    }
+}
+else
+if ($command == "getManageInfo")
+{
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    $table = manage_table($_GET['table'] ?? '');
+    if ($table === null)
+    {
+        echo json_encode(array('error' => 'Unknown table'));
+    }
+    else
+    {
+        $col = manage_date_column($table);
+        $row = mysqli_fetch_row(mysqli_query($mysql, "SELECT COUNT(*) FROM modem_host.`".$table."`"));
+        $out = array('count' => (int)$row[0], 'datecol' => $col, 'oldest' => '', 'newest' => '');
+        if ($col != "" && $out['count'] > 0)
+        {
+            $q = manage_quote($col);
+            $row = mysqli_fetch_row(mysqli_query($mysql, "SELECT MIN(".$q."), MAX(".$q.") FROM modem_host.`".$table."`"));
+            $out['oldest'] = (string)$row[0];
+            $out['newest'] = (string)$row[1];
+        }
+        echo json_encode($out, JSON_INVALID_UTF8_SUBSTITUTE);
+    }
+}
+else
+if ($command == "getManageRows")
+{
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    $table = manage_table($_GET['table'] ?? '');
+    if ($table === null)
+    {
+        echo json_encode(array('error' => 'Unknown table'));
+    }
+    else
+    {
+        $size = (int)($_GET['size'] ?? 50);
+        if ($size < 10) $size = 10;
+        if ($size > 500) $size = 500;
+        $page = (int)($_GET['page'] ?? 0);
+        if ($page < 0) $page = 0;
+        $offset = $page * $size;
+
+        $col = manage_date_column($table);
+        $order = ($col != "") ? manage_quote($col)." DESC, 1 DESC" : "1 DESC";
+        $result = mysqli_query($mysql, "SELECT * FROM modem_host.`".$table."` ORDER BY ".$order." LIMIT ".$offset.", ".$size);
+
+        $cols = array();
+        foreach (mysqli_fetch_fields($result) as $f)
+            $cols[] = $f->name;
+        $rows = array();
+        while ($r = mysqli_fetch_row($result))
+            $rows[] = $r;
+        echo json_encode(array('columns' => $cols, 'rows' => $rows), JSON_INVALID_UTF8_SUBSTITUTE);
+    }
+}
+else
+if ($command == "countOlder")
+{
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    $table = manage_table($_GET['table'] ?? '');
+    $before = manage_date($_GET['before'] ?? '');
+    $col = ($table !== null) ? manage_date_column($table) : "";
+    if ($table === null || $before === null || $col == "")
+    {
+        echo json_encode(array('error' => 'Invalid table or date'));
+    }
+    else
+    {
+        $limit = $before." 00:00:00";
+        $stmt = mysqli_prepare($mysql, "SELECT COUNT(*) FROM modem_host.`".$table."` WHERE ".manage_quote($col)." < ?");
+        mysqli_stmt_bind_param($stmt, "s", $limit);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_bind_result($stmt, $n);
+        mysqli_stmt_fetch($stmt);
+        mysqli_stmt_close($stmt);
+        echo json_encode(array('count' => (int)$n));
+    }
+}
+else
+if ($command == "deleteOlder")
+{
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST')
+    {
+        echo json_encode(array('error' => 'POST required'));
+    }
+    else
+    {
+        $table = manage_table($_POST['table'] ?? '');
+        $before = manage_date($_POST['before'] ?? '');
+        $col = ($table !== null) ? manage_date_column($table) : "";
+        if ($table === null || $before === null || $col == "")
+        {
+            echo json_encode(array('error' => 'Invalid table or date'));
+        }
+        else
+        {
+            $limit = $before." 00:00:00";
+            $stmt = mysqli_prepare($mysql, "DELETE FROM modem_host.`".$table."` WHERE ".manage_quote($col)." < ?");
+            mysqli_stmt_bind_param($stmt, "s", $limit);
+            if (mysqli_stmt_execute($stmt))
+                echo json_encode(array('deleted' => mysqli_stmt_affected_rows($stmt)));
+            else
+                echo json_encode(array('error' => 'Delete failed: '.mysqli_stmt_error($stmt)));
+            mysqli_stmt_close($stmt);
+        }
     }
 }
 

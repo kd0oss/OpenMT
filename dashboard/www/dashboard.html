@@ -312,6 +312,128 @@ span.psw
   background-color: lightblue;
 }
 
+#misctab
+{
+  background-color: #d9b3ff;
+}
+
+#managetab
+{
+  background-color: #f4b6b6;
+}
+
+/* Manage Data tab: toolbar, scrolling grid, pager */
+.manage_wrap
+{
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 6px;
+  font-size: 17px;
+}
+
+.manage_bar
+{
+  flex: 0 0 auto;
+  line-height: 38px;
+}
+
+.manage_bar select, .manage_bar input, .manage_bar button
+{
+  font-size: 17px;
+  height: 30px;
+}
+
+.manage_bar button
+{
+  background-color: lightyellow;
+}
+
+.manage_bar button.danger
+{
+  background-color: #e05050;
+  color: white;
+  font-weight: bold;
+}
+
+.manage_bar button:disabled, .manage_pager button:disabled
+{
+  opacity: 0.4;
+  cursor: default;
+}
+
+.manage_note
+{
+  flex: 0 0 auto;
+  color: #700000;
+  font-weight: bold;
+  font-size: 15px;
+}
+
+.manage_grid
+{
+  flex: 1 1 auto;
+  min-height: 80px;
+  overflow: auto;
+  background-color: white;
+  border: 2px solid #555;
+}
+
+.manage_grid table
+{
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 14px;
+  font-family: Arial, Helvetica, sans-serif;
+  width: 100%;
+}
+
+.manage_grid th
+{
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background-color: green;
+  color: yellow;
+  padding: 2px 8px;
+  border: 1px solid #555;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.manage_grid td
+{
+  padding: 1px 8px;
+  border: 1px solid #aaa;
+  white-space: nowrap;
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.manage_grid tbody tr:nth-child(even) td
+{
+  background-color: #BFFFED;
+}
+
+.manage_grid tbody tr:nth-child(odd) td
+{
+  background-color: #FFBFD1;
+}
+
+.manage_pager
+{
+  flex: 0 0 auto;
+  line-height: 36px;
+}
+
+.manage_pager button, .manage_pager select
+{
+  font-size: 16px;
+  height: 28px;
+  background-color: lightyellow;
+}
+
 .settingsLocation
 {
   position: absolute;
@@ -693,6 +815,60 @@ span.psw
   border-color: yellow;
   border-width: 3px;
 }
+
+/* Modes tab: scrolls when the host/gateway sections are taller than the tab.
+   The height is refined by resizeModeTab(); the calc() is the fallback. */
+#modetab, #misctab
+{
+  height: calc(100vh - 205px);
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+/* Each section: 8 rows of 34px are shown, anything beyond that scrolls */
+.mode_scroll
+{
+  max-height: 272px;   /* 8 rows x 34px */
+  overflow-y: auto;
+  overflow-x: auto;
+}
+
+/* Bar under a section that has more rows than fit: shows how many are out of sight */
+.mode_more
+{
+  display: none;
+  text-align: center;
+  font-size: 15px;
+  font-weight: bold;
+  color: white;
+  background-color: #1b7a4b;
+  cursor: pointer;
+  user-select: none;
+}
+
+.mode_more:hover
+{
+  background-color: #249d62;
+}
+
+.mode_scroll table
+{
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+.mode_scroll td
+{
+  height: 34px;        /* fixed row height so that 8 rows = 272px */
+  padding: 3px 6px;
+  white-space: nowrap;
+}
+
+.mode_scroll td input,
+.mode_scroll td button
+{
+  height: 28px;
+}
 </style>
 </head>
 
@@ -761,6 +937,12 @@ function openPage(tabln,tab,pageName,elmnt,color)
   }
   document.getElementById(pageName).style.display = "block";
   elmnt.style.backgroundColor = color;
+  resizeModeTab();
+  updateModeHints();
+  if (pageName == "misctab")
+    loadMisc();
+  if (pageName == "managetab")
+    manageInit();
 }
 
 /* Fetch with timeout - aborts after ms milliseconds */
@@ -790,7 +972,26 @@ function initDashBd()
   setTimeout(buildHistoryTable, 3000);
   setTimeout(updateClock, 1000);
   window.addEventListener('resize', resizeLastHeard);
+  window.addEventListener('resize', resizeModeTab);
   resizeLastHeard();
+}
+
+/* Fit the Modes tab to the window so that it scrolls when the sections do not fit */
+function resizeModeTab()
+{
+  var ids = ['modetab', 'misctab', 'managetab'];
+  for (var i=0;i<ids.length;i++)
+  {
+    var div = document.getElementById(ids[i]);
+    if (!div || div.offsetParent === null)   /* hidden (this tab or a parent) */
+      continue;
+    var rect = div.getBoundingClientRect();
+    var creator = document.querySelector('.creator');
+    var bottom = creator ? creator.offsetHeight : 25;
+    var h = window.innerHeight - rect.top - bottom - 5;
+    if (h < 120) h = 120;
+    div.style.height = h + 'px';
+  }
 }
 
 function resizeLastHeard()
@@ -851,10 +1052,14 @@ function displayModeOptions(mode, dtype, id, value)
   {
     var section = "<div class='mode_section' id='"+mode+"_section'>";
     section += "<label style='font-weight: bold;'>"+mode+" Section</label><br>";
+    section += "<div class='mode_scroll' id='modeScroll_"+mode+"' onscroll='updateModeHint(this)'>";
     section += "<table id='modeTable_"+mode+"'><tbody></tbody></table>";
     section += "</div>";
-    var tmp = document.getElementById("modetab").innerHTML;
-    document.getElementById("modetab").innerHTML = tmp+section;
+    section += "<div class='mode_more' id='modeMore_"+mode+"' onclick='scrollModeSection(\""+mode+"\")'></div>";
+    section += "</div>";
+    /* insertAdjacentHTML keeps the existing sections (typed values, scroll positions) untouched */
+    document.getElementById("modetab").insertAdjacentHTML('beforeend', section);
+    resizeModeTab();
   }
 
   // If value is valid add to section.
@@ -883,7 +1088,350 @@ function displayModeOptions(mode, dtype, id, value)
     }
     //   html += "<br></span>";
     //  document.getElementById(mode+"_section").innerHTML = content;//+html;
+    updateModeHint(document.getElementById('modeScroll_'+mode));
   }
+}
+
+/* Miscellaneous tab: every config row with display_type = 'misc', one subsection per module */
+async function loadMisc()
+{
+  var tab = document.getElementById('misctab');
+  try
+  {
+    var url = "data_query.php?command=getMiscOptions&modem_name="+encodeURIComponent(modemName);
+    var resp = await fetchWithTimeout(url, 8000);
+    if (!resp.ok)
+      return;
+    var txt = await resp.text();
+
+    tab.textContent = "";
+    if (txt == "none" || txt == "" || txt == "error")
+    {
+      var none = document.createElement('div');
+      none.className = 'mode_section';
+      none.textContent = "No miscellaneous settings.";
+      tab.appendChild(none);
+      return;
+    }
+
+    /* Group the rows by module, keeping the order they came in */
+    var order = [];
+    var groups = {};
+    var lines = txt.split('\x1E');
+    for (var i=0;i<lines.length;i++)
+    {
+      var f = lines[i].split('\x1D');
+      if (f.length < 3)
+        continue;
+      if (!groups[f[0]])
+      {
+        groups[f[0]] = [];
+        order.push(f[0]);
+      }
+      groups[f[0]].push({ param: f[1], value: f.slice(2).join('\x1D') });
+    }
+
+    for (var m=0;m<order.length;m++)
+    {
+      (function(moduleName, rows, n)
+      {
+        var section = document.createElement('div');
+        section.className = 'mode_section';
+        section.id = 'miscSection_'+n;
+
+        var label = document.createElement('label');
+        label.style.fontWeight = 'bold';
+        label.textContent = moduleName;
+        section.appendChild(label);
+
+        var wrap = document.createElement('div');
+        wrap.className = 'mode_scroll';
+        wrap.id = 'miscScroll_'+n;
+        wrap.addEventListener('scroll', function() { updateModeHint(wrap); });
+
+        var table = document.createElement('table');
+        var tbody = document.createElement('tbody');
+        table.appendChild(tbody);
+        wrap.appendChild(table);
+        section.appendChild(wrap);
+
+        var hint = document.createElement('div');
+        hint.className = 'mode_more';
+        hint.addEventListener('click', function()
+        {
+          var below = wrap.scrollHeight - wrap.clientHeight - wrap.scrollTop;
+          if (below > 1)
+            wrap.scrollBy({ top: wrap.clientHeight, behavior: 'smooth' });
+          else
+            wrap.scrollTo({ top: 0, behavior: 'smooth' });
+        });
+        section.appendChild(hint);
+
+        for (var r=0;r<rows.length;r++)
+        {
+          (function(param, value)
+          {
+            var row = tbody.insertRow(-1);
+            row.insertCell(0).textContent = param;
+            var input = document.createElement('input');
+            input.type = 'text';
+            input.value = value;
+            row.insertCell(1).appendChild(input);
+            var button = document.createElement('button');
+            button.textContent = "Save";
+            button.addEventListener('click', function() { saveMiscOption(moduleName, param, input); });
+            row.insertCell(2).appendChild(button);
+          })(rows[r].param, rows[r].value);
+        }
+        tab.appendChild(section);
+      })(order[m], groups[order[m]], m);
+    }
+    resizeModeTab();
+    updateModeHints();
+  }
+  catch (err)
+  {
+    console.warn("loadMisc failed:", err.message);
+  }
+}
+
+/* Save one miscellaneous setting */
+async function saveMiscOption(moduleName, param, input)
+{
+  var url = "data_query.php?command=saveMiscOption&modem_name="+encodeURIComponent(modemName)+"&module="+encodeURIComponent(moduleName);
+  url += "&parameter="+encodeURIComponent(param)+"&value="+encodeURIComponent(input.value);
+  document.body.style.cursor = 'wait';
+  try
+  {
+    var resp = await fetch(url);
+    var tmp = resp.ok ? await resp.text() : "failed";
+    if (tmp != "success")
+    {
+      alert("Save failed.");
+      return;
+    }
+
+    /* A running mode host re-reads its settings when asked to */
+    if (mdActive.indexOf(moduleName) != -1)
+    {
+      resp = await fetch("data_query.php?command=dashbCom&modem_name="+modemName+"&action=updateConf"+moduleName+"&parameter=readConfig");
+      tmp = resp.ok ? await resp.text() : "failed";
+      if (tmp != "success")
+      {
+        alert("Saved, but "+moduleName+" did not confirm the new setting.");
+        return;
+      }
+    }
+    alert("Update successful.");
+  }
+  finally
+  {
+    document.body.style.cursor = 'default';
+  }
+}
+
+/* ---------------- Manage Data tab (errors, gps, history, sms_messages) ---------------- */
+var managePage = 0;
+var manageCount = 0;
+var manageDateCol = "";
+
+/* Ask the server and return parsed JSON, or null (an alert is shown) */
+async function manageFetch(url, options)
+{
+  try
+  {
+    var resp = await fetch(url, options);
+    if (!resp.ok)
+    {
+      alert("The request failed (" + resp.status + ").");
+      return null;
+    }
+    var txt = await resp.text();
+    if (txt == "unauthorized")
+    {
+      alert("Not authorized. Please log in again.");
+      return null;
+    }
+    return JSON.parse(txt);
+  }
+  catch (err)
+  {
+    alert("The request failed: " + err.message);
+    return null;
+  }
+}
+
+function manageInit()
+{
+  managePage = 0;
+  manageReload();
+}
+
+/* Read the table summary, then show the first page */
+async function manageReload()
+{
+  var table = document.getElementById('manageTable').value;
+  var info = await manageFetch("data_query.php?command=getManageInfo&table=" + encodeURIComponent(table));
+  if (info == null)
+    return;
+  manageCount = Number(info.count);
+  manageDateCol = info.datecol;
+
+  var text = manageCount + " record" + (manageCount == 1 ? "" : "s");
+  if (info.oldest)
+    text += "  |  oldest " + info.oldest + "  |  newest " + info.newest;
+  document.getElementById('manageInfo').textContent = text;
+
+  var hasDate = (info.datecol != "");
+  document.getElementById('manageDate').disabled = !hasDate;
+  document.getElementById('manageDelete').disabled = !hasDate;
+  document.getElementById('manageNote').textContent = hasDate ? "" :
+    "The " + table + " table has no date column, so its records cannot be deleted by date. " +
+    "To enable that run: ALTER TABLE modem_host." + table + " ADD COLUMN datetime DATETIME DEFAULT CURRENT_TIMESTAMP;  " +
+    "(existing rows get the time of the change).";
+
+  await manageShowPage();
+}
+
+/* Show the current page of rows */
+async function manageShowPage()
+{
+  var table = document.getElementById('manageTable').value;
+  var size = Number(document.getElementById('manageSize').value);
+  var pages = Math.max(1, Math.ceil(manageCount / size));
+  if (managePage >= pages)
+    managePage = pages - 1;
+  if (managePage < 0)
+    managePage = 0;
+
+  var data = await manageFetch("data_query.php?command=getManageRows&table=" + encodeURIComponent(table) + "&page=" + managePage + "&size=" + size);
+  if (data == null)
+    return;
+
+  var grid = document.getElementById('manageGrid');
+  grid.textContent = "";
+  var tbl = document.createElement('table');
+  var thead = tbl.createTHead();
+  var hr = thead.insertRow(-1);
+  for (var c=0;c<data.columns.length;c++)
+  {
+    var th = document.createElement('th');
+    th.textContent = data.columns[c];
+    hr.appendChild(th);
+  }
+  var tbody = document.createElement('tbody');
+  tbl.appendChild(tbody);
+  for (var r=0;r<data.rows.length;r++)
+  {
+    var row = tbody.insertRow(-1);
+    for (var c=0;c<data.rows[r].length;c++)
+    {
+      var cell = row.insertCell(-1);
+      var v = data.rows[r][c];
+      cell.textContent = (v === null) ? "" : v;
+      cell.title = cell.textContent;
+    }
+  }
+  grid.appendChild(tbl);
+  grid.scrollTop = 0;
+
+  document.getElementById('managePageInfo').textContent = "Page " + (managePage + 1) + " of " + pages;
+  document.getElementById('managePrev').disabled = (managePage <= 0);
+  document.getElementById('manageNext').disabled = (managePage >= pages - 1);
+}
+
+function manageGo(delta)
+{
+  managePage += delta;
+  manageShowPage();
+}
+
+/* Delete the records older than the selected date, after showing how many that is */
+async function manageDelete()
+{
+  var table = document.getElementById('manageTable').value;
+  var date = document.getElementById('manageDate').value;
+  if (date == "")
+  {
+    alert("Select a date first.");
+    return;
+  }
+
+  var res = await manageFetch("data_query.php?command=countOlder&table=" + encodeURIComponent(table) + "&before=" + encodeURIComponent(date));
+  if (res == null)
+    return;
+  if (res.error)
+  {
+    alert(res.error);
+    return;
+  }
+  if (Number(res.count) == 0)
+  {
+    alert("There are no records in " + table + " older than " + date + ".");
+    return;
+  }
+  if (!confirm("Delete " + res.count + " record(s) older than " + date + " from the " + table + " table?\n\n" +
+               "This covers all modems, and cannot be undone."))
+    return;
+
+  var form = new FormData();
+  form.append('table', table);
+  form.append('before', date);
+  document.body.style.cursor = 'wait';
+  res = await manageFetch("data_query.php?command=deleteOlder", { method: 'POST', body: form });
+  document.body.style.cursor = 'default';
+  if (res == null)
+    return;
+  if (res.error)
+  {
+    alert(res.error);
+    return;
+  }
+  alert("Deleted " + res.deleted + " record(s).");
+  managePage = 0;
+  manageReload();
+}
+
+/* Show "n more" / "n above" under a section when part of it is scrolled out of sight */
+function updateModeHint(wrap)
+{
+  if (!wrap || wrap.offsetParent === null)   /* hidden: sizes are not known yet */
+    return;
+  var hint = wrap.nextElementSibling;
+  if (!hint)
+    return;
+  var rowH = 34;
+  var below = Math.round((wrap.scrollHeight - wrap.clientHeight - wrap.scrollTop) / rowH);
+  var above = Math.round(wrap.scrollTop / rowH);
+  var text = "";
+  if (above > 0)
+    text += "\u25B2 " + above + " above";
+  if (above > 0 && below > 0)
+    text += "   |   ";
+  if (below > 0)
+    text += "\u25BC " + below + " more - scroll";
+  hint.textContent = text;
+  hint.style.display = (text == "") ? "none" : "block";
+}
+
+function updateModeHints()
+{
+  var list = document.querySelectorAll('.mode_scroll');
+  for (var i=0;i<list.length;i++)
+    updateModeHint(list[i]);
+}
+
+/* Clicking the bar scrolls the section by one page of rows */
+function scrollModeSection(mode)
+{
+  var wrap = document.getElementById('modeScroll_'+mode);
+  if (!wrap)
+    return;
+  var below = wrap.scrollHeight - wrap.clientHeight - wrap.scrollTop;
+  if (below > 1)
+    wrap.scrollBy({ top: wrap.clientHeight, behavior: 'smooth' });
+  else
+    wrap.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 /* Step through mode options array and call display function */
@@ -1358,7 +1906,7 @@ async function fetchStatus()
     else
     {
       if (document.getElementById(currentMode+'_stat') && mode.includes(currentMode))
-        document.getElementById(currentMode+'_stat').innerHTML = "TX";
+        document.getElementById(currentMode+'_stat').innerHTML = "RX";
       document.getElementById('windowTitle').innerHTML = dashboardTitle
     }
 
@@ -1672,9 +2220,7 @@ async function getReflList(reflType)
   if (!resp.ok) return;
   var tmp = await resp.text();
   if (tmp == "none" || tmp == "failed") return;
-  html = document.getElementById(reflType+"_section").innerHTML;
-  html += createReflDropDown(reflType);
-  document.getElementById(reflType+"_section").innerHTML = html;
+  document.getElementById(reflType+"_section").insertAdjacentHTML('beforeend', createReflDropDown(reflType));
   var list = document.getElementById(reflType+'net');
   var showModules = false;
   document.getElementById(reflType+'netmod').style.visibility = 'hidden';
@@ -1941,6 +2487,8 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 <button id='General' class="stablink" onclick="openPage('stablink', 'genset', 'generaltab', this, 'orange')">General</button>
 <button class='stablink' onclick="openPage('stablink', 'genset', 'modemtab', this, 'yellow')">Modem</button>
 <button class='stablink' onclick="openPage('stablink', 'genset', 'modetab', this, 'lightblue')">Modes</button>
+<button class='stablink' style='width:20%' onclick="openPage('stablink', 'genset', 'misctab', this, '#d9b3ff')">Miscellaneous</button>
+<button class='stablink' style='width:17%' onclick="openPage('stablink', 'genset', 'managetab', this, '#f4b6b6')">Manage Data</button>
 </div>
 <div id='generaltab' class='genset'>
 <span class='genSettings'>
@@ -2013,6 +2561,40 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 </span>
 </div>
 <div id='modetab' class='genset'>
+</div>
+<div id='misctab' class='genset'>
+</div>
+<div id='managetab' class='genset'>
+<div class='manage_wrap'>
+<div class='manage_bar'>
+<label for='manageTable'>Table:</label>
+<select id='manageTable' onchange='manageInit()'>
+<option value='errors'>errors</option>
+<option value='gps'>gps</option>
+<option value='history'>history</option>
+<option value='sms_messages'>sms_messages</option>
+</select>
+<button onclick='manageInit()'>Refresh</button>
+&nbsp;&nbsp;<span id='manageInfo'></span><br>
+<label for='manageDate'>Delete records older than:</label>
+<input id='manageDate' type='date'>
+<button id='manageDelete' class='danger' onclick='manageDelete()'>Delete</button>
+</div>
+<div class='manage_note' id='manageNote'></div>
+<div class='manage_grid' id='manageGrid'></div>
+<div class='manage_pager'>
+<button id='managePrev' onclick='manageGo(-1)'>&lt; Prev</button>
+<span id='managePageInfo'></span>
+<button id='manageNext' onclick='manageGo(1)'>Next &gt;</button>
+&nbsp;&nbsp;Rows per page:
+<select id='manageSize' onchange='managePage=0;manageShowPage()'>
+<option value='25'>25</option>
+<option value='50' selected>50</option>
+<option value='100'>100</option>
+<option value='250'>250</option>
+</select>
+</div>
+</div>
 </div>
 </div>
 </div>

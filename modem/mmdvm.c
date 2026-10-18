@@ -52,6 +52,8 @@ bool             modem_p25Enabled          = false;
 unsigned int     modem_p25TXHang           = 5U;
 uint8_t          modem_p25TXLevel          = 50U;
 uint8_t          p25_space                 = 0U;
+uint8_t          nxdn_space                = 0U;
+uint8_t          ysf_space                 = 0U;
 
 bool             modem_dstarEnabled        = false;
 uint8_t          modem_dstarTXLevel        = 50U;
@@ -107,6 +109,30 @@ void setDSTARSpace(uint8_t space)
 uint8_t getP25Space()
 {
     return p25_space;
+}
+
+/* function to return YSF queue free space in modem */
+uint8_t getYSFSpace()
+{
+    return ysf_space;
+}
+
+/* function to record YSF queue free space */
+void setYSFSpace(uint8_t space)
+{
+    ysf_space = space;
+}
+
+/* function to return NXDN queue free space in modem */
+uint8_t getNXDNSpace()
+{
+    return nxdn_space;
+}
+
+/* function to record NXDN queue free space */
+void setNXDNSpace(uint8_t space)
+{
+    nxdn_space = space;
 }
 
 /* function to record P25 queue free space */
@@ -195,6 +221,120 @@ void disableDSTAR(const char* modem_name)
     uint8_t buffer[4];
 
     modem_dstarEnabled = false;
+    if (strcasecmp(modem, "mmdvmhs") == 0)
+        set_ConfigHS(modem_name);
+    else
+        set_Config(modem_name);
+    sleep(1);
+
+    buffer[0] = 0xE0;
+    buffer[1] = 0x04;
+    buffer[2] = MODEM_MODE;
+    buffer[3] = 0x00; /* IDLE_MODE */
+    RingBuffer_addData(&modemCommandBuffer, buffer, 4);
+}
+
+/* function to enable FM mode in modem. */
+void enableFM(const char* modem_name)
+{
+    uint8_t buffer[4];
+
+    if (!modem_fmEnabled)
+    {
+        modem_fmEnabled = true;
+        set_Config(modem_name);
+        sleep(1);
+    }
+    buffer[0] = 0xE0;
+    buffer[1] = 0x04;
+    buffer[2] = MODEM_MODE;
+    buffer[3] = MODE_FM;
+    RingBuffer_addData(&modemCommandBuffer, buffer, 4);
+}
+
+/* function to disable FM mode in modem. */
+void disableFM(const char* modem_name)
+{
+    uint8_t buffer[4];
+
+    modem_fmEnabled = false;
+    set_Config(modem_name);
+    sleep(1);
+
+    buffer[0] = 0xE0;
+    buffer[1] = 0x04;
+    buffer[2] = MODEM_MODE;
+    buffer[3] = 0x00; /* IDLE_MODE */
+    RingBuffer_addData(&modemCommandBuffer, buffer, 4);
+}
+
+/* function to enable YSF mode in modem. */
+void enableYSF(const char* modem_name)
+{
+    uint8_t buffer[4];
+
+    if (!modem_ysfEnabled)
+    {
+        modem_ysfEnabled = true;
+        if (strcasecmp(modem, "mmdvmhs") == 0)
+            set_ConfigHS(modem_name);
+        else
+            set_Config(modem_name);
+        sleep(1);
+    }
+    buffer[0] = 0xE0;
+    buffer[1] = 0x04;
+    buffer[2] = MODEM_MODE;
+    buffer[3] = MODE_YSF;
+    RingBuffer_addData(&modemCommandBuffer, buffer, 4);
+}
+
+/* function to disable YSF mode in modem. */
+void disableYSF(const char* modem_name)
+{
+    uint8_t buffer[4];
+
+    modem_ysfEnabled = false;
+    if (strcasecmp(modem, "mmdvmhs") == 0)
+        set_ConfigHS(modem_name);
+    else
+        set_Config(modem_name);
+    sleep(1);
+
+    buffer[0] = 0xE0;
+    buffer[1] = 0x04;
+    buffer[2] = MODEM_MODE;
+    buffer[3] = 0x00; /* IDLE_MODE */
+    RingBuffer_addData(&modemCommandBuffer, buffer, 4);
+}
+
+/* function to enable NXDN mode in modem. */
+void enableNXDN(const char* modem_name)
+{
+    uint8_t buffer[4];
+
+    if (!modem_nxdnEnabled)
+    {
+        modem_nxdnEnabled = true;
+        if (strcasecmp(modem, "mmdvmhs") == 0)
+            set_ConfigHS(modem_name);
+        else
+            set_Config(modem_name);
+        sleep(1);
+    }
+    buffer[0] = 0xE0;
+    buffer[1] = 0x04;
+    buffer[2] = MODEM_MODE;
+    buffer[3] = MODE_NXDN;
+    RingBuffer_addData(&modemCommandBuffer, buffer, 4);
+}
+
+/* function to disable NXDN mode in modem. */
+void disableNXDN(const char* modem_name)
+{
+    uint8_t buffer[4];
+
+    modem_nxdnEnabled = false;
     if (strcasecmp(modem, "mmdvmhs") == 0)
         set_ConfigHS(modem_name);
     else
@@ -396,7 +536,9 @@ bool set_Config(const char* modem_name)
     modem_txInvert = strcasecmp(tmp, "true") == 0 ? true : false;
     readHostConfig(modem_name, "config", "pttInvert", tmp);
     modem_pttInvert = strcasecmp(tmp, "true") == 0 ? true : false;
-/* modem_ysfLoDev = readHostConfig(modem_name, "config", "ysfLoDev") == "true" ? true : false; */
+    tmp[0] = '\0';
+    readHostConfig(modem_name, "YSF", "loDev", tmp);
+    modem_ysfLoDev = strcasecmp(tmp, "true") == 0 ? true : false;
     readHostConfig(modem_name, "config", "debug", tmp);
     modem_debug = strcasecmp(tmp, "true") == 0 ? true : false;
     readHostConfig(modem_name, "config", "trace", tmp);
@@ -426,8 +568,7 @@ bool set_Config(const char* modem_name)
 /* modem_ysfEnabled = readHostConfig(modem_name, "config", "ysfEnabled") == "true" ? true : false; */
 /* modem_p25Enabled = readHostConfig(modem_name, "config", "p25Enabled") == "true" ? true : false; */
 /* modem_nxdnEnabled = readHostConfig(modem_name, "config", "nxdnEnabled") == "true" ? true : false; */
-    readHostConfig(modem_name, "config", "fmEnabled", tmp);
-    modem_fmEnabled = strcasecmp(tmp, "true") == 0 ? true : false;
+/* modem_fmEnabled = readHostConfig(modem_name, "config", "fmEnabled") == "true" ? true : false; */
 /* modem_m17Enabled = readHostConfig(modem_name, "config", "m17Enabled") == "true" ? true : false; */
 
     buffer[4U] = 0x00U;
@@ -481,14 +622,20 @@ bool set_Config(const char* modem_name)
     modem_dstarTXLevel = atoi(tmp);
     readHostConfig(modem_name, "DMR", "txLevel", tmp);
     modem_dmrTXLevel = atoi(tmp);
-/* modem_ysfTXLevel = atoi(readHostConfig(modem_name, "config", "ysfTxLevel").c_str()); */
+    tmp[0] = '\0';
+    readHostConfig(modem_name, "YSF", "txLevel", tmp);
+    if (strlen(tmp) > 0)
+        modem_ysfTXLevel = atoi(tmp);
     readHostConfig(modem_name, "P25", "txLevel", tmp);
     modem_p25TXLevel = atoi(tmp);
-/* modem_nxdnTXLevel = atoi(readHostConfig(modem_name, "config", "nxdnTxLevel").c_str()); */
+    tmp[0] = '\0';
+    readHostConfig(modem_name, "NXDN", "txLevel", tmp);
+    if (strlen(tmp) > 0)
+        modem_nxdnTXLevel = atoi(tmp);
     readHostConfig(modem_name, "M17", "txLevel", tmp);
     modem_m17TXLevel = atoi(tmp);
 /* modem_pocsagTXLevel = atoi(readHostConfig(modem_name, "config", "pocsagTxLevel").c_str()); */
-    readHostConfig(modem_name, "config", "fmTxLevel", tmp);
+    readHostConfig(modem_name, "FM", "txLevel", tmp);
     modem_fmTXLevel = atoi(tmp);
 /* modem_ax25TXLevel = atoi(readHostConfig(modem_name, "config", "ax25TxLevel").c_str()); */
 
@@ -559,7 +706,9 @@ bool set_ConfigHS(const char* modem_name)
 
     buffer[3U] = 0x00U;
     char tmp[20];
-/* modem_ysfLoDev = readHostConfig(modem_name, "config", "ysfLoDev") == "true" ? true : false; */
+    tmp[0] = '\0';
+    readHostConfig(modem_name, "YSF", "loDev", tmp);
+    modem_ysfLoDev = strcasecmp(tmp, "true") == 0 ? true : false;
     readHostConfig(modem_name, "config", "debug", tmp);
     modem_debug = strcasecmp(tmp, "true") == 0 ? true : false;
     readHostConfig(modem_name, "config", "trace", tmp);
@@ -610,9 +759,15 @@ bool set_ConfigHS(const char* modem_name)
 /* modem_cwIdTXLevel = atoi(readHostConfig(modem_name, "config", "cwIdTxLevel").c_str()); */
 /* modem_dstarTXLevel = atoi(readHostConfig(modem_name, "config", "dstarTxLevel").c_str()); */
 /* modem_dmrTXLevel = atoi(readHostConfig(modem_name, "config", "dmrTxLevel").c_str()); */
-/* modem_ysfTXLevel = atoi(readHostConfig(modem_name, "config", "ysfTxLevel").c_str()); */
+    tmp[0] = '\0';
+    readHostConfig(modem_name, "YSF", "txLevel", tmp);
+    if (strlen(tmp) > 0)
+        modem_ysfTXLevel = atoi(tmp);
 /* modem_p25TXLevel = atoi(readHostConfig(modem_name, "config", "p25TxLevel").c_str()); */
-/* modem_nxdnTXLevel = atoi(readHostConfig(modem_name, "config", "nxdnTxLevel").c_str()); */
+    tmp[0] = '\0';
+    readHostConfig(modem_name, "NXDN", "txLevel", tmp);
+    if (strlen(tmp) > 0)
+        modem_nxdnTXLevel = atoi(tmp);
 /* modem_m17TXLevel = atoi(readHostConfig(modem_name, "config", "m17TxLevel").c_str()); */
 /* modem_pocsagTXLevel = atoi(readHostConfig(modem_name, "config", "pocsagTxLevel").c_str()); */
 /* modem_ysfTXHang = atoi(readHostConfig(modem_name, "config", "ysfTXHang").c_str()); */

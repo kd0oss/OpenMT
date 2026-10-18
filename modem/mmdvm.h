@@ -49,9 +49,17 @@ extern "C" {
 #define TYPE_M17_PACKET    0x47
 #define TYPE_M17_LOST      0x48
 #define TYPE_M17_EOT       0x49
+#define TYPE_FM_DATA       0x65U
+#define TYPE_FM_STATUS     0x66U
+#define TYPE_FM_EOT        0x67U
+#define TYPE_FM_RSSI       0x68U
 #define TYPE_P25_HDR       0x30U
 #define TYPE_P25_LDU       0x31U
 #define TYPE_P25_LOST      0x32U
+#define TYPE_YSF_DATA      0x20U
+#define TYPE_YSF_LOST      0x21U
+#define TYPE_NXDN_DATA     0x40U
+#define TYPE_NXDN_LOST     0x41U
 #define TYPE_DMR_DATA1     0x18U
 #define TYPE_DMR_LOST1     0x19U
 #define TYPE_DMR_DATA2     0x1AU
@@ -61,6 +69,9 @@ extern "C" {
 #define TYPE_DMR_ABORT     0x1EU
 
 #define MODE_IDLE          0x00
+#define MODE_YSF           0x03
+#define MODE_NXDN          0x05
+#define MODE_FM            0x0A
 #define MODE_LOCKOUT       0x63
 #define MODE_ERROR         0x64
 #define MODE_QUIT          0x6E
@@ -87,6 +98,12 @@ void enableDSTAR(const char* modem_name);
 void disableDSTAR(const char* modem_name);
 void enableP25(const char* modem_name);
 void disableP25(const char* modem_name);
+void enableYSF(const char* modem_name);
+void disableYSF(const char* modem_name);
+void enableNXDN(const char* modem_name);
+void disableNXDN(const char* modem_name);
+void enableFM(const char* modem_name);
+void disableFM(const char* modem_name);
 void enableDMR(const char* modem_name);
 void disableDMR(const char* modem_name);
 bool openMTtoMMDVM(uint8_t mmdvm_in, char* openmt_out);
@@ -97,6 +114,10 @@ void setDSTARSpace(uint8_t space);
 uint8_t getDSTARSpace();
 void setP25Space(uint8_t space);
 uint8_t getP25Space();
+void setYSFSpace(uint8_t space);
+uint8_t getYSFSpace();
+void setNXDNSpace(uint8_t space);
+uint8_t getNXDNSpace();
 void setDMRSpace(uint8_t space1, uint8_t space2);
 uint8_t getDMRSpace(uint8_t slot);
 bool set_Config(const char* modem_name);
