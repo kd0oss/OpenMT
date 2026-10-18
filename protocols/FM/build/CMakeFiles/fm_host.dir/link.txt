@@ -1,1 +1,0 @@
-/usr/bin/cc -Wl,--dependency-file=CMakeFiles/fm_host.dir/link.d CMakeFiles/fm_host.dir/fm_host.c.o CMakeFiles/fm_host.dir/fm_dsp.c.o CMakeFiles/fm_host.dir/home/pi/OpenMT/tools/string_builder.c.o CMakeFiles/fm_host.dir/home/pi/OpenMT/tools/tools.c.o -o fm_host  -lm -lpthread /usr/lib/arm-linux-gnueabihf/libmariadb.so

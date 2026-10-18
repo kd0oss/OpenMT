@@ -1,3 +1,0 @@
-/home/pi/OpenMT/protocols/NXDN/build/CMakeFiles/nxdn_host.dir
-/home/pi/OpenMT/protocols/NXDN/build/CMakeFiles/edit_cache.dir
-/home/pi/OpenMT/protocols/NXDN/build/CMakeFiles/rebuild_cache.dir
