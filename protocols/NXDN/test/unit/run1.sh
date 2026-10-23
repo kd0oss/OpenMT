@@ -1,4 +1,5 @@
 #!/bin/bash
+# Created by Rick KD0OSS
 # usage: run1.sh <modem> <extra sim args> ; env passes through
 rm -f /tmp/nxdn_stub_*
 (timeout 100 ./nxdn_sim -m 1 --hang 3 "$@" > sim.log 2>&1 &)

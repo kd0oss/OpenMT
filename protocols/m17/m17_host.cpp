@@ -25,6 +25,7 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <errno.h>
+#include <poll.h>
 #include <termios.h>
 #include <string.h>
 #include <fcntl.h>
@@ -67,17 +68,6 @@ extern "C" {
 
 #include <dsp_compat.h> //<arm_math.h>
 #include <netinet/tcp.h>
-/* Disable Nagle: these programs talk over loopback TCP in small frames
- * (200 bytes of samples, 3 byte requests).  With Nagle on, a small write
- * waits for the ACK of the previous one, and the peer delays that ACK for
- * ~40 ms, so the stream arrives in bursts with 40 ms gaps. */
-static void setNoDelay(int fd)
-{
-    int one = 1;
-
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-}
-
 using namespace std;
 using namespace M17;
 
@@ -329,7 +319,6 @@ RingBuffer rxBuffer;
 RingBuffer gwTxBuffer;
 RingBuffer gwCommand;
 
-pthread_mutex_t timerMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;
@@ -347,91 +336,44 @@ pthread_t timerid;
 const uint8_t SETMODE[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_MODE};
 const uint8_t SETIDLE[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_IDLE};
 
-typedef struct TIMERS
-{
-    char name[20];
-    bool valid;
-    bool enabled;
-    uint32_t duration;
-    uint32_t count;
-    bool triggered;
-} TIMERS;
-
-TIMERS timer[10];
 
 void processBitsNone(bool);
 void processBitsData(bool);
-void writeBits(uint8_t c, bool isEOT);
 void processNone(q15_t sample);
 void processData(q15_t sample);
 bool correlateSync(uint8_t syncSymbols, const int8_t* syncSymbolValues, const uint8_t* syncBytes, uint8_t maxSymbolErrs, uint8_t maxBitErrs);
 void calculateLevels(uint16_t start, uint16_t count);
 void samplesToBits(uint16_t start, uint16_t count, uint8_t* buffer, uint16_t offset, q15_t center, q15_t threshold);
-bool isTimerTriggered(const char* name);
-void resetTimer(const char* name);
 
 
-// error - wrapper for perror
+/*
+ * error()
+ *
+ * Wrapper for perror that ends the program.
+ *
+ * Parameters:
+ *   msg - Text printed before the system error message.
+ *
+ * Returns: nothing.
+ */
 void error(char *msg)
 {
-    perror(msg);
+    reportError(modemName, "M17", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
-// Wait for 'delay' miroseconds
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-};
+;
 
-// Print debug data.
-// From MMDVM project by Jonathan Naylor G4KLX.
-void dump(char *text, unsigned char *data, unsigned int length)
-{
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    fputs(text, stdout);
-    fputc('\n', stdout);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++)
-            fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++)
-            fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            unsigned char c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-}
-
+/*
+ * isActiveMode()
+ *
+ * Tells if this host may handle frames: the active mode of the modem host is
+ * M17 or idle.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the active mode is M17 or IDLE.
+ */
 bool isActiveMode()
 {
     char active_mode[10] = "IDLE";
@@ -444,6 +386,16 @@ bool isActiveMode()
         return false;
 }
 
+/*
+ * reset()
+ *
+ * Puts the sample receiver back to its start: no state, no sync, no levels,
+ * and a transmit delay of 240 bytes (200 ms).
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void reset()
 {
     m17state        = M17RXS_NONE;
@@ -497,8 +449,19 @@ bool    heldLast  = false;              /* it came in flagged as last         */
 uint8_t heldPayload[16];
 uint16_t heldFn   = 0U;                 /* its frame number, for the log      */
 
-/* Queue one 48 byte M17 frame for transmission ("M17L", "M17S", ...).
- * false = host connection lost. */
+/*
+ * queueTxFrame()
+ *
+ * Queues one 48 byte M17 frame for transmission.  With an MMDVM modem it
+ * goes to the modem host at once; with a sample or bit modem it is queued
+ * for rxThread(), which modulates it.
+ *
+ * Parameters:
+ *   type4   - The four character type ("M17L", "M17S" and so on).
+ *   frame48 - The 48 byte frame.
+ *
+ * Returns: true if queued, false if the host connection was lost.
+ */
 static bool queueTxFrame(const char* type4, const uint8_t* frame48)
 {
     uint8_t buf[56] = {0x61, 0x00, 0x38, 0x04};
@@ -509,7 +472,7 @@ static bool queueTxFrame(const char* type4, const uint8_t* frame48)
     {
         if (write(sockfd, buf, 56) < 0)
         {
-            fprintf(stderr, "ERROR: host disconnect\n");
+            reportError(modemName, "M17", "host disconnect");
             return false;
         }
     }
@@ -522,8 +485,19 @@ static bool queueTxFrame(const char* type4, const uint8_t* frame48)
     return true;
 }
 
-/* Queue one 48 byte M17 frame for the gateway (RF traffic to the
- * reflector). */
+/*
+ * queueGwFrame()
+ *
+ * Queues one 48 byte M17 frame for the gateway (RF traffic to the
+ * reflector).  It is dropped when no reflector is linked or the queue is
+ * full.
+ *
+ * Parameters:
+ *   type4   - The four character type.
+ *   frame48 - The 48 byte frame.
+ *
+ * Returns: nothing.
+ */
 static void queueGwFrame(const char* type4, const uint8_t* frame48)
 {
     uint8_t hdr[8] = {0x61, 0x00, 56, 0x04};
@@ -538,9 +512,18 @@ static void queueGwFrame(const char* type4, const uint8_t* frame48)
     pthread_mutex_unlock(&gwTxBufMutex);
 }
 
-/* Start a regenerated RF over: encode the LSF (as received, or rebuilt from
- * the LICH on a late entry) and queue it for the modem (duplex only; the TX
- * side sends the preamble in front of it) and for the gateway. */
+/*
+ * regenStart()
+ *
+ * Starts a regenerated RF over: encodes the link setup frame (as received,
+ * or rebuilt from the LICH on a late entry) and queues it for the modem
+ * (duplex only; the transmit side sends the preamble in front of it) and for
+ * the gateway.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if it worked, false if the host connection was lost.
+ */
 static bool regenStart(void)
 {
     frame_t f;
@@ -555,8 +538,18 @@ static bool regenStart(void)
     return true;
 }
 
-/* Encode one regenerated stream frame and send it to the modem (duplex) and
- * the gateway.  false = host connection lost. */
+/*
+ * regenEmit()
+ *
+ * Encodes one regenerated stream frame and queues it for the modem (duplex
+ * only) and the gateway.
+ *
+ * Parameters:
+ *   payload16 - The 16 bytes of voice data.
+ *   last      - true to mark it as the last frame of the over.
+ *
+ * Returns: true if it worked, false if the host connection was lost.
+ */
 static bool regenEmit(const uint8_t* payload16, bool last)
 {
     frame_t   f;
@@ -571,7 +564,15 @@ static bool regenEmit(const uint8_t* payload16, bool last)
     return true;
 }
 
-/* End of an RF over: the held frame goes out as the last one. */
+/*
+ * regenFlush()
+ *
+ * Ends an RF over: the frame that was held back goes out as the last one.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if it worked, false if the host connection was lost.
+ */
 static bool regenFlush(void)
 {
     if (!regenStarted || !heldValid)
@@ -580,6 +581,26 @@ static bool regenFlush(void)
     return regenEmit(heldPayload, true);
 }
 
+/*
+ * decodeFrame()
+ *
+ * Handles one M17 frame (link setup, stream or packet) or the end of a
+ * transmission, from RF or from the network.  The frame is decoded and the
+ * call is followed: callsigns, extended callsigns, text, GNSS position and
+ * SMS packets.  Frames from RF are sent to the gateway, and are repeated on
+ * RF (regenerated, so that they are clean and numbered right) or passed on
+ * as they came; lost stream frames are replaced; the dashboard gets the last
+ * call and the history.
+ *
+ * Parameters:
+ *   type   - The four character type: M17L, M17S, M17P or M17E.
+ *   buffer - The 48 byte frame (not used for the end of transmission from
+ *            RF).
+ *   length - Number of bytes in buffer.
+ *   isNet  - true if the frame came from the gateway, false if from RF.
+ *
+ * Returns: nothing.
+ */
 void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
 {
     static char gps[50];
@@ -639,7 +660,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
             {
                 if (write(sockfd, SETMODE, 5) < 0)
                 {
-                    fprintf(stderr, "ERROR: host disconnect\n");
+                    reportError(modemName, "M17", "host disconnect");
                     return;
                 }
                 saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, "", true);
@@ -722,7 +743,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                     {
                         if (write(sockfd, buf, 56) < 0)
                         {
-                            fprintf(stderr, "ERROR: host disconnect\n");
+                            reportError(modemName, "M17", "host disconnect");
                             return;
                         }
                     }
@@ -740,7 +761,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                 {
                     if (write(sockfd, SETMODE, 5) < 0)
                     {
-                        fprintf(stderr, "ERROR: host disconnect\n");
+                        reportError(modemName, "M17", "host disconnect");
                         return;
                     }
                     saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, "", true);
@@ -847,7 +868,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                 if (isTimerTriggered("status"))
                 {
                     saveLastCall(1, modemName, "M17", cType, srcCallsign, "", dstCallsign, metaText, NULL, "", true);
-                    resetTimer("status");
+                    resetTimer("status", 0);
                 }
 
                 if (rfRegen)
@@ -896,7 +917,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                             {
                                 if (write(sockfd, buf, 56) < 0)
                                 {
-                                    fprintf(stderr, "ERROR: host disconnect\n");
+                                    reportError(modemName, "M17", "host disconnect");
                                     return;
                                 }
                             }
@@ -919,7 +940,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                     {
                         if (write(sockfd, buf, 56) < 0)
                         {
-                            fprintf(stderr, "ERROR: host disconnect\n");
+                            reportError(modemName, "M17", "host disconnect");
                             return;
                         }
                     }
@@ -941,7 +962,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
                     {
                         if (write(sockfd, buf, 56) < 0)
                         {
-                            fprintf(stderr, "ERROR: host disconnect\n");
+                            reportError(modemName, "M17", "host disconnect");
                             return;
                         }
                     }
@@ -1062,7 +1083,7 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
             {
                 if (write(sockfd, buf, 8) < 0)
                 {
-                    fprintf(stderr, "ERROR: host disconnect\n");
+                    reportError(modemName, "M17", "host disconnect");
                     return;
                 }
             }
@@ -1083,6 +1104,19 @@ void decodeFrame(const char* type, uint8_t* buffer, uint8_t length, bool isNet)
 }
 
 
+/*
+ * samples()
+ *
+ * Feeds filtered samples to the receiver: each sample is added to the bit
+ * history and the frame buffer, then handled by the state machine (hunting
+ * for a sync word, or following a frame).
+ *
+ * Parameters:
+ *   samples - The samples.
+ *   length  - Number of samples.
+ *
+ * Returns: nothing.
+ */
 void samples(const q15_t* samples, uint8_t length)
 {
     for (uint8_t i = 0U; i < length; i++)
@@ -1117,6 +1151,19 @@ void samples(const q15_t* samples, uint8_t length)
     }
 }
 
+/*
+ * processNone()
+ *
+ * Looks for a link setup, stream or packet sync word while no signal is
+ * being followed.  When one is found a short countdown starts, then the
+ * receiver changes to the state of that frame and sets the window where the
+ * next sync word is expected.
+ *
+ * Parameters:
+ *   sample - The current sample.
+ *
+ * Returns: nothing.
+ */
 void processNone(q15_t sample)
 {
     bool ret1 = correlateSync(M17_LINK_SETUP_SYNC_SYMBOLS, M17_LINK_SETUP_SYNC_SYMBOLS_VALUES, M17_LINK_SETUP_SYNC_BYTES, MAX_SYNC_SYMBOL_START_ERRS, MAX_SYNC_BIT_START_ERRS);
@@ -1157,6 +1204,19 @@ void processNone(q15_t sample)
     }
 }
 
+/*
+ * processData()
+ *
+ * Follows a signal: looks for the sync words again in the expected window,
+ * handles the end of the transmission, and at the end of each frame finds
+ * the levels, slices the frame into bits and passes it to decodeFrame().
+ * Too many frames without a sync word end the transmission as lost.
+ *
+ * Parameters:
+ *   sample - The current sample.
+ *
+ * Returns: nothing.
+ */
 void processData(q15_t sample)
 {
     bool eof = false;
@@ -1300,6 +1360,25 @@ void processData(q15_t sample)
     }
 }
 
+/*
+ * correlateSync()
+ *
+ * Checks whether a sync word ends at the current sample: first by its
+ * symbols, then by correlating the samples against the sync levels, and then
+ * by slicing it and counting the bit errors.  The best correlation so far is
+ * kept and sets the position of the frame.
+ *
+ * Parameters:
+ *   syncSymbols      - The sign of each of the eight sync symbols, as a byte,
+ *                      for the quick check.
+ *   syncSymbolValues - The eight symbol values (+3 or -3) of the sync word.
+ *   syncBytes        - The sync word as bytes.
+ *   maxSymbolErrs    - Number of wrong bits allowed in the quick check.
+ *   maxBitErrs       - Number of wrong bits allowed in the sliced sync word.
+ *
+ * Returns: true if a sync word with a better correlation than before was
+ *   found.
+ */
 bool correlateSync(uint8_t syncSymbols, const int8_t* syncSymbolValues, const uint8_t* syncBytes, uint8_t maxSymbolErrs, uint8_t maxBitErrs)
 {
     if (countBits8(m17bitBuffer[m17bitPtr] ^ syncSymbols) <= maxSymbolErrs)
@@ -1383,6 +1462,18 @@ bool correlateSync(uint8_t syncSymbols, const int8_t* syncSymbolValues, const ui
     return false;
 }
 
+/*
+ * calculateLevels()
+ *
+ * Works out the centre and the threshold of the symbols of a frame, and
+ * averages them with those of the last 16 frames.
+ *
+ * Parameters:
+ *   start - Position of the first symbol in the frame buffer.
+ *   count - Number of symbols.
+ *
+ * Returns: nothing.
+ */
 void calculateLevels(uint16_t start, uint16_t count)
 {
     q15_t maxPos = -16000;
@@ -1454,6 +1545,22 @@ void calculateLevels(uint16_t start, uint16_t count)
     m17thresholdVal >>= 4;
 }
 
+/*
+ * samplesToBits()
+ *
+ * Slices symbols into dibits (a 4FSK symbol is two bits) and writes them as
+ * bits.
+ *
+ * Parameters:
+ *   start     - Position of the first symbol in the frame buffer.
+ *   count     - Number of symbols.
+ *   buffer    - Receives the bits, most significant bit first.
+ *   offset    - Position of the first bit to write in buffer.
+ *   center    - The centre level.
+ *   threshold - The threshold between the outer and the inner symbols.
+ *
+ * Returns: nothing.
+ */
 void samplesToBits(uint16_t start, uint16_t count, uint8_t* buffer, uint16_t offset, q15_t center, q15_t threshold)
 {
     for (uint16_t i = 0U; i < count; i++)
@@ -1492,31 +1599,22 @@ void samplesToBits(uint16_t start, uint16_t count, uint8_t* buffer, uint16_t off
     }
 }
 
-void writeBits(uint8_t c, bool isEOT)
-{
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'B', 'I', 'T', 'S'}; // setup 8 byte header
-    static uint8_t bytePos = 8; // set first position after header
-
-    bytes[bytePos++] = c;
-    if (bytePos == 200)
-    {
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-        //  delay(1000);
-    }
-
-    if (bytePos > 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
-    {
-        memset(bytes+bytePos, 0, 200 - bytePos);
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
-}
-
+/*
+ * writeSamples()
+ *
+ * Modulates one byte (four symbols): the symbols become levels and the pulse
+ * shaping filter makes 5 samples for each.  The samples are collected into
+ * SAMP packets of 200 bytes for the modem host; at the end of the
+ * transmission the last one is padded with zeros and sent as an EOT packet.
+ *
+ * Parameters:
+ *   c     - The byte to send, four symbols of two bits.
+ *   isEOT - true if it is the last byte of the transmission.
+ *
+ * Returns: nothing.
+ */
 void writeSamples(uint8_t c, bool isEOT)
 {
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'}; // setup 8 byte header
-    static uint8_t bytePos = 8; // set first position after header
     q15_t          inBuffer[4U];
     q15_t          outBuffer[M17_RADIO_SYMBOL_LENGTH * 4U];
 
@@ -1543,34 +1641,27 @@ void writeSamples(uint8_t c, bool isEOT)
 
     arm_fir_interpolate_q15(&m17modFilter, inBuffer, outBuffer, 4U);
 
-    bytes[5] = 'A';
-    bytes[6] = 'M';
-    bytes[7] = 'P';
-
-    for (uint8_t i = 0U; i < M17_RADIO_SYMBOL_LENGTH * 4U; i++)
-    {
-        outBuffer[i] *= 1.0f;
-        bytes[bytePos++] = (outBuffer[i] & 0x00ff);
-        bytes[bytePos++] = (outBuffer[i] & 0xff00) >> 8;
-        if (bytePos == 200)
-        {
-            write(sockfd, bytes, 200);
-            bytePos = 8;
-//            delay(200);
-        }
-    }
-
-    if (bytePos >= 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
-    {
-        bytes[5] = 'E';
-        bytes[6] = 'O';
-        bytes[7] = 'T';
-        memset(bytes+bytePos, 0, 200 - bytePos);
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
+    /* 200 byte SAMP packets, no wait between them */
+    modemQueueSamples(sockfd, outBuffer, M17_RADIO_SYMBOL_LENGTH * 4U, isEOT, 0U);
 }
 
+/*
+ * processTx()
+ *
+ * Makes the symbols of a link setup frame, stream frame, packet frame or end
+ * of transmission and sends them through writeSamples() or modemWriteBits(sockfd, ).  For
+ * a link setup frame with m_tx false the preamble is made instead of the
+ * frame.
+ *
+ * Parameters:
+ *   data   - The 48 byte frame.
+ *   length - Number of bytes in data.
+ *   type   - M17_LSF, M17_STREAM, M17_PACKET or M17_EOT.
+ *   m_tx   - true to make the frame, false to make only the preamble (link
+ *            setup frame only).
+ *
+ * Returns: nothing.
+ */
 void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_tx)
 {
     if (type == M17_LSF && symLen == 0U)
@@ -1630,9 +1721,9 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
         else if (packetType == PACKET_TYPE_BIT)
         {
             if (type == M17_EOT && symPtr >= symLen)
-                writeBits(c, true);
+                modemWriteBits(sockfd, c, true);
             else
-                writeBits(c, false);
+                modemWriteBits(sockfd, c, false);
         }
 
         if (symPtr >= symLen)
@@ -1644,6 +1735,18 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
     }
 }
 
+/*
+ * processBits()
+ *
+ * Feeds bytes of the bit stream of an OpenMT_HS modem to the bit receiver,
+ * most significant bit first.
+ *
+ * Parameters:
+ *   bytes  - The bytes.
+ *   length - Number of bytes.
+ *
+ * Returns: nothing.
+ */
 void processBits(uint8_t* bytes, uint8_t length)
 {
     bool bit;
@@ -1672,6 +1775,17 @@ void processBits(uint8_t* bytes, uint8_t length)
     }
 }
 
+/*
+ * processBitsNone()
+ *
+ * Looks for a sync word in the bit stream while no frame is being followed
+ * (an exact match is needed).
+ *
+ * Parameters:
+ *   bit - The next bit.
+ *
+ * Returns: nothing.
+ */
 void processBitsNone(bool bit)
 {
     m17bitBuf <<= 1;
@@ -1727,6 +1841,19 @@ void processBitsNone(bool bit)
     }
 }
 
+/*
+ * processBitsData()
+ *
+ * Collects the bits of a frame.  The next sync word is looked for in the
+ * right place (+-1 bit, up to 2 bit errors); a frame is passed to
+ * decodeFrame() when all its bits are in, and the end of the transmission or
+ * too many frames without a sync word end it.
+ *
+ * Parameters:
+ *   bit - The next bit.
+ *
+ * Returns: nothing.
+ */
 void processBitsData(bool bit)
 {
     m17bitBuf <<= 1;
@@ -1850,85 +1977,18 @@ void processBitsData(bool bit)
     }
 }
 
-void initTimers()
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        bzero(timer[i].name, 20);
-        timer[i].valid     = false;
-        timer[i].duration  = 0;
-        timer[i].count     = 0;
-        timer[i].enabled   = false;
-        timer[i].triggered = false;
-    }
-}
-
-int8_t getTimer(const char* name, uint32_t duration)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (!timer[i].valid)
-        {
-            strcpy(timer[i].name, name);
-            timer[i].valid     = true;
-            timer[i].enabled   = true;
-            timer[i].triggered = false;
-            timer[i].count     = 0;
-            timer[i].duration  = duration;
-            pthread_mutex_unlock(&timerMutex);
-            return i;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-    return -1;
-}
-
-bool isTimerTriggered(const char* name)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (timer[i].valid && timer[i].triggered && strcasecmp(timer[i].name, name) == 0)
-        {
-            pthread_mutex_unlock(&timerMutex);
-            return true;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-    return false;
-}
-
-void resetTimer(const char* name)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (timer[i].valid && strcasecmp(timer[i].name, name) == 0)
-        {
-            timer[i].count     = 0;
-            timer[i].triggered = false;
-            pthread_mutex_unlock(&timerMutex);
-            return;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-}
-
-void disableTimer(uint8_t id)
-{
-    pthread_mutex_lock(&timerMutex);
-    bzero(timer[id].name, 20);
-    timer[id].valid     = false;
-    timer[id].enabled   = false;
-    timer[id].triggered = false;
-    timer[id].duration  = 0;
-    timer[id].count     = 0;
-    pthread_mutex_unlock(&timerMutex);
-}
-
-// Simple timer thread.
-// Each loop through the while statement takes 1 millisecond.
+/*
+ * timerThread()
+ *
+ * Simple timer thread: every millisecond it ticks the timers.  When the mode
+ * hang time has passed without a transmission, the modem is set back to
+ * idle.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
+ */
 void* timerThread(void *arg)
 {
     bool     idle = true;
@@ -1936,36 +1996,25 @@ void* timerThread(void *arg)
     if (getTimer("modeHang", modeHang) < 0)
     {
         fprintf(stderr, "Timer thread exited.\n");
-        int iRet = 600;
-        pthread_exit(&iRet);
+        pthread_exit(NULL);
         return NULL;
     }
 
+    uint64_t lastTick = 0;      /* timers are advanced by the real time that passed, so a longer sleep loses nothing */
+
     while (connected)
     {
-        delay(1000);
+        delay(HOST_TIMER_PERIOD_US);
+        uint32_t elapsed = timerElapsedMs(&lastTick);
 
         for (uint8_t i = 0; i < 10; i++)
         {
-            pthread_mutex_lock(&timerMutex);
-            if (timer[i].valid && timer[i].enabled)
-            {
-                if (timer[i].count >= timer[i].duration)
-                {
-                    timer[i].triggered = true;
-                    timer[i].count     = 0;
-                }
-                else if (!timer[i].triggered)
-                {
-                    timer[i].count++;
-                }
-            }
-            pthread_mutex_unlock(&timerMutex);
+            timerTickN(i, elapsed);
             // fprintf(stderr, "T: %d  N: %s D: %u C: %u\n", i, timer[i].name, timer[i].duration, timer[i].count);
             if (txOn && strcasecmp(timer[i].name, "modeHang") == 0)
             {
                 idle = false;
-                resetTimer("modeHang");
+                resetTimer("modeHang", 0);
             }
             else if (!txOn && strcasecmp(timer[i].name, "modeHang") == 0)
             {
@@ -1978,7 +2027,7 @@ void* timerThread(void *arg)
                         pthread_mutex_unlock(&rxBufMutex);
                         //    write(sockfd, SETIDLE, 5);
                         idle = true;
-                        resetTimer("modeHang");
+                        resetTimer("modeHang", 0);
                     }
                 }
             }
@@ -1986,18 +2035,8 @@ void* timerThread(void *arg)
     }
 
     fprintf(stderr, "Timer thread exited.\n");
-    int iRet = 600;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
-}
-
-/* Milliseconds from a monotonic clock. */
-static int64_t monoMs(void)
-{
-    struct timespec ts;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
 /* A stream or packet with nothing in front of it on air (no LSF caught: late
@@ -2006,18 +2045,28 @@ static int64_t monoMs(void)
  * input reaches the air, and the receiver has nothing to lock on to. */
 #define M17_TX_PAUSE_MS 500             /* longer gap = a new transmission */
 
+/*
+ * rxThread()
+ *
+ * Thread that takes the packets queued for the modem (frames to transmit and
+ * mode commands) and sends them to the modem host.  Frames are modulated or
+ * sent as bits; a stream or packet with no link setup frame before it, or
+ * after a pause of more than 500 ms, gets the preamble first.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
+ */
 void* rxThread(void* arg)
 {
-    uint8_t loop = 0;
     bool    leadInSent = false;         /* preamble sent for this transmission */
     int64_t lastTxMs   = 0;
 
     while (connected)
     {
-        delay(100);
-        loop++;
+        delay(HOST_POLL_US);
 
-        if (loop > 100)
         {
             pthread_mutex_lock(&rxBufMutex);
             uint32_t avail = RingBuffer_dataSize(&rxBuffer);
@@ -2037,7 +2086,6 @@ void* rxThread(void* arg)
                     pthread_mutex_lock(&rxBufMutex);
                     RingBuffer_getData(&rxBuffer, buf, 1);
                     pthread_mutex_unlock(&rxBufMutex);
-                    loop = 0;
                     continue;
                 }
                 uint8_t byte[3];
@@ -2061,19 +2109,18 @@ void* rxThread(void* arg)
                     {
                         if (write(sockfd, buf, len) < 0)
                         {
-                            fprintf(stderr, "ERROR: remote disconnect\n");
+                            reportError(modemName, "M17", "remote disconnect");
                             break;
                         }
-                        loop = 0;
                         continue;
                     }
                     uint8_t type[4];
-                    int64_t nowMs = monoMs();
+                    int64_t nowTxMs = (int64_t)nowMs();
 
                     memcpy(type, buf + 4, 4);
-                    if (nowMs - lastTxMs > M17_TX_PAUSE_MS)
+                    if (nowTxMs - lastTxMs > M17_TX_PAUSE_MS)
                         leadInSent = false;     /* long pause: a new over */
-                    lastTxMs = nowMs;
+                    lastTxMs = nowTxMs;
 
                     if (memcmp(type, TYPE_LSF, 4) == 0)
                     {
@@ -2101,20 +2148,31 @@ void* rxThread(void* arg)
                     }
                 }
             }
-            loop = 0;
         }
     }
 
     fprintf(stderr, "RX thread exited.\n");
-    int iRet         = 500;
     pthread_mutex_lock(&stateMutex);
     m17GWConnected = false;
     pthread_mutex_unlock(&stateMutex);
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
-// Start up communication with modem host.
+/*
+ * startClient()
+ *
+ * Start up communication with the modem host: connects, registers the M17
+ * mode with the modem settings (the ADF7021 registers, the sync word), then
+ * reads its packets: commands (duplex or simplex), samples (level, filter
+ * and receiver), bits and frames (decodeFrame()).
+ *
+ * Parameters:
+ *   arg - The address of the modem host, as a string.
+ *
+ * Returns: NULL when the thread ends; the connection is closed and the
+ *   program is stopped.
+ */
 void* startClient(void *arg)
 {
     struct sockaddr_in serv_addr;
@@ -2124,14 +2182,14 @@ void* startClient(void *arg)
     // Create socket file descriptor
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "M17", "Socket creation error: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags == -1)
     {
-        perror("fcntl F_GETFL");
+        reportError(modemName, "M17", "fcntl F_GETFL: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -2144,9 +2202,9 @@ void* startClient(void *arg)
     serv_addr.sin_port = htons(clientPort);
 
     // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(hostAddress, &serv_addr.sin_addr))
     { // Connect to localhost
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "M17", "Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
 
@@ -2156,7 +2214,7 @@ void* startClient(void *arg)
     {
         if (errno != EINPROGRESS)
         {
-            perror("connection failed");
+            reportError(modemName, "M17", "connection failed: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
     }
@@ -2164,7 +2222,7 @@ void* startClient(void *arg)
     pthread_t rxid;
     int err = pthread_create(&(rxid), NULL, &rxThread, NULL);
     if (err != 0)
-        fprintf(stderr, "Can't create rx thread :[%s]", strerror(err));
+        reportError(modemName, "M17", "Can't create rx thread :[%s]", strerror(err));
     else
     {
         if (debugM) fprintf(stderr, "RX thread created successfully\n");
@@ -2218,11 +2276,14 @@ void* startClient(void *arg)
     memcpy(buffer + 66, (uint8_t*)tmp, 16);
     buffer[82] = 0x20; // use 16 bit counter
     buffer[83] = 0x11; // TX MSB first / scan multiplier
-    write(sockfd, buffer, configLen);
-    sleep(1);
-
+    /* Clear the frame decoder before the registration goes out: once the modem host has
+       the registration, frames can arrive, and a reset after that would wipe the link
+       setup frame of a call that has already started. */
     decoder.reset();
     /* rx_lsf is a C++ object, will be updated on first decode */
+
+    write(sockfd, buffer, configLen);
+    sleep(1);
 
     while (connected)
     {
@@ -2241,7 +2302,7 @@ void* startClient(void *arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "M17_Service: error when reading from server, errno=%d\n", errno);
+            reportError(modemName, "M17", "M17_Service: error when reading from server, errno=%d", errno);
             break;
         }
 
@@ -2284,7 +2345,7 @@ void* startClient(void *arg)
         memcpy(type, buffer+4, typeLen);
 
 //        if (debugM)
-  //          dump((char*)"M17 data", (unsigned char*)buffer, respLen);
+  //          hexDump((char*)"M17 data", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -2339,8 +2400,10 @@ void* startClient(void *arg)
             packetType = PACKET_TYPE_BIT;
             processBits(buffer + 8, respLen - 8);
         }
-        else
+        else if (typeLen >= 3 && memcmp(type, "M17", 3) == 0)
         {
+            /* Only an M17 frame from the modem means MMDVM frame mode; any other
+               packet type must not change the mode the modem is working in. */
             packetType = PACKET_TYPE_FRAME;
             pthread_mutex_lock(&txSourceMutex);
             if (currentTxSource == TX_NET)
@@ -2361,23 +2424,28 @@ void* startClient(void *arg)
     // Close socket
     close(sockfd);
     connected = false;
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
-// Send bytes to gateway.
+/*
+ * txThread()
+ *
+ * Sends bytes to the gateway: the queued frames of RF traffic and the queued
+ * commands.
+ *
+ * Parameters:
+ *   arg - The socket of the gateway, as an intptr_t.
+ *
+ * Returns: NULL when the thread ends.
+ */
 void* txThread(void *arg)
 {
     int  sockfd = (intptr_t)arg;
-    uint16_t loop = 0;
-
     while (1)
     {
-        delay(100);
-        loop++;
+        delay(HOST_POLL_US);
 
-        if (loop > 100)
         {
             pthread_mutex_lock(&gwTxBufMutex);
             uint32_t avail = RingBuffer_dataSize(&gwTxBuffer);
@@ -2397,7 +2465,6 @@ void* txThread(void *arg)
                     pthread_mutex_lock(&gwTxBufMutex);
                     RingBuffer_getData(&gwTxBuffer, buf, 1);
                     pthread_mutex_unlock(&gwTxBufMutex);
-                    loop = 0;
                     continue;
                 }
                 uint8_t  byte[3];
@@ -2419,13 +2486,12 @@ void* txThread(void *arg)
 
                     if (write(sockfd, tbuf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        reportError(modemName, "M17", "remote disconnect");
                         break;
                     }
                 }
             }
 
-            loop = 0;
         }
 
         pthread_mutex_lock(&gwCmdMutex);
@@ -2468,7 +2534,7 @@ void* txThread(void *arg)
 
                     if (write(sockfd, cbuf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        reportError(modemName, "M17", "remote disconnect");
                         break;
                     }
                 }
@@ -2477,12 +2543,56 @@ void* txThread(void *arg)
     }
 
     fprintf(stderr, "TX thread exited.\n");
-    int iRet = 500;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
-// Process bytes from gateway.
+/* Arrival time of the last frame from the network.  The gateway can be
+ * unlinked, or stop, without sending the end frame; the host would then stay
+ * keyed (and the dashboard in TX) for ever. */
+static uint64_t m17NetMs = 0U;
+
+/*
+ * m17NetEnd()
+ *
+ * Ends a network call that has no end frame, as if the gateway had sent it
+ * (decodeFrame() with an end of transmission): the modem is told to stop, the
+ * last call and history are saved and the state goes idle.
+ *
+ * Parameters:
+ *   force - true to end the call now, false to end it only when no frame has
+ *           come from the gateway for 1.5 seconds.
+ *
+ * Returns: nothing.
+ */
+static void m17NetEnd(bool force)
+{
+    pthread_mutex_lock(&txSourceMutex);
+    if (currentTxSource == TX_NET && (force || nowMs() - m17NetMs > 1500U))
+    {
+        uint8_t eot[48];
+
+        memset(eot, 0x00, sizeof(eot));
+        fprintf(stderr, "M17: network call ended, no end frame from the gateway\n");
+        decodeFrame(TYPE_EOT, eot, 48, true);
+    }
+    pthread_mutex_unlock(&txSourceMutex);
+}
+
+/*
+ * processGatewaySocket()
+ *
+ * Handles the packets from the gateway: the link status (NACK, CONN and
+ * DISC) goes to the dashboard, and link setup, stream, packet and end of
+ * transmission frames from the network go to decodeFrame() when this mode is
+ * active and RF is not transmitting.  Registers the gateway with the
+ * dashboard while it is connected.
+ *
+ * Parameters:
+ *   arg - The socket of the gateway, as an intptr_t.
+ *
+ * Returns: NULL when the thread ends.
+ */
 void *processGatewaySocket(void *arg)
 {
     int      childfd = (intptr_t)arg;
@@ -2501,6 +2611,19 @@ void *processGatewaySocket(void *arg)
 
     while (1)
     {
+        /* Wait for the gateway; when it is quiet, see whether a network call
+         * has gone silent (the gateway was unlinked or stopped sending). */
+        struct pollfd gwPoll = {childfd, POLLIN, 0};
+        int           gwWait = poll(&gwPoll, 1, 200);
+
+        if (gwWait == 0)
+        {
+            m17NetEnd(false);
+            continue;
+        }
+        if (gwWait < 0 && errno == EINTR)
+            continue;
+
         int len = read(childfd, buffer, 1);
         if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
@@ -2515,7 +2638,7 @@ void *processGatewaySocket(void *arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "M17_Service: error when reading from M17 gateway, errno=%d\n", errno);
+            reportError(modemName, "M17", "M17_Service: error when reading from M17 gateway, errno=%d", errno);
             close(childfd);
             break;
         }
@@ -2566,8 +2689,11 @@ void *processGatewaySocket(void *arg)
         uint8_t type[typeLen];
         memcpy(type, buffer + 4, typeLen);
 
+        if (typeLen == 4 && (memcmp(type, TYPE_LSF, 4) == 0 || memcmp(type, TYPE_STREAM, 4) == 0 || memcmp(type, TYPE_PACKET, 4) == 0))
+            m17NetMs = nowMs();
+
         if (debugM)
-            dump((char*)"M17 Gateway data:", (unsigned char*)buffer, respLen);
+            hexDump((char*)"M17 Gateway data:", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_NACK, typeLen) == 0)
         {
@@ -2598,6 +2724,7 @@ void *processGatewaySocket(void *arg)
             pthread_mutex_lock(&stateMutex);
             m17ReflConnected = false;
             pthread_mutex_unlock(&stateMutex);
+            m17NetEnd(true);
             char tmp[10];
             bzero(tmp, 10);
             memcpy(tmp, buffer + 4 + typeLen, 7);
@@ -2668,18 +2795,28 @@ void *processGatewaySocket(void *arg)
         delay(5);
     }
     fprintf(stderr, "Gateway disconnected.\n");
+    m17NetEnd(true);
     pthread_mutex_lock(&stateMutex);
     m17GWConnected   = false;
     m17ReflConnected = false;
     pthread_mutex_unlock(&stateMutex);
     delGateway(modemName, "main", "M17");
     clearReflLinkStatus(modemName, "M17");
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
-// Listem for incoming gateway connection.
+/*
+ * startTCPServer()
+ *
+ * Listens for the gateway on the server port.  For each connection it starts
+ * txThread() and processGatewaySocket().
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
+ */
 void *startTCPServer(void *arg)
 {
     struct hostent *hostp; /* client host info */
@@ -2691,7 +2828,7 @@ void *startTCPServer(void *arg)
     setNoDelay(sockFd);
     if (sockFd < 0)
     {
-        fprintf(stderr, "M17_Service: error when creating the socket: %s\n", strerror(errno));
+        reportError(modemName, "M17", "M17_Service: error when creating the socket: %s", strerror(errno));
         exit(1);
     }
 
@@ -2719,7 +2856,7 @@ void *startTCPServer(void *arg)
 
     if (bind(sockFd, (struct sockaddr *) &serveraddr, sizeof(serveraddr)) < 0)
     {
-        fprintf(stderr, "M17_Service: error when binding the socket to port %u: %s\n", serverPort, strerror(errno));
+        reportError(modemName, "M17", "M17_Service: error when binding the socket to port %u: %s", serverPort, strerror(errno));
         exit(1);
     }
 
@@ -2754,37 +2891,33 @@ void *startTCPServer(void *arg)
             setNoDelay(childfd);
         if (childfd < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
-            perror("accept failed");
+            reportError(modemName, "M17", "accept failed: %s", strerror(errno));
             break;
         }
 
         if (childfd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             continue;
 
-        /*
-         * gethostbyaddr: determine who sent the message
-         */
-        hostp = gethostbyaddr((const char *)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
-        if (hostp == NULL)
-        {
-            error((char*)"ERROR on gethostbyaddr");
-            break;
-        }
-
         hostaddrp = inet_ntoa(clientaddr.sin_addr);
         if (hostaddrp == NULL)
         {
-            error((char*)"ERROR on inet_ntoa\n");
-            break;
+            reportError(modemName, "M17", "Can't get the address of the client.");
+            close(childfd);
+            continue;
         }
 
         if (debugM)
-            fprintf(stderr, "Server established connection with %s (%s)\n", hostp->h_name, hostaddrp);
+        {
+            /* The name is only logged, so a client with no reverse DNS entry is still accepted */
+            hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
+            fprintf(stderr, "Server established connection with %s (%s)\n",
+                    hostp != NULL ? hostp->h_name : "unknown", hostaddrp);
+        }
 
         pthread_t txid;
         int err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)childfd);
         if (err != 0)
-            fprintf(stderr, "Can't create tx thread :[%s]", strerror(err));
+            reportError(modemName, "M17", "Can't create tx thread :[%s]", strerror(err));
         else
         {
             if (debugM)
@@ -2795,7 +2928,7 @@ void *startTCPServer(void *arg)
         err = pthread_create(&(procid), NULL, &processGatewaySocket, (void*)(intptr_t)childfd);
         if (err != 0)
         {
-            fprintf(stderr, "Can't create gateway process thread :[%s]", strerror(err));
+            reportError(modemName, "M17", "Can't create gateway process thread :[%s]", strerror(err));
             continue;
         }
         else
@@ -2805,18 +2938,33 @@ void *startTCPServer(void *arg)
         }
         delay(1000);
     }
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * main()
+ *
+ * Program entry. Parses the command line (-m modem number 1-10, which also
+ * selects the TCP ports, -d daemon, -v version, -x debug), reads the
+ * configuration, sets the filters up, starts the threads, and then passes
+ * the dashboard commands (configuration update, link and unlink of a
+ * reflector) on to the gateway until the connection to the modem host is
+ * lost.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on normal exit, 1 on a command line or startup error.
+ */
 int main(int argc, char **argv)
 {
     bool daemon = 0;
     int  ret;
     int  c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -2825,7 +2973,7 @@ int main(int argc, char **argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "M17", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -2834,8 +2982,11 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
                 break;
+            case 'a':
+                snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -2847,7 +2998,7 @@ int main(int argc, char **argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: M17_Service [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: M17_Service [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -2858,7 +3009,7 @@ int main(int argc, char **argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "M17_Service: error in fork(), exiting\n");
+            reportError(modemName, "M17", "M17_Service: error in fork(), exiting");
             return 1;
         }
 
@@ -2933,7 +3084,7 @@ int main(int argc, char **argv)
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create modem host thread :[%s]", strerror(err));
+        reportError(modemName, "M17", "Can't create modem host thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -2945,7 +3096,7 @@ int main(int argc, char **argv)
     err = pthread_create(&(gwHostid), NULL, &startTCPServer, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create gateway host thread :[%s]", strerror(err));
+        reportError(modemName, "M17", "Can't create gateway host thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -2956,7 +3107,7 @@ int main(int argc, char **argv)
     err = pthread_create(&(timerid), NULL, &timerThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create timer thread :[%s]", strerror(err));
+        reportError(modemName, "M17", "Can't create timer thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -2991,7 +3142,7 @@ int main(int argc, char **argv)
                 readDashbCommand(modemName, "reflLinkM17", parameter);
                 if (strlen(parameter) == 0)
                 {
-                    resetTimer("dbComm");
+                    resetTimer("dbComm", 0);
                     continue;
                 }
                 if (strcasecmp(parameter, "unlink") == 0)
@@ -3006,7 +3157,7 @@ int main(int argc, char **argv)
                     RingBuffer_addData(&gwCommand, buf, 8);
                     pthread_mutex_unlock(&gwCmdMutex);
                     sleep(3);
-                    resetTimer("dbComm");
+                    resetTimer("dbComm", 0);
                     continue;
                 }
                 else if (!m17ReflConnected)
@@ -3064,7 +3215,7 @@ int main(int argc, char **argv)
                     ackDashbCommand(modemName, "reflLinkM17", "No gateway");
                 }
             }
-            resetTimer("dbComm");
+            resetTimer("dbComm", 0);
         }
         delay(500000);
     }

@@ -13,28 +13,6 @@ add_executable(m17_gateway)
 
 # Link the MariaDB library to your executable
 target_link_libraries(m17_gateway PUBLIC PkgConfig::mariadb)
-target_link_libraries(m17_gateway PRIVATE VendorLib)
-
-# 1. Define the imported library target
-# The type (STATIC or SHARED) should match the precompiled library type
-add_library(VendorLib STATIC IMPORTED) 
-
-# 2. Set the properties of the imported library
-if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(STATUS "Configuring for 64-bit target architecture")
-    set_target_properties(VendorLib PROPERTIES
-        # Specify the location of the library file
-        IMPORTED_LOCATION "/home/pi/OpenMT/dsp_lib/lib_64/libCMSISDSP.a"
-        # Specify the include directories for the library's headers
-        INTERFACE_INCLUDE_DIRECTORIES "/home/pi/OpenMT/dsp_lib/Include"
-    )
-else()
-    set_target_properties(VendorLib PROPERTIES
-        IMPORTED_LOCATION "/home/pi/OpenMT/dsp_lib/lib_32/libCMSISDSP.a"
-        # Specify the include directories for the library's headers
-        INTERFACE_INCLUDE_DIRECTORIES "/home/pi/OpenMT/dsp_lib/Include"
-    )
-endif()
 
 # Link the source files from the src/ directory to the target
 target_sources(m17_gateway PRIVATE

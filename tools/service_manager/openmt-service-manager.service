@@ -1,0 +1,19 @@
+# /etc/systemd/system/openmt-service-manager.service
+# Runs as root: it starts and stops the OpenMT services the dashboard asks for.
+[Unit]
+Description=OpenMT Service Manager
+After=network.target mariadb.service
+Wants=mariadb.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/OpenMT/tools/service_manager
+ExecStart=/home/pi/OpenMT/tools/service_manager/build/service_manager
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

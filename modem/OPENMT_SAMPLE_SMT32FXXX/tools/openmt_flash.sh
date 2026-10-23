@@ -1,4 +1,5 @@
 #!/bin/sh
+# Created by Rick KD0OSS
 #
 # openmt_flash.sh - update the modem firmware over the Raspberry Pi serial
 # port with the chip's built-in ROM boot loader (needs stm32flash:

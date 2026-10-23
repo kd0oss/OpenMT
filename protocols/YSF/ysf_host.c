@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -36,7 +37,7 @@
 
 #include <tools.h>
 #include <mariadb/mysql.h>
-#include <dsp_tools.h>
+#include <fec_tools.h>
 #include <ADF7021.h>
 
 #include "ysf_dsp.h"
@@ -205,35 +206,17 @@ static char     callSuffix[16] = "";
 static char     callDst[16]    = "";
 
 /*
- * delay()
- *   Sleeps for the given number of microseconds.
- */
-static void delay(uint32_t us)
-{
-    struct timespec req;
-
-    req.tv_sec  = us / 1000000U;
-    req.tv_nsec = (long)(us % 1000000U) * 1000L;
-    nanosleep(&req, NULL);
-}
-
-/*
- * nowMs()
- *   Milliseconds on the monotonic clock.
- */
-static uint64_t nowMs(void)
-{
-    struct timespec ts;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
-}
-
-/*
  * dump()
- *   Debug helper. Prints text, then a hex and ASCII dump of length bytes of
- *   data, 16 bytes per line.
+ *
+ * Debug helper. Prints text, then a hex and ASCII dump of length bytes of
+ * data, 16 bytes per line.
+ *
+ * Parameters:
+ *   text   - Heading printed before the dump.
+ *   data   - The bytes to print.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
  */
 static void dump(const char* text, const uint8_t* data, unsigned int length)
 {
@@ -267,8 +250,16 @@ static void dump(const char* text, const uint8_t* data, unsigned int length)
 
 /*
  * writeAll()
- *   Writes a whole buffer to a socket, retrying on partial writes. Returns
- *   false if the connection has failed.
+ *
+ * Writes a whole buffer to a socket, retrying on partial writes. Returns
+ * false if the connection has failed.
+ *
+ * Parameters:
+ *   fd     - Socket to write to.
+ *   data   - Bytes to write.
+ *   length - Number of bytes in data.
+ *
+ * Returns: true if everything was written, false if the connection failed.
  */
 static bool writeAll(int fd, const uint8_t* data, size_t length)
 {
@@ -296,8 +287,15 @@ static bool writeAll(int fd, const uint8_t* data, size_t length)
 
 /*
  * modemWrite()
- *   Writes one packet to the modem host. The mutex keeps packets from
- *   different threads from being mixed up.
+ *
+ * Writes one packet to the modem host. The mutex keeps packets from
+ * different threads from being mixed up.
+ *
+ * Parameters:
+ *   data   - The packet to send.
+ *   length - Number of bytes in data.
+ *
+ * Returns: true if the packet was written, false if the connection failed.
  */
 static bool modemWrite(const uint8_t* data, size_t length)
 {
@@ -312,7 +310,15 @@ static bool modemWrite(const uint8_t* data, size_t length)
 
 /*
  * readFully()
- *   Reads exactly length bytes. Returns false on end of file or error.
+ *
+ * Reads exactly length bytes. Returns false on end of file or error.
+ *
+ * Parameters:
+ *   fd     - Socket to read from.
+ *   data   - Buffer that receives the bytes.
+ *   length - Number of bytes to read.
+ *
+ * Returns: true if length bytes were read, false on end of file or error.
  */
 static bool readFully(int fd, uint8_t* data, size_t length)
 {
@@ -345,8 +351,16 @@ static bool readFully(int fd, uint8_t* data, size_t length)
 
 /*
  * cfgValue()
- *   Reads a configuration value, writing the default to the configuration
- *   database when the key does not exist yet.
+ *
+ * Reads a configuration value, writing the default to the configuration
+ * database when the key does not exist yet.
+ *
+ * Parameters:
+ *   key - Name of the configuration value.
+ *   def - Default used (and stored) when the key does not exist.
+ *   out - Receives the value; must hold a configuration string.
+ *
+ * Returns: nothing.
  */
 static void cfgValue(const char* key, const char* def, char* out)
 {
@@ -362,8 +376,13 @@ static void cfgValue(const char* key, const char* def, char* out)
 
 /*
  * loadConfig()
- *   Fills the configuration structure from the host configuration, creating
- *   any missing keys with their defaults.
+ *
+ * Fills the configuration structure from the host configuration, creating
+ * any missing keys with their defaults.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void loadConfig(void)
 {
@@ -437,8 +456,14 @@ static void loadConfig(void)
 
 /*
  * isActiveMode()
- *   True when the modem host's active mode is YSF or idle, i.e. when this
- *   host is allowed to handle frames. The answer is cached for 200 ms.
+ *
+ * True when the modem host's active mode is YSF or idle, i.e. when this host
+ * is allowed to handle frames. The answer is cached for 200 ms.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if this host may handle frames, false if another mode is
+ *   active.
  */
 static bool isActiveMode(void)
 {
@@ -471,7 +496,12 @@ static bool isActiveMode(void)
 
 /*
  * touchActivity()
- *   Restarts the mode hang time.
+ *
+ * Restarts the mode hang time.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void touchActivity(void)
 {
@@ -480,8 +510,13 @@ static void touchActivity(void)
 
 /*
  * requestMode()
- *   Asks the modem host to switch to YSF. Only works while the modem host
- *   is idle, which is also the case while this host holds the mode.
+ *
+ * Asks the modem host to switch to YSF. Only works while the modem host is
+ * idle, which is also the case while this host holds the mode.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void requestMode(void)
 {
@@ -492,7 +527,12 @@ static void requestMode(void)
 
 /*
  * releaseMode()
- *   Hands the modem back to the idle state.
+ *
+ * Hands the modem back to the idle state.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void releaseMode(void)
 {
@@ -510,10 +550,18 @@ static void releaseMode(void)
 
 /*
  * onNet()
- *   Control callback: a frame of an RF call for the gateway (a 151 byte body of
- *   the reflector packet). Queued for the gateway thread; dropped when no
- *   gateway is connected. The gateway decides what to do with it, so frames are
- *   passed on whether or not a reflector is linked yet.
+ *
+ * Control callback: a frame of an RF call for the gateway (a 151 byte body
+ * of the reflector packet). Queued for the gateway thread; dropped when no
+ * gateway is connected. The gateway decides what to do with it, so frames
+ * are passed on whether or not a reflector is linked yet.
+ *
+ * Parameters:
+ *   c    - Not used.
+ *   body - The 151 byte body of the reflector packet.
+ *   end  - true for the last frame of the call.
+ *
+ * Returns: nothing.
  */
 static void onNet(void* c, const uint8_t* body, bool end)
 {
@@ -550,7 +598,15 @@ static void onNet(void* c, const uint8_t* body, bool end)
 
 /*
  * onRf()
- *   Control callback: a frame to transmit. Queued for the transmit thread.
+ *
+ * Control callback: a frame to transmit. Queued for the transmit thread.
+ *
+ * Parameters:
+ *   c     - Not used.
+ *   frame - The frame to transmit.
+ *   eot   - true if this is the last frame of the transmission.
+ *
+ * Returns: nothing.
  */
 static void onRf(void* c, const uint8_t* frame, bool eot)
 {
@@ -579,9 +635,16 @@ static void onRf(void* c, const uint8_t* frame, bool eot)
 
 /*
  * onEvent()
- *   Control callback: a call started, ended or was lost. The dashboard work
- *   is queued so the receive thread is not held up by the database. The
- *   modem is switched to YSF here, before the first frame goes out.
+ *
+ * Control callback: a call started, ended or was lost. The dashboard work is
+ * queued so the receive thread is not held up by the database. The modem is
+ * switched to YSF here, before the first frame goes out.
+ *
+ * Parameters:
+ *   c    - Not used.
+ *   call - Description of the call (started, ended or lost).
+ *
+ * Returns: nothing.
  */
 static void onEvent(void* c, const YsfCall* call)
 {
@@ -611,9 +674,17 @@ static void onEvent(void* c, const YsfCall* call)
 
 /*
  * onRxFrame()
- *   DSP callback and firmware frame entry: one received frame, or the loss of
- *   the signal. While the control is listening the frame is only used when
- *   this host may take the modem. The caller holds ctrlMutex.
+ *
+ * DSP callback and firmware frame entry: one received frame, or the loss of
+ * the signal. While the control is listening the frame is only used when
+ * this host may take the modem. The caller holds ctrlMutex.
+ *
+ * Parameters:
+ *   c     - Not used.
+ *   frame - The received frame (ignored when lost is true).
+ *   lost  - true if the signal was lost instead of a frame received.
+ *
+ * Returns: nothing.
  */
 static void onRxFrame(void* c, const uint8_t* frame, bool lost)
 {
@@ -631,7 +702,15 @@ static void onRxFrame(void* c, const uint8_t* frame, bool lost)
 
 /*
  * trimCall()
- *   Copies a callsign field (10 characters, space padded) without the padding.
+ *
+ * Copies a callsign field (10 characters, space padded) without the padding.
+ *
+ * Parameters:
+ *   out   - Receives the callsign as a string.
+ *   size  - Size of out, in bytes.
+ *   field - The 10 character, space padded callsign field.
+ *
+ * Returns: nothing.
  */
 static void trimCall(char* out, size_t size, const char* field)
 {
@@ -651,9 +730,18 @@ static void trimCall(char* out, size_t size, const char* field)
 
 /*
  * findCallName()
- *   Looks the name of a station up by its callsign in modem_host.dmr_ids (a YSF
- *   header only carries the callsign). Returns false when the callsign is not
- *   there or the database cannot be reached.
+ *
+ * Looks the name of a station up by its callsign in modem_host.dmr_ids (a
+ * YSF header only carries the callsign). Returns false when the callsign is
+ * not there or the database cannot be reached.
+ *
+ * Parameters:
+ *   callsign - The callsign to look up.
+ *   name     - Receives the name of the station.
+ *   nameSize - Size of name, in bytes.
+ *
+ * Returns: true if the name was found, false if the callsign is not there or
+ *   the database cannot be reached.
  */
 static bool findCallName(const char* callsign, char* name, size_t nameSize)
 {
@@ -716,8 +804,13 @@ static bool findCallName(const char* callsign, char* name, size_t nameSize)
 
 /*
  * serviceEvents()
- *   Writes the queued call events to the dashboard database: the live record
- *   when a call starts, the finished record and a history entry when it ends.
+ *
+ * Writes the queued call events to the dashboard database: the live record
+ * when a call starts, the finished record and a history entry when it ends.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void serviceEvents(void)
 {
@@ -831,8 +924,15 @@ typedef struct
 } SampWriter;
 
 /*
- * Amplitude of the outer symbols for the configured deviation.  The modem applies the TX level to the samples
- * (the level byte of every sample packet), so it is not applied here as well.
+ * txOuterLevel()
+ *
+ * Amplitude of the outer symbols for the configured deviation.  The modem
+ * applies the TX level to the samples (the level byte of every sample
+ * packet), so it is not applied here as well.
+ *
+ * Parameters: none.
+ *
+ * Returns: The amplitude of the outer symbols, as a sample value.
  */
 static float txOuterLevel(void)
 {
@@ -841,7 +941,13 @@ static float txOuterLevel(void)
 
 /*
  * sampStart()
- *   Starts a new burst of transmit samples with a fresh pulse shaping filter.
+ *
+ * Starts a new burst of transmit samples with a fresh pulse shaping filter.
+ *
+ * Parameters:
+ *   w - The sample writer to start.
+ *
+ * Returns: nothing.
  */
 static void sampStart(SampWriter* w)
 {
@@ -854,9 +960,16 @@ static void sampStart(SampWriter* w)
 
 /*
  * sampSend()
- *   Sends the packet being assembled to the modem host and waits when more
- *   than TX_AHEAD_MS of samples are already queued, so the modem host's
- *   buffer cannot overflow.
+ *
+ * Sends the packet being assembled to the modem host and waits when more
+ * than TX_AHEAD_MS of samples are already queued, so the modem host's buffer
+ * cannot overflow.
+ *
+ * Parameters:
+ *   w    - The sample writer holding the packet.
+ *   type - Four character packet type to send.
+ *
+ * Returns: nothing.
  */
 static void sampSend(SampWriter* w, const char* type)
 {
@@ -888,7 +1001,15 @@ static void sampSend(SampWriter* w, const char* type)
 
 /*
  * sampAdd()
- *   Appends samples to the packet being assembled.
+ *
+ * Appends samples to the packet being assembled.
+ *
+ * Parameters:
+ *   w       - The sample writer.
+ *   samples - The samples to append.
+ *   length  - Number of samples.
+ *
+ * Returns: nothing.
  */
 static void sampAdd(SampWriter* w, const int16_t* samples, unsigned int length)
 {
@@ -907,8 +1028,14 @@ static void sampAdd(SampWriter* w, const int16_t* samples, unsigned int length)
 
 /*
  * sampEnd()
- *   Flushes the filter, sends the last partly filled packet and the end of
- *   transmission packet.
+ *
+ * Flushes the filter, sends the last partly filled packet and the end of
+ * transmission packet.
+ *
+ * Parameters:
+ *   w - The sample writer to finish.
+ *
+ * Returns: nothing.
  */
 static void sampEnd(SampWriter* w)
 {
@@ -934,7 +1061,13 @@ typedef struct
 
 /*
  * bitStart()
- *   Starts a new burst of transmit bits.
+ *
+ * Starts a new burst of transmit bits.
+ *
+ * Parameters:
+ *   w - The bit writer to start.
+ *
+ * Returns: nothing.
  */
 static void bitStart(BitWriter* w)
 {
@@ -946,8 +1079,14 @@ static void bitStart(BitWriter* w)
 
 /*
  * bitSend()
- *   Sends the BITS packet being assembled (unused bytes are zero) and waits when
- *   more than TX_AHEAD_MS of bits are already queued.
+ *
+ * Sends the BITS packet being assembled (unused bytes are zero) and waits
+ * when more than TX_AHEAD_MS of bits are already queued.
+ *
+ * Parameters:
+ *   w - The bit writer holding the packet.
+ *
+ * Returns: nothing.
  */
 static void bitSend(BitWriter* w)
 {
@@ -977,7 +1116,15 @@ static void bitSend(BitWriter* w)
 
 /*
  * bitAdd()
- *   Appends bytes of the bit stream, most significant bit first.
+ *
+ * Appends bytes of the bit stream, most significant bit first.
+ *
+ * Parameters:
+ *   w      - The bit writer.
+ *   data   - The bytes to append.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
  */
 static void bitAdd(BitWriter* w, const uint8_t* data, unsigned int length)
 {
@@ -993,8 +1140,14 @@ static void bitAdd(BitWriter* w, const uint8_t* data, unsigned int length)
 
 /*
  * bitEnd()
- *   Sends the last partly filled packet; its unused bytes are zero, as in the
- *   other OpenMT hosts' end of transmission.
+ *
+ * Sends the last partly filled packet; its unused bytes are zero, as in the
+ * other OpenMT hosts' end of transmission.
+ *
+ * Parameters:
+ *   w - The bit writer to finish.
+ *
+ * Returns: nothing.
  */
 static void bitEnd(BitWriter* w)
 {
@@ -1006,10 +1159,17 @@ static void bitEnd(BitWriter* w)
 
 /*
  * txThread()
- *   Takes the frames queued by the control logic and sends them to the modem
- *   host: modulated as samples for the SAMP modem, as bits for an
- *   OpenMT_HS modem, as frames for an MMDVM modem. A transmission starts with a preamble, ends with the frame marked
- *   end of transmission, or after TX_UNDERRUN_MS without a frame.
+ *
+ * Takes the frames queued by the control logic and sends them to the modem
+ * host: modulated as samples for the SAMP modem, as bits for an OpenMT_HS
+ * modem, as frames for an MMDVM modem. A transmission starts with a
+ * preamble, ends with the frame marked end of transmission, or after
+ * TX_UNDERRUN_MS without a frame.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 static void* txThread(void* arg)
 {
@@ -1221,9 +1381,16 @@ static void* txThread(void* arg)
 /* ------------------------------------------------------------------------ */
 
 /*
- * gwQueueCommand()
- *   Queues a small control packet (connect, disconnect, update configuration)
- *   for the gateway.
+ * gwQueue()
+ *
+ * Queues a small control packet (connect, disconnect, update configuration)
+ * for the gateway.
+ *
+ * Parameters:
+ *   data   - The packet to queue.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
  */
 static void gwQueue(const uint8_t* data, unsigned int length)
 {
@@ -1246,9 +1413,16 @@ static void gwQueue(const uint8_t* data, unsigned int length)
 
 /*
  * gwHandle()
- *   Handles one packet from the gateway: reflector replies update the link
- *   status on the dashboard, commands are acknowledged and YSF messages
- *   from the network go to the control logic.
+ *
+ * Handles one packet from the gateway: reflector replies update the link
+ * status on the dashboard, commands are acknowledged and YSF messages from
+ * the network go to the control logic.
+ *
+ * Parameters:
+ *   buffer  - The packet from the gateway.
+ *   respLen - Length of the packet, in bytes.
+ *
+ * Returns: nothing.
  */
 static void gwHandle(const uint8_t* buffer, uint16_t respLen)
 {
@@ -1304,9 +1478,15 @@ static void gwHandle(const uint8_t* buffer, uint16_t respLen)
 
 /*
  * gatewayThread()
- *   Serves the connected YSF gateway: sends what the control logic and the
- *   dashboard queued for it and reads what it sends. Registers the gateway
- *   with the dashboard while it is connected.
+ *
+ * Serves the connected YSF gateway: sends what the control logic and the
+ * dashboard queued for it and reads what it sends. Registers the gateway
+ * with the dashboard while it is connected.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 static void* gatewayThread(void* arg)
 {
@@ -1385,7 +1565,7 @@ static void* gatewayThread(void* arg)
 
             if (!writeAll(fd, pkt, len))
             {
-                fprintf(stderr, "YSF: gateway write failed.\n");
+                reportError(modemName, "YSF", "YSF: gateway write failed.");
                 r = -1;
                 break;
             }
@@ -1413,8 +1593,14 @@ static void* gatewayThread(void* arg)
 
 /*
  * serverThread()
- *   Listens for the YSF gateway on the server port. A new connection
- *   replaces an earlier one.
+ *
+ * Listens for the YSF gateway on the server port. A new connection replaces
+ * an earlier one.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 static void* serverThread(void* arg)
 {
@@ -1427,7 +1613,7 @@ static void* serverThread(void* arg)
 
     if (lfd < 0)
     {
-        fprintf(stderr, "YSF: error creating the gateway socket: %s\n", strerror(errno));
+        reportError(modemName, "YSF", "YSF: error creating the gateway socket: %s", strerror(errno));
         exit(1);
     }
 
@@ -1440,13 +1626,13 @@ static void* serverThread(void* arg)
 
     if (bind(lfd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
     {
-        fprintf(stderr, "YSF: error binding port %u: %s\n", serverPort, strerror(errno));
+        reportError(modemName, "YSF", "YSF: error binding port %u: %s", serverPort, strerror(errno));
         exit(1);
     }
 
     if (listen(lfd, 4) < 0)
     {
-        perror("listen");
+        reportError(modemName, "YSF", "listen: %s", strerror(errno));
         exit(1);
     }
 
@@ -1458,7 +1644,7 @@ static void* serverThread(void* arg)
         {
             if (errno == EINTR)
                 continue;
-            perror("accept");
+            reportError(modemName, "YSF", "accept: %s", strerror(errno));
             break;
         }
 
@@ -1469,7 +1655,7 @@ static void* serverThread(void* arg)
 
         if (pthread_create(&id, NULL, gatewayThread, (void*)(intptr_t)cfd) != 0)
         {
-            fprintf(stderr, "YSF: can't create gateway thread\n");
+            reportError(modemName, "YSF", "YSF: can't create gateway thread");
             close(cfd);
             continue;
         }
@@ -1488,8 +1674,13 @@ static void* serverThread(void* arg)
 
 /*
  * registerMode()
- *   Sends the MODE packet that registers this host with the modem host. The
- *   radio settings of the packet are not used with a SAMP or MMDVM modem.
+ *
+ * Sends the MODE packet that registers this host with the modem host. The
+ * radio settings of the packet are not used with a SAMP or MMDVM modem.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void registerMode(void)
 {
@@ -1554,8 +1745,15 @@ static void registerMode(void)
 
 /*
  * rxSamples()
- *   Applies the receive level to a packet of demodulated samples and feeds
- *   them to the receiver.
+ *
+ * Applies the receive level to a packet of demodulated samples and feeds
+ * them to the receiver.
+ *
+ * Parameters:
+ *   data   - The packet of demodulated samples.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
  */
 static void rxSamples(const uint8_t* data, unsigned int length)
 {
@@ -1586,9 +1784,15 @@ static void rxSamples(const uint8_t* data, unsigned int length)
 
 /*
  * clientThread()
- *   Thread that reads the modem host connection. Demodulated samples go to the
- *   receiver, frames from the MMDVM firmware go to the control logic and
- *   command packets update the duplex flag.
+ *
+ * Thread that reads the modem host connection. Demodulated samples go to the
+ * receiver, frames from the MMDVM firmware go to the control logic and
+ * command packets update the duplex flag.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 static void* clientThread(void* arg)
 {
@@ -1671,9 +1875,15 @@ static void* clientThread(void* arg)
 
 /*
  * timerThread()
- *   Runs the control timers every 10 ms, releases the modem once the mode
- *   hang time has passed without activity and prints receiver statistics when
- *   debugging.
+ *
+ * Runs the control timers every 10 ms, releases the modem once the mode hang
+ * time has passed without activity and prints receiver statistics when
+ * debugging.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 static void* timerThread(void* arg)
 {
@@ -1716,7 +1926,12 @@ static void* timerThread(void* arg)
 
 /*
  * connectModemHost()
- *   Connects to the modem host and registers the YSF mode.
+ *
+ * Connects to the modem host and registers the YSF mode.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if connected and registered, false on failure.
  */
 static bool connectModemHost(void)
 {
@@ -1726,7 +1941,7 @@ static bool connectModemHost(void)
 
     if (sockfd < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "YSF", "Socket creation error: %s", strerror(errno));
         return false;
     }
 
@@ -1738,15 +1953,15 @@ static bool connectModemHost(void)
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port   = htons(clientPort);
 
-    if (inet_pton(AF_INET, modemHost, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(modemHost, &serv_addr.sin_addr))
     {
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "YSF", "Invalid address/ Address not supported");
         return false;
     }
 
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
     {
-        perror("connection failed");
+        reportError(modemName, "YSF", "connection failed: %s", strerror(errno));
         return false;
     }
 
@@ -1757,9 +1972,14 @@ static bool connectModemHost(void)
 
 /*
  * pollDashboard()
- *   Checks the dashboard for configuration and reflector link commands.
- *   Commands go to the gateway when one is connected, otherwise they are
- *   answered at once.
+ *
+ * Checks the dashboard for configuration and reflector link commands.
+ * Commands go to the gateway when one is connected, otherwise they are
+ * answered at once.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void pollDashboard(void)
 {
@@ -1852,17 +2072,24 @@ static void pollDashboard(void)
 
 /*
  * main()
- *   Program entry. Parses the command line (-m modem number 1-10, which also
- *   selects the TCP ports, -d daemon, -v version, -x debug), reads the
- *   configuration, connects to the modem host and runs until the connection
- *   is lost.
+ *
+ * Program entry. Parses the command line (-m modem number 1-10, which also
+ * selects the TCP ports, -d daemon, -v version, -x debug), reads the
+ * configuration, connects to the modem host and runs until the connection is
+ * lost.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on normal exit, non-zero on a startup error.
  */
 int main(int argc, char** argv)
 {
     bool daemonize = false;
     int  c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1870,7 +2097,7 @@ int main(int argc, char** argv)
                 modemId = (uint8_t)atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "YSF", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -1878,8 +2105,11 @@ int main(int argc, char** argv)
                 serverPort = 18500 + modemId - 1;
                 fprintf(stderr, "Modem name: %s\n", modemName);
                 break;
+            case 'a':
+                snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemonize = true;
@@ -1891,7 +2121,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: YSF_Service [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: YSF_Service [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1902,7 +2132,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "YSF_Service: error in fork(), exiting\n");
+            reportError(modemName, "YSF", "YSF_Service: error in fork(), exiting");
             return 1;
         }
 
@@ -1957,7 +2187,7 @@ int main(int argc, char** argv)
         pthread_create(&id, NULL, timerThread, NULL) != 0 ||
         pthread_create(&id, NULL, clientThread, NULL) != 0)
     {
-        fprintf(stderr, "YSF_Service: can't create threads\n");
+        reportError(modemName, "YSF", "YSF_Service: can't create threads");
         return 1;
     }
 

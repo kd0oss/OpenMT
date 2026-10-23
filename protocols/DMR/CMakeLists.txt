@@ -46,7 +46,7 @@ target_sources(dmr_host PRIVATE
     ../../tools/string_builder.c
     ../../tools/RingBuffer.c
     ../../tools/tools.c
-    ../../tools/dsp_tools.c
+    ../../tools/fec_tools.c
     ../../tools/ADF7021.c
 )
 

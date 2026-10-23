@@ -29,7 +29,7 @@
 #include <assert.h>
 
 #include "p25_func.h"
-#include <dsp_tools.h>
+#include <fec_tools.h>
 #include "p25_fec.h"
 
 uint8_t p25duid;
@@ -39,6 +39,8 @@ uint8_t p25hdr[P25_NID_LENGTH_BYTES]    = {0};
 uint8_t p25ldu1[P25_NID_LENGTH_BYTES]   = {0};
 uint8_t p25ldu2[P25_NID_LENGTH_BYTES]   = {0};
 uint8_t p25termlc[P25_NID_LENGTH_BYTES] = {0};
+uint8_t p25tsdu[P25_NID_LENGTH_BYTES]   = {0};
+uint8_t p25pdu[P25_NID_LENGTH_BYTES]    = {0};
 uint8_t p25term[P25_NID_LENGTH_BYTES]   = {0};
 uint8_t p25mi[P25_MI_LENGTH_BYTES]      = {0};
 uint8_t p25mfId;
@@ -51,6 +53,17 @@ unsigned int p25srcId;
 unsigned int p25dstId;
 unsigned int p25nac;
 
+/*
+ * p25Reset()
+ *
+ * Resets the stored P25 link control to its defaults: no message indicator,
+ * unencrypted, key id 0, group call, manufacturer id 0, source and
+ * destination ids 0, no emergency.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void p25Reset()
 {
     memset(p25mi, 0x00U, P25_MI_LENGTH_BYTES);
@@ -64,6 +77,16 @@ void p25Reset()
     p25emergency = false;
 }
 
+/*
+ * addSync()
+ *
+ * Writes the P25 frame sync pattern at the start of a frame.
+ *
+ * Parameters:
+ *   data - The frame buffer; the sync is written at its start.
+ *
+ * Returns: nothing.
+ */
 void addSync(uint8_t* data)
 {
     assert(data != NULL);
@@ -71,6 +94,19 @@ void addSync(uint8_t* data)
     memcpy(data, P25_SYNC_BYTES, P25_SYNC_LENGTH_BYTES);
 }
 
+/*
+ * setBusyBits()
+ *
+ * Sets the two status symbol (busy) bits at one position of a frame.
+ *
+ * Parameters:
+ *   data     - The frame buffer.
+ *   ssOffset - Bit position of the first status symbol bit.
+ *   b1       - Value of the first bit.
+ *   b2       - Value of the second bit.
+ *
+ * Returns: nothing.
+ */
 void setBusyBits(uint8_t* data, unsigned int ssOffset, bool b1, bool b2)
 {
     assert(data != NULL);
@@ -79,6 +115,20 @@ void setBusyBits(uint8_t* data, unsigned int ssOffset, bool b1, bool b2)
     WRITE_BIT(data, ssOffset + 1U, b2);
 }
 
+/*
+ * addBusyBits()
+ *
+ * Sets the status symbol (busy) bits at every status symbol position of a
+ * frame.
+ *
+ * Parameters:
+ *   data   - The frame buffer.
+ *   length - Length of the frame in bits.
+ *   b1     - Value for the first bit of each status symbol.
+ *   b2     - Value for the second bit of each status symbol.
+ *
+ * Returns: nothing.
+ */
 void addBusyBits(uint8_t* data, unsigned int length, bool b1, bool b2)
 {
     assert(data != NULL);
@@ -92,6 +142,20 @@ void addBusyBits(uint8_t* data, unsigned int length, bool b1, bool b2)
     }
 }
 
+/*
+ * decode()
+ *
+ * Copies a range of bits out of a frame, leaving out the status symbol bits
+ * that P25 inserts at regular positions.
+ *
+ * Parameters:
+ *   in    - The frame.
+ *   out   - Receives the bits without the status symbols.
+ *   start - Bit position where the range starts.
+ *   stop  - Bit position where the range ends (not included).
+ *
+ * Returns: nothing.
+ */
 void decode(const uint8_t* in, uint8_t* out, unsigned int start, unsigned int stop)
 {
     assert(in != NULL);
@@ -127,6 +191,20 @@ void decode(const uint8_t* in, uint8_t* out, unsigned int start, unsigned int st
     }
 }
 
+/*
+ * encode()
+ *
+ * The reverse of decode(): copies bits into a range of a frame, skipping the
+ * positions of the status symbol bits.
+ *
+ * Parameters:
+ *   in    - The bits to place in the frame.
+ *   out   - The frame, changed in place.
+ *   start - Bit position where the range starts.
+ *   stop  - Bit position where the range ends (not included).
+ *
+ * Returns: nothing.
+ */
 void encode(const uint8_t* in, uint8_t* out, unsigned int start, unsigned int stop)
 {
     assert(in != NULL);
@@ -162,6 +240,18 @@ void encode(const uint8_t* in, uint8_t* out, unsigned int start, unsigned int st
     }
 }
 
+/*
+ * compare()
+ *
+ * Counts the bits that differ between two blocks of data.
+ *
+ * Parameters:
+ *   data1  - First block.
+ *   data2  - Second block.
+ *   length - Number of bytes to compare.
+ *
+ * Returns: Number of differing bits.
+ */
 unsigned int compare(const uint8_t* data1, const uint8_t* data2, unsigned int length)
 {
     assert(data1 != NULL);
@@ -181,11 +271,35 @@ unsigned int compare(const uint8_t* data1, const uint8_t* data2, unsigned int le
     return errs;
 }
 
+/*
+ * lowSpeedData_encode()
+ *
+ * Gets the check byte for a low speed data byte, from the CCS parity table.
+ *
+ * Parameters:
+ *   in - The low speed data byte.
+ *
+ * Returns: The check byte.
+ */
 uint8_t lowSpeedData_encode(uint8_t in)
 {
     return CCS_PARITY[in];
 }
 
+/*
+ * lowSpeedData_process()
+ *
+ * Reads the low speed data of an LDU, corrects it and writes it back.  The
+ * two data bytes are decoded from the frame, each with its check byte is
+ * matched against all possible values to correct small errors, the data is
+ * stored as LSD1 and LSD2, and the corrected bytes are put back in the
+ * frame.
+ *
+ * Parameters:
+ *   data - The LDU frame, changed in place.
+ *
+ * Returns: nothing.
+ */
 void lowSpeedData_process(uint8_t* data)
 {
     assert(data != NULL);
@@ -229,6 +343,17 @@ void lowSpeedData_process(uint8_t* data)
     encode(lsd, data, 1546U, 1578U);
 }
 
+/*
+ * lowSpeedData_encode1()
+ *
+ * Writes the stored LSD1 and LSD2 bytes, with their check bytes, into the
+ * low speed data position of an LDU.
+ *
+ * Parameters:
+ *   data - The LDU frame, changed in place.
+ *
+ * Returns: nothing.
+ */
 void lowSpeedData_encode1(uint8_t* data)
 {
     assert(data != NULL);
@@ -242,26 +367,78 @@ void lowSpeedData_encode1(uint8_t* data)
     encode(lsd, data, 1546U, 1578U);
 }
 
+/*
+ * lowSpeedData_getLSD1()
+ *
+ * Gets the first low speed data byte.
+ *
+ * Parameters: none.
+ *
+ * Returns: The LSD1 byte.
+ */
 uint8_t lowSpeedData_getLSD1()
 {
     return p25lsd1;
 }
 
+/*
+ * lowSpeedData_setLSD1()
+ *
+ * Sets the first low speed data byte.
+ *
+ * Parameters:
+ *   lsd1 - New LSD1 byte.
+ *
+ * Returns: nothing.
+ */
 void lowSpeedData_setLSD1(uint8_t lsd1)
 {
     p25lsd1 = lsd1;
 }
 
+/*
+ * lowSpeedData_getLSD2()
+ *
+ * Gets the second low speed data byte.
+ *
+ * Parameters: none.
+ *
+ * Returns: The LSD2 byte.
+ */
 uint8_t lowSpeedData_getLSD2()
 {
     return p25lsd2;
 }
 
+/*
+ * lowSpeedData_setLSD2()
+ *
+ * Sets the second low speed data byte.
+ *
+ * Parameters:
+ *   lsd2 - New LSD2 byte.
+ *
+ * Returns: nothing.
+ */
 void lowSpeedData_setLSD2(uint8_t lsd2)
 {
     p25lsd2 = lsd2;
 }
 
+/*
+ * resetNID()
+ *
+ * Builds the network ids (NIDs) for a network access code: one each for the
+ * header, LDU1, LDU2, terminator with link control, terminator, TSDU and
+ * PDU, each with
+ * its BCH check and parity bit.  They are used to recognise and to write the
+ * NID of a frame.
+ *
+ * Parameters:
+ *   nac - The network access code.
+ *
+ * Returns: nothing.
+ */
 void resetNID(unsigned int nac)
 {
     p25nac  = nac;
@@ -296,8 +473,33 @@ void resetNID(unsigned int nac)
     p25term[1U] |= P25_DUID_TERM;
     bch_encode1(p25term);
     p25term[7U] &= 0xFEU;  /*  Clear the parity bit */
+
+    p25tsdu[0U] = (nac >> 4) & 0xFFU;
+    p25tsdu[1U] = (nac << 4) & 0xF0U;
+    p25tsdu[1U] |= P25_DUID_TSDU;
+    bch_encode1(p25tsdu);
+    p25tsdu[7U] &= 0xFEU;  /*  Clear the parity bit */
+
+    p25pdu[0U] = (nac >> 4) & 0xFFU;
+    p25pdu[1U] = (nac << 4) & 0xF0U;
+    p25pdu[1U] |= P25_DUID_PDU;
+    bch_encode1(p25pdu);
+    p25pdu[7U] &= 0xFEU;  /*  Clear the parity bit */
 }
 
+/*
+ * decodeNID()
+ *
+ * Decodes the NID of a frame.  The NID is taken from the frame and compared
+ * with each of the NIDs made by resetNID(); a match with fewer than
+ * MAX_NID_ERRS bit errors sets the data unit id.
+ *
+ * Parameters:
+ *   data - The frame.
+ *
+ * Returns: true if the NID matched one of the known data units, false if
+ *   not.
+ */
 bool decodeNID(const uint8_t* data)
 {
     assert(data != NULL);
@@ -340,9 +542,36 @@ bool decodeNID(const uint8_t* data)
         return true;
     }
 
+    errs = compare(nid, p25tsdu, P25_NID_LENGTH_BYTES);
+    if (errs < MAX_NID_ERRS)
+    {
+        p25duid = P25_DUID_TSDU;
+        return true;
+    }
+
+    errs = compare(nid, p25pdu, P25_NID_LENGTH_BYTES);
+    if (errs < MAX_NID_ERRS)
+    {
+        p25duid = P25_DUID_PDU;
+        return true;
+    }
+
     return false;
 }
 
+/*
+ * encodeNID()
+ *
+ * Writes the NID of a data unit into a frame.  Header, LDU1, LDU2,
+ * terminator, terminator with link control, TSDU and PDU are supported; for
+ * any other value nothing is written.
+ *
+ * Parameters:
+ *   data - The frame, changed in place.
+ *   duid - Data unit id to write.
+ *
+ * Returns: nothing.
+ */
 void encodeNID(uint8_t* data, uint8_t duid)
 {
     assert(data != NULL);
@@ -364,16 +593,43 @@ void encodeNID(uint8_t* data, uint8_t duid)
         case P25_DUID_TERM_LC:
             encode(p25termlc, data, 48U, 114U);
             break;
+        case P25_DUID_TSDU:
+            encode(p25tsdu, data, 48U, 114U);
+            break;
+        case P25_DUID_PDU:
+            encode(p25pdu, data, 48U, 114U);
+            break;
         default:
             break;
     }
 }
 
+/*
+ * getDUID()
+ *
+ * Gets the data unit id found by the last decodeNID().
+ *
+ * Parameters: none.
+ *
+ * Returns: The data unit id.
+ */
 uint8_t getDUID()
 {
     return p25duid;
 }
 
+/*
+ * decodeLDUHamming()
+ *
+ * Decodes four Hamming (10,6,3) blocks from the link control data of an LDU
+ * into 24 bits.
+ *
+ * Parameters:
+ *   data - The coded bits (40 bits).
+ *   raw  - Receives the decoded bits.
+ *
+ * Returns: nothing.
+ */
 void decodeLDUHamming(const uint8_t* data, uint8_t* raw)
 {
     unsigned int n = 0U;
@@ -398,11 +654,30 @@ void decodeLDUHamming(const uint8_t* data, uint8_t* raw)
     }
 }
 
+/*
+ * getNAC()
+ *
+ * Gets the network access code.
+ *
+ * Parameters: none.
+ *
+ * Returns: The NAC.
+ */
 unsigned int getNAC()
 {
     return p25nac;
 }
 
+/*
+ * getMI()
+ *
+ * Gets the message indicator.
+ *
+ * Parameters:
+ *   mi - Receives the message indicator bytes.
+ *
+ * Returns: nothing.
+ */
 void getMI(uint8_t* mi)
 {
     assert(mi != NULL);
@@ -410,26 +685,72 @@ void getMI(uint8_t* mi)
     memcpy(mi, p25mi, P25_MI_LENGTH_BYTES);
 }
 
+/*
+ * getMFId()
+ *
+ * Gets the manufacturer id.
+ *
+ * Parameters: none.
+ *
+ * Returns: The manufacturer id.
+ */
 uint8_t getMFId()
 {
     return p25mfId;
 }
 
+/*
+ * getAlgId()
+ *
+ * Gets the encryption algorithm id.
+ *
+ * Parameters: none.
+ *
+ * Returns: The algorithm id.
+ */
 uint8_t getAlgId()
 {
     return p25algId;
 }
 
+/*
+ * getKId()
+ *
+ * Gets the encryption key id.
+ *
+ * Parameters: none.
+ *
+ * Returns: The key id.
+ */
 unsigned int getKId()
 {
     return p25kId;
 }
 
+/*
+ * getSrcId()
+ *
+ * Gets the source id.
+ *
+ * Parameters: none.
+ *
+ * Returns: The source id.
+ */
 unsigned int getSrcId()
 {
     return p25srcId;
 }
 
+/*
+ * setMI()
+ *
+ * Sets the message indicator.
+ *
+ * Parameters:
+ *   mi - The message indicator bytes.
+ *
+ * Returns: nothing.
+ */
 void setMI(const uint8_t* mi)
 {
     assert(mi != NULL);
@@ -437,56 +758,171 @@ void setMI(const uint8_t* mi)
     memcpy(p25mi, mi, P25_MI_LENGTH_BYTES);
 }
 
+/*
+ * setMFId()
+ *
+ * Sets the manufacturer id.
+ *
+ * Parameters:
+ *   id - New manufacturer id.
+ *
+ * Returns: nothing.
+ */
 void setMFId(uint8_t id)
 {
     p25mfId = id;
 }
 
+/*
+ * setAlgId()
+ *
+ * Sets the encryption algorithm id.
+ *
+ * Parameters:
+ *   id - New algorithm id.
+ *
+ * Returns: nothing.
+ */
 void setAlgId(uint8_t id)
 {
     p25algId = id;
 }
 
+/*
+ * setKId()
+ *
+ * Sets the encryption key id.
+ *
+ * Parameters:
+ *   id - New key id.
+ *
+ * Returns: nothing.
+ */
 void setKId(unsigned int id)
 {
     p25kId = id;
 }
 
+/*
+ * setSrcId()
+ *
+ * Sets the source id.
+ *
+ * Parameters:
+ *   id - New source id.
+ *
+ * Returns: nothing.
+ */
 void setSrcId(unsigned int id)
 {
     p25srcId = id;
 }
 
+/*
+ * setEmergency()
+ *
+ * Sets the emergency flag.
+ *
+ * Parameters:
+ *   on - New value of the flag.
+ *
+ * Returns: nothing.
+ */
 void setEmergency(bool on)
 {
     p25emergency = on;
 }
 
+/*
+ * setLCF()
+ *
+ * Sets the link control format.
+ *
+ * Parameters:
+ *   lcf - New link control format.
+ *
+ * Returns: nothing.
+ */
 void setLCF(uint8_t lcf)
 {
     p25lcf = lcf;
 }
 
+/*
+ * setDstId()
+ *
+ * Sets the destination id.
+ *
+ * Parameters:
+ *   id - New destination id.
+ *
+ * Returns: nothing.
+ */
 void setDstId(unsigned int id)
 {
     p25dstId = id;
 }
 
+/*
+ * getEmergency()
+ *
+ * Gets the emergency flag.
+ *
+ * Parameters: none.
+ *
+ * Returns: The emergency flag.
+ */
 bool getEmergency()
 {
     return p25emergency;
 }
 
+/*
+ * getLCF()
+ *
+ * Gets the link control format.
+ *
+ * Parameters: none.
+ *
+ * Returns: The link control format.
+ */
 uint8_t getLCF()
 {
     return p25lcf;
 }
 
+/*
+ * getDstId()
+ *
+ * Gets the destination id.
+ *
+ * Parameters: none.
+ *
+ * Returns: The destination id.
+ */
 unsigned int getDstId()
 {
     return p25dstId;
 }
 
+/*
+ * decodeLDU1()
+ *
+ * Decodes the link control of an LDU1.  The six Hamming protected blocks are
+ * read, the Reed-Solomon (24,12,13) check is made, and the source id is
+ * checked not to be zero (the Reed-Solomon check already guards against
+ * damage, so any other P25 radio id is accepted).  For a group or private
+ * call the
+ * destination id, source id, emergency flag, link control format and
+ * manufacturer id are stored.
+ *
+ * Parameters:
+ *   data - The LDU1 frame.
+ *
+ * Returns: true if the link control was decoded and valid, false if the
+ *   check failed, the source id was zero or the format is not group or
+ *   private.
+ */
 bool decodeLDU1(const uint8_t* data)
 {
     assert(data != NULL);
@@ -515,9 +951,9 @@ bool decodeLDU1(const uint8_t* data)
     bool ret = rs241213_decode(rs);
     if (!ret) return false;
 
-    /*  Simple validation of the source id */
+    /*  Simple validation of the source id: zero is not a radio id */
     unsigned int srcId = (rs[6U] << 16) + (rs[7U] << 8) + rs[8U];
-    if (srcId < 1000000U) return false;
+    if (srcId == 0U) return false;
 
     switch (rs[0U])
     {
@@ -543,6 +979,20 @@ bool decodeLDU1(const uint8_t* data)
     return true;
 }
 
+/*
+ * decodeLDU2()
+ *
+ * Reads the link control of an LDU2: the six Hamming protected blocks are
+ * decoded and the Reed-Solomon (24,16,9) check is made.  If it passes, the
+ * message indicator, algorithm id and key id are stored.  Nothing is stored
+ * if it fails.
+ *
+ * Parameters:
+ *   data - The LDU2 frame.
+ *
+ * Returns: true if the link control was decoded and valid, false if the
+ *   Reed-Solomon check failed.
+ */
 bool decodeLDU2(const uint8_t* data)
 {
     assert(data != NULL);
@@ -565,9 +1015,94 @@ bool decodeLDU2(const uint8_t* data)
     decode(data, raw, 1168U, 1208U);
     decodeLDUHamming(raw, rs + 12U);
 
+    decode(data, raw, 1356U, 1398U);
+    decodeLDUHamming(raw, rs + 15U);
+
+    if (!decode24169(rs))
+        return false;
+
+    for (unsigned int i = 0U; i < P25_MI_LENGTH_BYTES; i++)
+        p25mi[i] = rs[i];
+
+    p25algId = rs[9U];
+    p25kId   = (rs[10U] << 8) | rs[11U];
+
     return true;
 }
 
+/*
+ * decodeHeader()
+ *
+ * Reads the header data unit: the frame is de-interleaved, the 36 shortened
+ * Golay (18,6,8) words are decoded and the Reed-Solomon (36,20,17) check is
+ * made.  If it passes, the message indicator, manufacturer id, algorithm id,
+ * key id and destination id are stored.  Nothing is stored if it fails.
+ *
+ * Parameters:
+ *   data - The header frame.
+ *
+ * Returns: true if the header was decoded and valid, false if a Golay word
+ *   or the Reed-Solomon check failed.
+ */
+bool decodeHeader(const uint8_t* data)
+{
+    assert(data != NULL);
+
+    uint8_t raw[81U];
+    memset(raw, 0x00U, 81U);
+    decode(data, raw, 114U, 780U);
+
+    uint8_t rs[81U];
+    memset(rs, 0x00U, 81U);
+
+    /*  shortened Golay (18,6,8) decode: the 18 bits are the low bits of a
+     *  (24,12,8) code word whose data has six leading zeros */
+    unsigned int n = 0U;
+    unsigned int m = 0U;
+
+    for (unsigned int i = 0U; i < 36U; i++)
+    {
+        unsigned int word = 0U;
+
+        for (unsigned int j = 0U; j < 18U; j++, n++)
+            word = (word << 1) | (READ_BIT(raw, n) ? 0x01U : 0x00U);
+
+        unsigned int value = 0U;
+        unsigned int errs  = golay24128_errors24128(word, &value);
+
+        if (errs > 3U || (value & 0xFC0U) != 0U)
+            return false;
+
+        for (int j = 5; j >= 0; j--, m++)
+            WRITE_BIT(rs, m, ((value >> j) & 0x01U) == 0x01U);
+    }
+
+    if (!decode362017(rs))
+        return false;
+
+    for (unsigned int i = 0U; i < P25_MI_LENGTH_BYTES; i++)
+        p25mi[i] = rs[i];
+
+    p25mfId  = rs[9U];
+    p25algId = rs[10U];
+    p25kId   = (rs[11U] << 8) | rs[12U];
+    p25dstId = (rs[13U] << 8) | rs[14U];
+
+    return true;
+}
+
+/*
+ * encodeLDUHamming()
+ *
+ * Encodes 24 bits as four Hamming (10,6,3) blocks, for the link control data
+ * of an LDU.
+ *
+ * Parameters:
+ *   data - Receives the coded bits (40 bits).
+ *   raw  - The 24 bits to encode.
+ *
+ * Returns: nothing.
+ */
 void encodeLDUHamming(uint8_t* data, const uint8_t* raw)
 {
     unsigned int n = 0U;
@@ -592,6 +1127,19 @@ void encodeLDUHamming(uint8_t* data, const uint8_t* raw)
     }
 }
 
+/*
+ * encodeLDU1()
+ *
+ * Writes the link control of an LDU1 from the stored values (format,
+ * manufacturer id, emergency flag, destination and source ids) into a frame,
+ * with Reed-Solomon (24,12,13) and Hamming protection.  An unknown link
+ * control format is reported.
+ *
+ * Parameters:
+ *   data - The LDU1 frame, changed in place.
+ *
+ * Returns: nothing.
+ */
 void encodeLDU1(uint8_t* data)
 {
     assert(data != NULL);
@@ -648,6 +1196,18 @@ void encodeLDU1(uint8_t* data)
     encode(raw, data, 1356U, 1398U);
 }
 
+/*
+ * encodeLDU2()
+ *
+ * Writes the link control of an LDU2 from the stored message indicator,
+ * algorithm id and key id into a frame, with Reed-Solomon (24,16,9) and
+ * Hamming protection.
+ *
+ * Parameters:
+ *   data - The LDU2 frame, changed in place.
+ *
+ * Returns: nothing.
+ */
 void encodeLDU2(uint8_t* data)
 {
     assert(data != NULL);
@@ -686,6 +1246,105 @@ void encodeLDU2(uint8_t* data)
     encode(raw, data, 1356U, 1398U);
 }
 
+/*
+ * decodeTDULC()
+ *
+ * Decodes the link control of a terminator with link control (TDULC).  The
+ * 288 bits after the NID are twelve extended Golay (24,12) words; together
+ * they carry the 24 six bit symbols of a Reed-Solomon (24,12,13) code word.
+ * Both are corrected.  The link control bytes are returned as they are, so
+ * any link control format can be carried on.
+ *
+ * Parameters:
+ *   data - The TDULC frame.
+ *   lc   - Receives the 9 corrected link control bytes (72 bits).
+ *
+ * Returns: true if the Reed-Solomon check passed, false if the link control
+ *   could not be corrected.
+ */
+bool decodeTDULC(const uint8_t* data, uint8_t* lc)
+{
+    assert(data != NULL);
+    assert(lc != NULL);
+
+    uint8_t raw[36U];
+    uint8_t rs[18U];
+
+    decode(data, raw, 114U, 410U);
+
+    for (unsigned int k = 0U; k < 6U; k++)
+    {
+        unsigned int d0 = golay24128_decode24128(raw + 6U * k);
+        unsigned int d1 = golay24128_decode24128(raw + 6U * k + 3U);
+
+        rs[3U * k + 0U] = (uint8_t)(d0 >> 4);
+        rs[3U * k + 1U] = (uint8_t)(((d0 & 0x0FU) << 4) | (d1 >> 8));
+        rs[3U * k + 2U] = (uint8_t)(d1 & 0xFFU);
+    }
+
+    if (!rs241213_decode(rs))
+        return false;
+
+    memcpy(lc, rs, 9U);
+    return true;
+}
+
+/*
+ * encodeTDULC()
+ *
+ * Writes the link control of a terminator with link control into a frame:
+ * Reed-Solomon (24,12,13) parity is added to the 9 bytes and the 24 six bit
+ * symbols are carried in twelve extended Golay (24,12) words.
+ *
+ * Parameters:
+ *   data - The TDULC frame, changed in place (bits 114 to 409, leaving out
+ *          the status bits).
+ *   lc   - The 9 link control bytes (72 bits).
+ *
+ * Returns: nothing.
+ */
+void encodeTDULC(uint8_t* data, const uint8_t* lc)
+{
+    assert(data != NULL);
+    assert(lc != NULL);
+
+    uint8_t rs[18U];
+    uint8_t raw[36U];
+
+    memset(rs, 0x00U, sizeof(rs));
+    memcpy(rs, lc, 9U);
+    rs241213_encode(rs);
+
+    for (unsigned int k = 0U; k < 6U; k++)
+    {
+        unsigned int d0 = ((unsigned int)rs[3U * k] << 4) | (rs[3U * k + 1U] >> 4);
+        unsigned int d1 = ((unsigned int)(rs[3U * k + 1U] & 0x0FU) << 8) | rs[3U * k + 2U];
+        unsigned int g0 = golay24128_encode24128(d0);
+        unsigned int g1 = golay24128_encode24128(d1);
+
+        raw[6U * k + 0U] = (uint8_t)(g0 >> 16);
+        raw[6U * k + 1U] = (uint8_t)(g0 >> 8);
+        raw[6U * k + 2U] = (uint8_t)g0;
+        raw[6U * k + 3U] = (uint8_t)(g1 >> 16);
+        raw[6U * k + 4U] = (uint8_t)(g1 >> 8);
+        raw[6U * k + 5U] = (uint8_t)g1;
+    }
+
+    encode(raw, data, 114U, 410U);
+}
+
+/*
+ * encodeHeaderGolay()
+ *
+ * Encodes 36 six bit words as shortened Golay (18,6,8) blocks for the header
+ * data unit.
+ *
+ * Parameters:
+ *   data - Receives the coded bits (648 bits).
+ *   raw  - The 216 bits to encode.
+ *
+ * Returns: nothing.
+ */
 void encodeHeaderGolay(uint8_t* data, const uint8_t* raw)
 {
     /*  shortened Golay (18,6,8) encode */
@@ -720,6 +1379,19 @@ void encodeHeaderGolay(uint8_t* data, const uint8_t* raw)
     }
 }
 
+/*
+ * encodeHeader()
+ *
+ * Builds the header data unit from the stored message indicator,
+ * manufacturer id, algorithm id, key id and destination id, with Reed-
+ * Solomon (36,20,17) and Golay (18,6,8) protection, and writes it into the
+ * frame.
+ *
+ * Parameters:
+ *   data - The header frame, changed in place.
+ *
+ * Returns: nothing.
+ */
 void encodeHeader(uint8_t* data)
 {
     assert(data != NULL);
@@ -751,6 +1423,20 @@ void encodeHeader(uint8_t* data)
     encode(raw, data, 114U, 780U);
 }
 
+/*
+ * audip25encode()
+ *
+ * Encodes one IMBE voice frame into an LDU: the frame is protected with
+ * Golay and Hamming codes, whitened, interleaved and written at the position
+ * of voice frame n.
+ *
+ * Parameters:
+ *   data - The LDU frame, changed in place.
+ *   imbe - The IMBE voice frame.
+ *   n    - Number of the voice frame in the LDU, 0 to 8.
+ *
+ * Returns: nothing.
+ */
 void audip25encode(uint8_t* data, const uint8_t* imbe, unsigned int n)
 {
     assert(data != NULL);
@@ -893,6 +1579,18 @@ void audip25encode(uint8_t* data, const uint8_t* imbe, unsigned int n)
     }
 }
 
+/*
+ * audip25decode()
+ *
+ * Decodes one IMBE voice frame from an LDU: the reverse of audip25encode().
+ *
+ * Parameters:
+ *   data - The LDU frame.
+ *   imbe - Receives the IMBE voice frame.
+ *   n    - Number of the voice frame in the LDU, 0 to 8.
+ *
+ * Returns: nothing.
+ */
 void audip25decode(const uint8_t* data, uint8_t* imbe, unsigned int n)
 {
     assert(data != NULL);
@@ -1005,11 +1703,19 @@ void audip25decode(const uint8_t* data, uint8_t* imbe, unsigned int n)
 }
 
 /*
- * Check the nine IMBE voice frames of an LDU (data is the LDU as it comes off
- * the air, without the 8 byte packet prefix).  Returns the number of bit
- * errors the FEC found in the 1233 protected bits.  When "rewrite" is true
+ * p25RegenerateLDU()
+ *
+ * Checks the nine IMBE voice frames of an LDU.  Each frame is taken out of
+ * the LDU, de-interleaved and checked by the FEC.  When rewrite is true,
  * every frame with at most P25_FEC_MAX_ERRORS errors is replaced by its
- * re-encoded, corrected version; the rest are left as received.
+ * corrected, re-encoded version; the others are left as received.
+ *
+ * Parameters:
+ *   data    - The LDU as received, without the 8 byte packet prefix.
+ *   rewrite - true to write the corrected frames back.
+ *
+ * Returns: The number of bit errors found by the FEC in the 1233 protected
+ *   bits.
  */
 unsigned int p25RegenerateLDU(uint8_t* data, bool rewrite)
 {
@@ -1048,4 +1754,42 @@ unsigned int p25RegenerateLDU(uint8_t* data, bool rewrite)
     }
 
     return errors;
+}
+
+/*
+ * rebuildTrellis12()
+ *
+ * Decodes the first rate 1/2 trellis block of a frame (the TSBK of a TSDU,
+ * or the header of a PDU), checks its CRC-CCITT and, if it is good, encodes
+ * it again in place, as MMDVMHost does before it relays the frame.  The
+ * 12 bytes are not interpreted, so any trunking signalling or packet data
+ * header is carried on whatever its format.  A block that does not decode,
+ * or whose CRC fails, is left as it was.
+ *
+ * Parameters:
+ *   data - The frame (sync, NID and the block), changed in place.
+ *
+ * Returns: true if the block was valid and was encoded again.
+ */
+bool rebuildTrellis12(uint8_t* data)
+{
+    assert(data != NULL);
+
+    uint8_t raw[25U];
+    uint8_t block[12U];
+
+    memset(raw, 0x00U, sizeof(raw));
+    decode(data, raw, 114U, 318U);
+
+    if (!P25Trellis_decode12(raw, block))
+        return false;
+
+    if (!CRC_checkCCITT162(block, 12U))
+        return false;
+
+    memset(raw, 0x00U, sizeof(raw));
+    P25Trellis_encode12(block, raw);
+    encode(raw, data, 114U, 318U);
+
+    return true;
 }

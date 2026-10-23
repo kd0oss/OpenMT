@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -17,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <dsp_tools.h>
+#include <fec_tools.h>
 
 #include "ysf_gen.h"
 
@@ -27,12 +28,33 @@ static const uint8_t WHITE[] = {0x93U, 0xD7U, 0x51U, 0x21U, 0x9CU, 0x2FU, 0x6CU,
 
 static uint32_t g_seed = 1U;
 
+/*
+ * rnd()
+ *
+ * Makes a pseudo random number (a linear congruential generator, so the
+ * frames are the same every time).
+ *
+ * Parameters: none.
+ *
+ * Returns: A 24 bit number.
+ */
 static uint32_t rnd(void)
 {
     g_seed = g_seed * 1664525U + 1013904223U;
     return g_seed >> 8;
 }
 
+/*
+ * pad()
+ *
+ * Copies a callsign into a 10 byte field, padded with spaces.
+ *
+ * Parameters:
+ *   d - The field.
+ *   s - The callsign as a string.
+ *
+ * Returns: nothing.
+ */
 static void pad(uint8_t* d, const char* s)
 {
     size_t n = strlen(s);
@@ -41,6 +63,22 @@ static void pad(uint8_t* d, const char* s)
     memcpy(d, s, n > YSF_CALLSIGN_LENGTH ? YSF_CALLSIGN_LENGTH : n);
 }
 
+/*
+ * mkHeader()
+ *
+ * Makes a header or terminator frame (V/D mode 2 or data FR) with the
+ * callsigns in the first half of the header.
+ *
+ * Parameters:
+ *   f    - Receives the frame.
+ *   fi   - The frame information, YSF_FI_HEADER or YSF_FI_TERMINATOR.
+ *   dt   - The data type.
+ *   dgid - The digital group ID.
+ *   dest - The destination callsign.
+ *   src  - The source callsign.
+ *
+ * Returns: nothing.
+ */
 static void mkHeader(uint8_t* f, uint8_t fi, uint8_t dt, uint8_t dgid, const char* dest, const char* src)
 {
     uint8_t csd1[20], csd2[20];
@@ -62,7 +100,18 @@ static void mkHeader(uint8_t* f, uint8_t fi, uint8_t dt, uint8_t dgid, const cha
     ysfPayloadWriteHeader(f, csd1, csd2);
 }
 
-/* The short data channel of a V/D mode 2 frame: ten bytes, whitened, CRC, rate 1/2 code, interleaved */
+/*
+ * mkShort()
+ *
+ * The short data channel of a V/D mode 2 frame: ten bytes, whitened, CRC,
+ * rate 1/2 code, interleaved.
+ *
+ * Parameters:
+ *   frame - The frame that receives the channel.
+ *   ten   - The 10 bytes.
+ *
+ * Returns: nothing.
+ */
 static void mkShort(uint8_t* frame, const uint8_t* ten)
 {
     uint8_t out[13] = {0}, conv[25], bytes[25];
@@ -88,6 +137,24 @@ static void mkShort(uint8_t* frame, const uint8_t* ten)
         memcpy(frame + 30 + i * 18, bytes + i * 5, 5);
 }
 
+/*
+ * mkVd2()
+ *
+ * Makes a V/D mode 2 voice frame: the FICH, the short data channel
+ * (destination in frame 0, source in frame 1, spaces otherwise) and five
+ * voice channels, with random bits or the given vocoder data.
+ *
+ * Parameters:
+ *   f      - Receives the frame.
+ *   fn     - The frame number.
+ *   dgid   - The digital group ID.
+ *   dest   - The destination callsign.
+ *   src    - The source callsign.
+ *   blocks - 35 bytes of vocoder data (5 blocks of 49 bits, 7 bytes apart),
+ *            or NULL for random bits.
+ *
+ * Returns: nothing.
+ */
 static void mkVd2(uint8_t* f, uint8_t fn, uint8_t dgid, const char* dest, const char* src, const uint8_t* blocks)
 {
     YsfFich h;
@@ -149,6 +216,23 @@ static void mkVd2(uint8_t* f, uint8_t fn, uint8_t dgid, const char* dest, const 
     }
 }
 
+/*
+ * ysfGenVoiceCallAudio()
+ *
+ * Makes the frames of a voice call: a header, the voice frames and a
+ * terminator.
+ *
+ * Parameters:
+ *   dest   - The destination callsign.
+ *   src    - The source callsign.
+ *   dgid   - The digital group ID.
+ *   frames - Number of voice frames.
+ *   ambe   - The vocoder data, 35 bytes per frame, or NULL for random bits.
+ *   out    - Receives the frames.
+ *   max    - Size of out, in frames.
+ *
+ * Returns: The number of frames made, 0 if out is too small.
+ */
 unsigned int ysfGenVoiceCallAudio(const char* dest, const char* src, uint8_t dgid, unsigned int frames, const uint8_t* ambe,
                                   uint8_t out[][YSF_FRAME_LENGTH_BYTES], unsigned int max)
 {
@@ -166,12 +250,43 @@ unsigned int ysfGenVoiceCallAudio(const char* dest, const char* src, uint8_t dgi
     return k;
 }
 
+/*
+ * ysfGenVoiceCall()
+ *
+ * Makes the frames of a voice call with random voice data.
+ *
+ * Parameters:
+ *   dest   - The destination callsign.
+ *   src    - The source callsign.
+ *   dgid   - The digital group ID.
+ *   frames - Number of voice frames.
+ *   out    - Receives the frames.
+ *   max    - Size of out, in frames.
+ *
+ * Returns: The number of frames made, 0 if out is too small.
+ */
 unsigned int ysfGenVoiceCall(const char* dest, const char* src, uint8_t dgid, unsigned int frames,
                              uint8_t out[][YSF_FRAME_LENGTH_BYTES], unsigned int max)
 {
     return ysfGenVoiceCallAudio(dest, src, dgid, frames, NULL, out, max);
 }
 
+/*
+ * ysfGenDataCall()
+ *
+ * Makes the frames of a data FR call: a header, frames with random data (the
+ * callsigns in the first frame of every eight) and a terminator.
+ *
+ * Parameters:
+ *   dest   - The destination callsign.
+ *   src    - The source callsign.
+ *   dgid   - The digital group ID.
+ *   frames - Number of data frames.
+ *   out    - Receives the frames.
+ *   max    - Size of out, in frames.
+ *
+ * Returns: The number of frames made, 0 if out is too small.
+ */
 unsigned int ysfGenDataCall(const char* dest, const char* src, uint8_t dgid, unsigned int frames,
                             uint8_t out[][YSF_FRAME_LENGTH_BYTES], unsigned int max)
 {

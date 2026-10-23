@@ -1,0 +1,18 @@
+# /etc/systemd/system/fm-gateway.service
+[Unit]
+Description=FM EchoLink Gateway
+After=fm-host.service
+Requires=fm-host.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/OpenMT/protocols/FM
+ExecStart=/home/pi/OpenMT/protocols/FM/gateway/build/fm_gateway
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

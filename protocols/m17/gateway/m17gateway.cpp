@@ -164,68 +164,38 @@ using SM17Packet = struct __attribute__((__packed__)) pkt_tag {
 };
 
 
-// error - wrapper for perror
+/*
+ * error()
+ *
+ * Wrapper for perror that ends the program.
+ *
+ * Parameters:
+ *   msg - Text printed before the system error message.
+ *
+ * Returns: nothing.
+ */
 void error(char *msg)
 {
-  perror(msg);
+  reportError(modemName, "M17 gateway", "%s: %s", msg, strerror(errno));
   exit(1);
 }
 
-// Wait for 'delay' miroseconds
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-};
+;
 
-// Print debug data.
-// From MMDVM project by Jonathan Naylor G4KLX.
-void dump(char *text, unsigned char *data, unsigned int length)
-{
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    fputs(text, stdout);
-    fputc('\n', stdout);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++)
-            fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++)
-            fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            unsigned char c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-}
-
-// Encode to M17 callsign bytes.
+/*
+ * encode_refl_callsign()
+ *
+ * Encodes a callsign into the 6 byte M17 form (base 40, big endian) for the
+ * reflector link.  Letters, digits, '-', '/' and '.' are allowed; lower case
+ * letters become upper case.
+ *
+ * Parameters:
+ *   callsign    - The callsign, up to 9 characters.
+ *   encodedCall - Receives the 6 bytes.
+ *
+ * Returns: true if encoded, false if the callsign is longer than 9
+ *   characters.
+ */
 bool encode_refl_callsign(const std::string& callsign, call_t& encodedCall)
 {
     encodedCall.fill(0x00);
@@ -264,7 +234,18 @@ bool encode_refl_callsign(const std::string& callsign, call_t& encodedCall)
     return true;
 }
 
-// Send out going bytes to M17 service.
+/*
+ * txThread()
+ *
+ * Sends outgoing bytes to the M17 host: takes the packets queued in txBuffer
+ * (the frames and the link status) and writes them to the socket.  When the
+ * connection fails the gateway stops.
+ *
+ * Parameters:
+ *   arg - The socket of the M17 host, as an intptr_t.
+ *
+ * Returns: NULL when the thread ends.
+ */
 void* txThread(void *arg)
 {
     int  sockfd = (intptr_t)arg;
@@ -317,7 +298,7 @@ void* txThread(void *arg)
 
                     if (write(sockfd, tbuf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        reportError(modemName, "M17 gateway", "remote disconnect");
                         break;
                     }
                 }
@@ -328,15 +309,30 @@ void* txThread(void *arg)
     }
 
     fprintf(stderr, "TX thread exited.\n");
-    int iRet = 500;
     pthread_mutex_lock(&stateMutex);
     connected = false;
     pthread_mutex_unlock(&stateMutex);
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
-// Connect and process bytes from M17 reflector.
+/*
+ * connectM17Refl()
+ *
+ * Connects to an M17 reflector and handles its traffic.  It sends the CONN
+ * packet, waits for the ACKN, tells the host (CONN or NACK) and then keeps
+ * the link: answers PING with PONG, turns voice (M17 ) and packet (M17P)
+ * packets of the reflector into link setup, stream, packet and end frames
+ * for the host, and sends the frames that the host queued to the reflector.
+ * The link ends on a disconnect request, a DISC or NACK from the reflector,
+ * or after 5 seconds without a PING.
+ *
+ * Parameters:
+ *   argv - A heap string "socket source reflector module port", freed by
+ *          this function.
+ *
+ * Returns: NULL when the thread ends.
+ */
 void *connectM17Refl(void *argv)
 {
     int sockfd, portno, n;
@@ -367,9 +363,8 @@ void *connectM17Refl(void *argv)
     server = gethostbyname(hostname);
     if (server == NULL)
     {
-        fprintf(stderr, "ERROR, no such host as %s\n", hostname);
-        int iRet = 100;
-        pthread_exit(&iRet);
+        reportError(modemName, "M17 gateway", "no such host as %s", hostname);
+        pthread_exit(NULL);
         return NULL;
     }
 
@@ -396,7 +391,7 @@ void *connectM17Refl(void *argv)
     memcpy(buf+4, srcCall.data(), 6);
     buf[10] = module[0];
     if (debugM)
-       dump((char*)"M17 Refl data:", (uint8_t*)buf, 11);
+       hexDump((char*)"M17 Refl data:", (uint8_t*)buf, 11);
 
     n = sendto(sockfd, buf, 11, 0, (struct sockaddr*)&serveraddr, sizeof(serveraddr));
     if (n < 0)
@@ -422,7 +417,7 @@ void *connectM17Refl(void *argv)
     if (n > 0)
     {
         if (debugM)
-            dump((char*)"M17 Refl recv data:", (uint8_t*)buf, n);
+            hexDump((char*)"M17 Refl recv data:", (uint8_t*)buf, n);
 
         char magic[4];
         memcpy(magic, buf, 4);
@@ -487,7 +482,7 @@ void *connectM17Refl(void *argv)
         if (n > 0)
         {
             if (debugM)
-                dump((char*)"M17 Refl recv data:", (uint8_t*)buf, n);
+                hexDump((char*)"M17 Refl recv data:", (uint8_t*)buf, n);
 
             char magic[4];
             memcpy(magic, buf, 4);
@@ -524,7 +519,7 @@ void *connectM17Refl(void *argv)
                 if (n < 0)
                     error((char*)"ERROR in sendto");
                 if (debugM)
-                    dump((char*)"M17 Refl send data:", (uint8_t*)buf, n);
+                    hexDump((char*)"M17 Refl send data:", (uint8_t*)buf, n);
             }
 
             pthread_mutex_lock(&stateMutex);
@@ -547,7 +542,7 @@ void *connectM17Refl(void *argv)
                     continue;
                 }
                 if (debugM)
-                    dump((char*)"M17 Refl recv data:", (uint8_t*)buf, n);
+                    hexDump((char*)"M17 Refl recv data:", (uint8_t*)buf, n);
 
                 pttTimeout = 0;
                 SM17Frame sf;
@@ -783,7 +778,7 @@ void *connectM17Refl(void *argv)
             if (n < 0)
                 error((char*)"ERROR in sendto");
             if (debugM)
-               dump((char*)"M17 Refl send data:", (uint8_t*)&sf, n);
+               hexDump((char*)"M17 Refl send data:", (uint8_t*)&sf, n);
         }
 
         pthread_mutex_lock(&stateMutex);
@@ -802,7 +797,7 @@ void *connectM17Refl(void *argv)
             if (n < 0)
                 error((char*)"ERROR in sendto");
             if (debugM)
-               dump((char*)"M17 Refl send data:", (uint8_t*)buf, n);
+               hexDump((char*)"M17 Refl send data:", (uint8_t*)buf, n);
             pthread_mutex_lock(&stateMutex);
             reflPacketRdy = false;
             pthread_mutex_unlock(&stateMutex);
@@ -857,12 +852,26 @@ void *connectM17Refl(void *argv)
     sleep(1);
     close(sockfd);
     fprintf(stderr, "Disconnected from M17 reflector.\n");
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
-// Start up reflector threads.
+/*
+ * connectToRefl()
+ *
+ * Starts the threads for a reflector link: the one that sends to the host,
+ * and the one that talks to the reflector.  A link that is still up is told
+ * to disconnect first.
+ *
+ * Parameters:
+ *   sockfd    - The socket of the M17 host.
+ *   source    - The callsign used for the link.
+ *   reflector - The address of the reflector.
+ *   module    - The module of the reflector, one letter.
+ *   port      - The port of the reflector.
+ *
+ * Returns: nothing.
+ */
 void connectToRefl(int sockfd, char *source, char *reflector, char *module, uint16_t port)
 {
     pthread_mutex_lock(&stateMutex);
@@ -882,7 +891,7 @@ void connectToRefl(int sockfd, char *source, char *reflector, char *module, uint
 
     int err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)sockfd);
     if (err != 0)
-       fprintf(stderr, "Can't create tx thread :[%s]", strerror(err));
+       reportError(modemName, "M17 gateway", "Can't create tx thread :[%s]", strerror(err));
     else
     {
         if (debugM)
@@ -891,7 +900,7 @@ void connectToRefl(int sockfd, char *source, char *reflector, char *module, uint
     err = pthread_create(&(m17Reflid), NULL, &connectM17Refl, server);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create M17 reflector thread :[%s]", strerror(err));
+        reportError(modemName, "M17 gateway", "Can't create M17 reflector thread :[%s]", strerror(err));
         free(server);
     }
     else
@@ -902,7 +911,19 @@ void connectToRefl(int sockfd, char *source, char *reflector, char *module, uint
     }
 }
 
-// Start up connection to M17 service.
+/*
+ * startClient()
+ *
+ * Start up the connection to the M17 host and handle its packets: link
+ * commands (CONN starts a link to the reflector found by name in the
+ * database, DISC ends it), and the link setup, stream, packet and end frames
+ * of RF traffic, which are decoded and queued for the reflector.
+ *
+ * Parameters:
+ *   arg - The address of the M17 host, as a string.
+ *
+ * Returns: NULL when the thread ends; the gateway then stops.
+ */
 void* startClient(void *arg)
 {
     int sockfd = 0;
@@ -913,14 +934,14 @@ void* startClient(void *arg)
     // Create socket file descriptor
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "M17 gateway", "Socket creation error: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags == -1)
     {
-        perror("fcntl F_GETFL");
+        reportError(modemName, "M17 gateway", "fcntl F_GETFL: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -932,9 +953,9 @@ void* startClient(void *arg)
     serv_addr.sin_port = htons(clientPort);
 
     // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(hostAddress, &serv_addr.sin_addr))
     { // Connect to localhost
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "M17 gateway", "Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
 
@@ -943,7 +964,7 @@ void* startClient(void *arg)
     {
         if (errno != EINPROGRESS)
         {
-            perror("connection failed");
+            reportError(modemName, "M17 gateway", "connection failed: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
     }
@@ -974,7 +995,7 @@ void* startClient(void *arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "M17_Gateway: error when reading from M17 host, errno=%d\n", errno);
+            reportError(modemName, "M17 gateway", "M17_Gateway: error when reading from M17 host, errno=%d", errno);
             break;
         }
 
@@ -1019,7 +1040,7 @@ void* startClient(void *arg)
         memcpy(type, buffer+4, typeLen);
 
         if (debugM)
-            dump((char*)"M17 Service data:", (unsigned char*)buffer, respLen);
+            hexDump((char*)"M17 Service data:", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
         {
@@ -1174,21 +1195,33 @@ void* startClient(void *arg)
     }
     fprintf(stderr, "Client thread exited.\n");
     close(sockfd);
-    int iRet = 100;
     pthread_mutex_lock(&stateMutex);
     connected = false;
     pthread_mutex_unlock(&stateMutex);
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
+/*
+ * main()
+ *
+ * Program entry. Parses the command line (-m modem number 1-10, which also
+ * selects the TCP port, -d daemon, -v version, -x debug), starts the client
+ * thread and waits until it ends.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on normal exit, 1 on a command line or startup error.
+ */
 int main(int argc, char **argv)
 {
     bool daemon = false;
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1197,7 +1230,7 @@ int main(int argc, char **argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "M17 gateway", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -1205,8 +1238,11 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(m17Host, sizeof(m17Host), "%s", optarg);   /* where the protocol service runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -1218,7 +1254,7 @@ int main(int argc, char **argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: M17_Gateway [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: M17_Gateway [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1229,7 +1265,7 @@ int main(int argc, char **argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "M17_Gateway: error in fork(), exiting\n");
+            reportError(modemName, "M17 gateway", "M17_Gateway: error in fork(), exiting");
             return 1;
         }
 
@@ -1250,7 +1286,7 @@ int main(int argc, char **argv)
     int err = pthread_create(&(clientid), NULL, &startClient, m17Host);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create modem host thread :[%s]", strerror(err));
+        reportError(modemName, "M17 gateway", "Can't create modem host thread :[%s]", strerror(err));
         return 1;
     }
     else

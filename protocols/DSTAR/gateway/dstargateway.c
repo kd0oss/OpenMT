@@ -27,6 +27,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -45,7 +46,13 @@
 #include <unistd.h>
 
 #include "../dstar_gps.h"
+#include "../dstar_slowdata.h"
 #include "../dstar_jitter.h"
+
+#define GW_TX_GAP_US     11000U     /* the host gets at most one frame every 11 ms (was 11 rounds of 1 ms) */
+#define GW_RX_WAIT_MS    10         /* longest wait for a packet from the ircDDB gateway when idle    */
+#define GW_RX_JB_WAIT_MS 1          /* ... while the jitter buffer is playing a stream out            */
+#define GW_DSRP_POLL_MS  1000000U   /* poll the ircDDB gateway this often (10 million rounds of 100 us before) */
 
 #define VERSION "2025-09-25"
 #define BUFFER_SIZE 1024
@@ -159,23 +166,33 @@ typedef union crc
 } m_crc;
 m_crc mcrc;
 
-// error - wrapper for perror
+/*
+ * error()
+ *
+ * Reports a message with reportError() and ends the program with exit status 1.
+ *
+ * Parameters:
+ *   msg - Text printed in front of the system error message.
+ *
+ * Returns: nothing.
+ */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "DSTAR gateway", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
-// Wait for 'delay' miroseconds
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-};
+;
 
-/* Get current time in milliseconds */
+/*
+ * getTimeMillis()
+ *
+ * Reads the real time clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: Time in milliseconds, or 0 if the clock cannot be read.
+ */
 static uint64_t getTimeMillis(void)
 {
     struct timespec ts;
@@ -184,6 +201,18 @@ static uint64_t getTimeMillis(void)
     return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
 }
 
+/*
+ * gwStateStartTx()
+ *
+ * Tries to claim the gateway for a transmission from the host to the
+ * reflector.  It succeeds only when the gateway is idle; otherwise a "REJECT
+ * TX" line is logged.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the gateway was idle and is now in the TX state, false if
+ *   it is busy.
+ */
 static bool gwStateStartTx(void)
 {
     pthread_mutex_lock(&gwState.mutex);
@@ -204,7 +233,19 @@ static bool gwStateStartTx(void)
     return true;
 }
 
-/* Try to start reflector→host reception */
+/*
+ * gwStateStartRx()
+ *
+ * Tries to claim the gateway for a stream arriving from the reflector.  It
+ * succeeds only when the gateway is idle; a rejection is logged once for
+ * each stream id.
+ *
+ * Parameters:
+ *   stream_id - Stream id of the incoming reflector stream.
+ *
+ * Returns: true if the gateway was idle and is now in the RX state, false if
+ *   it is busy.
+ */
 static bool gwStateStartRx(uint16_t stream_id)
 {
     pthread_mutex_lock(&gwState.mutex);
@@ -237,7 +278,15 @@ static bool gwStateStartRx(uint16_t stream_id)
     return true;
 }
 
-/* Update packet timestamp */
+/*
+ * gwStateUpdateTime()
+ *
+ * Records that a packet has just been handled, for the stream timeout.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void gwStateUpdateTime(void)
 {
     pthread_mutex_lock(&gwState.mutex);
@@ -245,7 +294,17 @@ static void gwStateUpdateTime(void)
     pthread_mutex_unlock(&gwState.mutex);
 }
 
-/* End transmission */
+/*
+ * gwStateEnd()
+ *
+ * Ends the current transmission or reception and returns the gateway to
+ * idle.  For a reception the packet loss counts are logged.
+ *
+ * Parameters:
+ *   reason - Text saying why the stream ended, for the log.
+ *
+ * Returns: nothing.
+ */
 static void gwStateEnd(const char* reason)
 {
     pthread_mutex_lock(&gwState.mutex);
@@ -274,7 +333,17 @@ static void gwStateEnd(const char* reason)
     pthread_mutex_unlock(&gwState.mutex);
 }
 
-/* Check for timeout and reset if needed */
+/*
+ * gwStateCheckTimeout()
+ *
+ * Ends the current stream if no packet has arrived for longer than the
+ * timeout.  The gateway is set to idle and the stream id cleared.
+ *
+ * Parameters:
+ *   timeout_ms - Longest allowed gap between packets, in milliseconds.
+ *
+ * Returns: true if the stream was ended by the timeout, false if not.
+ */
 static bool gwStateCheckTimeout(uint32_t timeout_ms)
 {
     pthread_mutex_lock(&gwState.mutex);
@@ -303,7 +372,15 @@ static bool gwStateCheckTimeout(uint32_t timeout_ms)
     return false;
 }
 
-/* Check if TX active */
+/*
+ * gwStateIsTxActive()
+ *
+ * Tells whether the gateway is sending from the host to the reflector.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the gateway is in the TX state.
+ */
 static bool gwStateIsTxActive(void)
 {
     pthread_mutex_lock(&gwState.mutex);
@@ -312,7 +389,15 @@ static bool gwStateIsTxActive(void)
     return active;
 }
 
-/* Check if RX active */
+/*
+ * gwStateIsRxActive()
+ *
+ * Tells whether the gateway is receiving from the reflector.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the gateway is in the RX state.
+ */
 static bool gwStateIsRxActive(void)
 {
     pthread_mutex_lock(&gwState.mutex);
@@ -321,7 +406,17 @@ static bool gwStateIsRxActive(void)
     return active;
 }
 
-/* Verify stream ID */
+/*
+ * gwStateVerifyStreamId()
+ *
+ * Checks that a reflector packet belongs to the stream being received.  A
+ * mismatch is logged once for each stream id.
+ *
+ * Parameters:
+ *   stream_id - Stream id found in the packet.
+ *
+ * Returns: true if it matches the current stream, false if not.
+ */
 static bool gwStateVerifyStreamId(uint16_t stream_id)
 {
     pthread_mutex_lock(&gwState.mutex);
@@ -339,61 +434,18 @@ static bool gwStateVerifyStreamId(uint16_t stream_id)
     return matches;
 }
 
-// Print debug data.
-// From MMDVM project by Jonathan Naylor G4KLX.
-void dump(char* text, unsigned char* data, unsigned int length)
-{
-    struct timespec ts;
-    uint64_t milliseconds;
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    // Get the current time with nanosecond precision
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("clock_gettime");
-        return;
-    }
-
-    // Convert to milliseconds
-    milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-
-    fprintf(stdout, "%s: %llu\n", text, milliseconds);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++) fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++) fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            unsigned char c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-}
-
-// Search DSTAR reflector files for given reflect name. Currently not used.
+/*
+ * searchDSTARHostFile()
+ *
+ * Looks up a reflector in the D-Star host files (DPlus_Hosts.txt and the
+ * like) and loads the reflector lists.  It is not used at present.
+ *
+ * Parameters:
+ *   refl   - Name of the reflector to find.
+ *   ipaddr - Receives the address of the reflector when it is found.
+ *
+ * Returns: 1 if the reflector was found, 0 if not.
+ */
 int searchDSTARHostFile(const char* refl, char* ipaddr)
 {
     FILE* file     = NULL;
@@ -492,18 +544,27 @@ int searchDSTARHostFile(const char* refl, char* ipaddr)
     return ret;
 }
 
-// Thread used to send data to DSTAR host.
+/*
+ * txThread()
+ *
+ * Thread that sends data to the D-Star host.  Every GW_TX_GAP_US (11 ms) it
+ * checks txBuffer and, when a complete frame is waiting, writes that frame
+ * to the host socket.  A frame that does not start with 0x61 is reported.
+ * It sets connected to false when it ends.
+ *
+ * Parameters:
+ *   arg - Socket of the host connection, passed as a pointer sized integer.
+ *
+ * Returns: Nothing useful; the thread ends when the connection is closed.
+ */
 void* txThread(void* arg)
 {
-    int sockfd    = (intptr_t)arg;
-    uint16_t loop = 0;
+    int sockfd = (intptr_t)arg;
 
     while (connected)
     {
-        delay(1000);
-        loop++;
+        delay(GW_TX_GAP_US);
 
-        if (loop > 10)
         {
             pthread_mutex_lock(&txBufMutex);
             if (RingBuffer_dataSize(&txBuffer) >= 5)
@@ -529,25 +590,32 @@ void* txThread(void* arg)
                     if (write(sockfd, buf, len) < 0)
                     {
                         pthread_mutex_unlock(&txBufMutex);
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        reportError(modemName, "DSTAR gateway", "remote disconnect");
                         break;
                     }
                 }
             }
             pthread_mutex_unlock(&txBufMutex);
-
-            loop = 0;
         }
     }
 
     fprintf(stderr, "TX thread exited.\n");
-    int iRet  = 500;
     connected = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
-/* Decode GPS data in slow-speed bytes */
+/*
+ * decodeGPS()
+ *
+ * Feeds one slow data byte to the GPS sentence parser, which keeps the
+ * position, altitude and call sign it finds.
+ *
+ * Parameters:
+ *   c - Slow data byte.
+ *
+ * Returns: true when a complete sentence has been decoded, false if not.
+ */
 bool decodeGPS(unsigned char c)
 {
     static char tgps[201];
@@ -556,7 +624,20 @@ bool decodeGPS(unsigned char c)
     return dstar_parse_gps(c, tgps, &gpsidx, sGPSCall, &fLat, &fLong, &altitude);
 }
 
-/* Decode slow-speed data bytes */
+/*
+ * slowSpeedDataDecode()
+ *
+ * Decodes the three slow data bytes of a voice frame.  It follows the slow
+ * data state from frame to frame and collects text messages and GPS
+ * sentences.
+ *
+ * Parameters:
+ *   a - First slow data byte (still scrambled).
+ *   b - Second slow data byte (still scrambled).
+ *   c - Third slow data byte (still scrambled).
+ *
+ * Returns: A code for the kind of slow data found, or 0 if none.
+ */
 int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
 {
     static bool bSyncFound;
@@ -666,94 +747,23 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c)
     return iRet;
 }
 
-// Encode message to slow-speed bytes.
-void slowSpeedDataEncode(char* cMessage, unsigned char* ucBytes, unsigned char ucMode)
-{
-    static int iIndex;
-    static unsigned char ucFrameCount;
-
-    if (ucMode == 10)
-    {
-        ucFrameCount = 0;
-        return;
-    }
-
-    int iSyncfrm = ucFrameCount % 21;
-
-    if (ucFrameCount > 251)
-        ucFrameCount = 0;
-    else
-        ucFrameCount++;
-
-    if (iSyncfrm == 0)
-    {
-        ucBytes[0] = 0x25 ^ 0x70;
-        ucBytes[1] = 0x62 ^ 0x4f;
-        ucBytes[2] = 0x85 ^ 0x93;
-        iIndex     = 0;
-        return;
-    }
-
-    if (ucMode == 0)
-    {
-        char slowMessage[40];
-        memset(slowMessage, 0x20, 39);
-
-        if (iIndex <= 36)
-        {
-            int iSection = iIndex % 5;
-            if (iSection == 0)
-            {
-                if (iIndex == 36)
-                    ucBytes[0] = 0x51;
-                else
-                    ucBytes[0] = 0x55;
-                ucBytes[1] = (unsigned char)slowMessage[iIndex++];
-                ucBytes[2] = (unsigned char)slowMessage[iIndex++];
-            }
-            else
-            {
-                ucBytes[0] = (unsigned char)slowMessage[iIndex++];
-                ucBytes[1] = (unsigned char)slowMessage[iIndex++];
-                ucBytes[2] = (unsigned char)slowMessage[iIndex++];
-            }
-        }
-        else
-        {
-            ucBytes[0] = 0x66;
-            ucBytes[1] = 0x66;
-            ucBytes[2] = 0x66;
-        }
-    }
-
-    if (ucMode == 1)
-    {
-        if (iIndex <= 17)
-        {
-            int iSection = iIndex % 5;
-            if (iSection == 0)
-            {
-                ucBytes[0] = (unsigned char)((0x40 + iIndex / 5) ^ 0x70);
-                ucBytes[1] = (unsigned char)cMessage[iIndex++] ^ 0x4f;
-                ucBytes[2] = (unsigned char)cMessage[iIndex++] ^ 0x93;
-            }
-            else
-            {
-                ucBytes[0] = (unsigned char)cMessage[iIndex++] ^ 0x70;
-                ucBytes[1] = (unsigned char)cMessage[iIndex++] ^ 0x4f;
-                ucBytes[2] = (unsigned char)cMessage[iIndex++] ^ 0x93;
-            }
-        }
-        else
-        {
-            ucBytes[0] = 0x66 ^ 0x70;
-            ucBytes[1] = 0x66 ^ 0x4f;
-            ucBytes[2] = 0x66 ^ 0x93;
-        }
-    }
-}
-
-/* Queue up bytes to send to IRCDDB gateway */
+/*
+ * sendToGw()
+ *
+ * Sends a header, voice frame or end of transmission to the ircDDB gateway
+ * as DSRP packets over UDP.  The first call of a stream sends the header
+ * with its CRC and a new random stream id; later calls send the voice
+ * frames, with slow data encoded in when requested.  The last call sends a
+ * silent frame and then the end of data frame.
+ *
+ * Parameters:
+ *   cHeader   - The header text (RPT2, RPT1, UR, MY and suffix).
+ *   ucData    - The 12 bytes of voice and slow data.
+ *   bSsEncode - true to encode slow data into the frame.
+ *   bEnd      - true if this is the last frame of the stream.
+ *
+ * Returns: nothing.
+ */
 void sendToGw(char* cHeader, uint8_t* ucData, bool bSsEncode, bool bEnd)
 {
     CCITTChecksumReverse ccr;
@@ -838,7 +848,7 @@ void sendToGw(char* cHeader, uint8_t* ucData, bool bSsEncode, bool bEnd)
     else
     {
         memcpy(ucBuffer + 9, ucData, 12);
-        //      dump((char*)"UCHAR", ucBuffer, 21);
+        //      hexDump((char*)"UCHAR", ucBuffer, 21);
         sendto(sockoutfd, ucBuffer, 21, 0, (struct sockaddr*)&servaddrout, sizeof(servaddrout));
     }
 
@@ -851,7 +861,20 @@ void sendToGw(char* cHeader, uint8_t* ucData, bool bSsEncode, bool bEnd)
 static uint64_t jbLastEmitMs  = 0U;   /* when the last frame of this stream went to the host */
 static uint32_t jbQueueFull   = 0U;   /* frames that found the queue to the host full        */
 
-/* A frame from the jitter buffer is due: on to the host */
+/*
+ * jbEmitToHost()
+ *
+ * Jitter buffer callback.  Called when a frame is due to go to the host: it
+ * wraps the frame in an OpenMT voice frame and queues it for the host,
+ * logging a stall if nothing has been sent for a long time.
+ *
+ * Parameters:
+ *   ctx       - Not used.
+ *   frame     - The voice frame that is due.
+ *   concealed - true if the frame was made up to cover a lost one.
+ *
+ * Returns: nothing.
+ */
 static void jbEmitToHost(void* ctx, const uint8_t* frame, bool concealed)
 {
     uint8_t buffer[20];
@@ -887,6 +910,17 @@ static void jbEmitToHost(void* ctx, const uint8_t* frame, bool concealed)
     pthread_mutex_unlock(&gwState.mutex);
 }
 
+/*
+ * jbPrintStats()
+ *
+ * Prints the jitter buffer counts at the end of a stream (late, lost,
+ * skipped and queue-full events) and copies the received and lost counts
+ * into the gateway state.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void jbPrintStats(void)
 {
     /* The LOSS line that follows is worked out from the jitter buffer: the sequence number only repeats every
@@ -910,6 +944,21 @@ static void jbPrintStats(void)
             jb.played, jb.concealed, jb.late, jb.duplicate, jb.reordered, jb.jitterMs);
 }
 
+/*
+ * connectIRCDDBGateway()
+ *
+ * Thread that talks to the ircDDB gateway over UDP.  It opens the sockets,
+ * sends a poll, and then reads the gateway's packets: headers (type 0x20)
+ * start a stream, voice frames (type 0x21) go through the jitter buffer to
+ * the host, and status messages are passed on.  It ends a stream that has
+ * timed out, and polls the gateway again from time to time.
+ *
+ * Parameters:
+ *   argv - Text "sockfd local_address gw_address portout portin" prepared by
+ *          connectToIRCDDB().
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* connectIRCDDBGateway(void* argv)
 {
     //   uint16_t iStreamId;
@@ -922,7 +971,7 @@ void* connectIRCDDBGateway(void* argv)
     uint8_t cRxBuffer[40];
     uint8_t cTxHeader[37];
     uint8_t buffer[100];
-    uint32_t timeout = 0;
+    uint64_t lastPollMs = getTimeMillis();     /* when the ircDDB gateway was last polled */
     char myCall[9]   = "";
     char urCall[9]   = "";
     char rpt1Call[9] = "";
@@ -974,7 +1023,7 @@ void* connectIRCDDBGateway(void* argv)
     while (connected)
     {
         {
-            /* this loop normally comes round every 100 microseconds: a long time between two rounds means that
+            /* this loop normally comes round at least every 10 milliseconds: a long time between two rounds means that
                something in it (a lock, a log line, a send) held the gateway up and no packet was read meanwhile */
             uint64_t loopNow = getTimeMillis();
 
@@ -990,7 +1039,7 @@ void* connectIRCDDBGateway(void* argv)
         if (n > 0)
         {
             if (debugM)
-                dump((char*)"DSTAR gateway recv data:", (uint8_t*)cRecvline, n);
+                hexDump((char*)"DSTAR gateway recv data:", (uint8_t*)cRecvline, n);
         }
         if (n > 0 && (n != 21 && n != 49 && n != 34))
             fprintf(stderr, "n = %d\n", n);
@@ -1229,7 +1278,7 @@ void* connectIRCDDBGateway(void* argv)
             DSTARReflConnected = false;
         }
 
-        if (timeout >= 10000000)
+        if (getTimeMillis() - lastPollMs >= GW_DSRP_POLL_MS)
         {
             cRxBuffer[0] = 'D';
             cRxBuffer[1] = 'S';
@@ -1241,12 +1290,17 @@ void* connectIRCDDBGateway(void* argv)
             memcpy(cRxBuffer + 5U, "linux_pirptr-20250926", 21);
             cRxBuffer[26] = 0x00;
             sendto(sockoutfd, cRxBuffer, 27, 0, (struct sockaddr*)&servaddrout, sizeof(servaddrout));
-            timeout = 0;
+            lastPollMs = getTimeMillis();
         }
-        else
-            timeout++;
 
-        delay(100);
+        /* Wait for the next packet.  poll() returns the moment one arrives, so
+         * nothing is delayed; the wait is short only while the jitter buffer
+         * has frames to play out on time. */
+        {
+            struct pollfd pfd = {.fd = sockinfd, .events = POLLIN, .revents = 0};
+
+            poll(&pfd, 1, jb.active ? GW_RX_JB_WAIT_MS : GW_RX_WAIT_MS);
+        }
     }
 
     uint8_t tmp[4];
@@ -1264,11 +1318,21 @@ void* connectIRCDDBGateway(void* argv)
     close(sockinfd);
     sleep(1);
     fprintf(stderr, "Disconnected from DSTAR gateway.\n");
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
+/*
+ * openHostSocket()
+ *
+ * Connects to the D-Star host over TCP, with address reuse and keep-alive
+ * turned on.
+ *
+ * Parameters:
+ *   hostAddress - Address of the host to connect to.
+ *
+ * Returns: The socket, or -1 on error.
+ */
 static int openHostSocket(const char* hostAddress)
 {
     struct sockaddr_in serv_addr;
@@ -1276,7 +1340,7 @@ static int openHostSocket(const char* hostAddress)
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "DSTAR gateway", "Socket creation error: %s", strerror(errno));
         return -1;
     }
 
@@ -1293,9 +1357,9 @@ static int openHostSocket(const char* hostAddress)
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port   = htons(clientPort);
 
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(hostAddress, &serv_addr.sin_addr))
     {
-        perror("Invalid address");
+        reportError(modemName, "DSTAR gateway", "Invalid address");
         close(sockfd);
         return -1;
     }
@@ -1304,7 +1368,7 @@ static int openHostSocket(const char* hostAddress)
     {
         if (errno != EINPROGRESS)
         {
-            perror("Connection failed");
+            reportError(modemName, "DSTAR gateway", "Connection failed: %s", strerror(errno));
             close(sockfd);
             return -1;
         }
@@ -1313,7 +1377,22 @@ static int openHostSocket(const char* hostAddress)
     return sockfd;
 }
 
-// Create threads for gateway communication.
+/*
+ * connectToIRCDDB()
+ *
+ * Starts the threads for gateway communication: txThread() to send to the
+ * host and connectIRCDDBGateway() to talk to the ircDDB gateway.  It then
+ * sends a test frame to make sure the repeater is not linked to a reflector.
+ *
+ * Parameters:
+ *   sockfd        - Socket of the host connection.
+ *   local_address - Local address for the gateway sockets.
+ *   gw_address    - Address of the ircDDB gateway.
+ *   portout       - UDP port used to send to the gateway.
+ *   portin        - UDP port used to receive from the gateway.
+ *
+ * Returns: nothing.
+ */
 void connectToIRCDDB(int sockfd, const char* local_address, const char* gw_address, uint16_t portout, uint16_t portin)
 {
     static char server[120] = "";
@@ -1325,12 +1404,12 @@ void connectToIRCDDB(int sockfd, const char* local_address, const char* gw_addre
 
     int err = pthread_create(&txid, NULL, &txThread, (void*)(intptr_t)sockfd);
     if (err != 0)
-        fprintf(stderr, "Can't create tx thread: [%s]", strerror(err));
+        reportError(modemName, "DSTAR gateway", "Can't create tx thread: [%s]", strerror(err));
 
     err = pthread_create(&dstarReflid, NULL, &connectIRCDDBGateway, server);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create IRCDDB gateway thread: [%s]", strerror(err));
+        reportError(modemName, "DSTAR gateway", "Can't create IRCDDB gateway thread: [%s]", strerror(err));
         return;
     }
 
@@ -1347,47 +1426,21 @@ void connectToIRCDDB(int sockfd, const char* local_address, const char* gw_addre
     ucBytes[11] = 0x16;
     sendToGw(cBuffer, ucBytes, true, true);
 }
+
 /*
-void connectToIRCDDB(int sockfd, const char* local_address, const char* gw_address, uint16_t portout, uint16_t portin)
-{
-    static char server[80] = "";
-
-    DSTARReflDisconnect = true;
-    sleep(1);
-
-    sprintf(server, "%d %s %s %d %d", sockfd, local_address, gw_address, portout, portin);
-
-    pthread_t txid;
-    int err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)sockfd);
-    if (err != 0)
-        fprintf(stderr, "Can't create tx thread :[%s]", strerror(err));
-    else
-    {
-        if (debugM)
-            fprintf(stderr, "TX thread created successfully\n");
-    }
-    err = pthread_create(&(dstarReflid), NULL, &connectIRCDDBGateway, server);
-    if (err != 0)
-        fprintf(stderr, "Can't create IRCDDB gateway thread :[%s]", strerror(err));
-    else
-    {
-        if (debugM)
-            fprintf(stderr, "IRCDDB gateway thread created successfully\n");
-
-        sleep(4);
-        // Maker sure we are not linked to a reflector.
-        char cBuffer[40];
-        uint8_t ucBytes[12];
-        sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, "       U", myCall, "TEST");
-        memset(ucBytes, 0, 9);
-        ucBytes[9]  = 0x55;
-        ucBytes[10] = 0x2d;
-        ucBytes[11] = 0x16;
-        sendToGw(cBuffer, ucBytes, true, true);
-    }
-}
-*/
-
+ * hostReadLoop()
+ *
+ * Reads the packets sent by the D-Star host until the connection closes or
+ * connected is cleared.  Command, connect, disconnect, status, header, data
+ * and end of transmission packets are handled: headers, voice frames and the
+ * end are sent on to the gateway, and link commands change the reflector
+ * link.
+ *
+ * Parameters:
+ *   sockfd - Socket of the host connection.
+ *
+ * Returns: nothing.
+ */
 void hostReadLoop(int sockfd)
 {
     char buffer[BUFFER_SIZE] = {0};
@@ -1413,7 +1466,7 @@ void hostReadLoop(int sockfd)
 
         if (len != 1)
         {
-            fprintf(stderr, "DSTAR_Gateway: error when reading from DSTAR host, errno=%d\n", errno);
+            reportError(modemName, "DSTAR gateway", "DSTAR_Gateway: error when reading from DSTAR host, errno=%d", errno);
             break;
         }
 
@@ -1458,7 +1511,7 @@ void hostReadLoop(int sockfd)
         memcpy(type, buffer + 4, typeLen);
 
         if (debugM)
-            dump((char*)"DSTAR Service data:", (unsigned char*)buffer, respLen);
+            hexDump((char*)"DSTAR Service data:", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -1571,7 +1624,7 @@ void hostReadLoop(int sockfd)
                 gwStateUpdateTime();
                 char cBuffer[37];
                 sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, urCall, myCall, suffix);
-                //     dump((char*)"ucData", (uint8_t*)(buffer + 8), 12);
+                //     hexDump((char*)"ucData", (uint8_t*)(buffer + 8), 12);
                 if (buffer[17] == 0x55 && buffer[18] == 0x55 && buffer[19] == 0x55)
                     sendToGw(cBuffer, (uint8_t*)(buffer + 8), false, true);
                 else
@@ -1588,7 +1641,19 @@ void hostReadLoop(int sockfd)
     }
 }
 
-// Start up connection to DSTAR service.
+/*
+ * startClient()
+ *
+ * Thread that keeps the gateway connected to the D-Star host.  It connects,
+ * starts the gateway threads and runs hostReadLoop().  When the host drops
+ * it waits for the threads, empties txBuffer and tries again after five
+ * seconds.
+ *
+ * Parameters:
+ *   arg - Address of the host, as a text string.
+ *
+ * Returns: Nothing useful; the thread runs until the program ends.
+ */
 void* startClient(void* arg)
 {
     char hostAddress[80];
@@ -1601,7 +1666,7 @@ void* startClient(void* arg)
         int sockfd = openHostSocket(hostAddress);
         if (sockfd < 0)
         {
-            fprintf(stderr, "Host connect failed, retrying in 10s\n");
+            reportError(modemName, "DSTAR gateway", "Host connect failed, retrying in 10s");
             sleep(10);
             continue;
         }
@@ -1634,273 +1699,30 @@ void* startClient(void* arg)
         sleep(5);
     }
 
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
-#ifdef OLD
-void* startClient(void* arg)
-{
-    int sockfd = 0;
-    struct sockaddr_in serv_addr;
-    char buffer[BUFFER_SIZE] = {0};
-    char hostAddress[80];
-    strcpy(hostAddress, (char*)arg);
-    // Create socket file descriptor
-    if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
-    {
-        perror("Socket creation error");
-        exit(EXIT_FAILURE);
-    }
 
-    int flags = fcntl(sockfd, F_GETFL, 0);
-    if (flags == -1)
-    {
-        perror("fcntl F_GETFL");
-        exit(EXIT_FAILURE);
-    }
-
-    int on = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-
-    // Prepare the sockaddr_in structure
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port   = htons(clientPort);
-
-    // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
-    {  // Connect to localhost
-        perror("Invalid address/ Address not supported");
-        exit(EXIT_FAILURE);
-    }
-
-    // Connect to the server
-    if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
-    {
-        if (errno != EINPROGRESS)
-        {
-            perror("connection failed");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    sleep(1);
-    printf("Connected to DSTAR host.\n");
-
-    //    connectToIRCDDB(sockfd, "127.0.0.1", "127.0.0.1", 20010, 20011);
-    //    connectToIRCDDB(sockfd, "0.0.0.0", "192.168.0.235", 20010, 20012);
-    connectToIRCDDB(sockfd, "0.0.0.0", gwAddress, gwPortOut, gwPortIn);
-
-    ssize_t len      = 0;
-    uint8_t offset   = 0;
-    uint16_t respLen = 0;
-    uint8_t typeLen  = 0;
-    char source[7];
-
-    while (connected)
-    {
-        int len = read(sockfd, buffer, 1);
-        if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-        {
-            error((char*)"ERROR: DSTAR host connection closed remotely.");
-            break;
-        }
-
-        if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-        {
-            delay(5);
-        }
-
-        if (len != 1)
-        {
-            fprintf(stderr, "DSTAR_Gateway: error when reading from DSTAR host, errno=%d\n", errno);
-            break;
-        }
-
-        if (buffer[0] != 0x61)
-        {
-            fprintf(stderr, "DSTAR_Gateway: unknown byte from DSTAR host, 0x%02X\n", buffer[0]);
-            continue;
-        }
-
-        offset = 0;
-        while (offset < 3)
-        {
-            len = read(sockfd, buffer + 1 + offset, 3 - offset);
-            if (len == 0) break;
-            if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-                delay(5);
-            else
-                offset += len;
-        }
-
-        if (len == 0)
-            break;
-
-        respLen = (buffer[1] << 8) + buffer[2];
-
-        offset += 1;
-        while (offset < respLen)
-        {
-            len = read(sockfd, buffer + offset, respLen - offset);
-            if (len == 0) break;
-            if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-                delay(5);
-            else
-                offset += len;
-        }
-
-        if (len == 0)
-            break;
-
-        typeLen = buffer[3];
-        uint8_t type[typeLen];
-        memcpy(type, buffer + 4, typeLen);
-
-        if (debugM)
-            dump((char*)"DSTAR Service data:", (unsigned char*)buffer, respLen);
-
-        if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
-        {
-            if (buffer[8] == COMM_UPDATE_CONF)
-            {
-                readHostConfig(modemName, "DSTAR", "rpt1Call", rpt1Call);
-                readHostConfig(modemName, "DSTAR", "rpt2Call", rpt2Call);
-                readHostConfig(modemName, "main", "callsign", myCall);
-                uint8_t buf[4];
-                buf[0] = 0x61;
-                buf[1] = 0x00;
-                buf[2] = 0x08;
-                buf[3] = 0x04;
-                pthread_mutex_lock(&txBufMutex);
-                RingBuffer_addData(&txBuffer, buf, 4);
-                RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_COMMAND, 4);
-                pthread_mutex_unlock(&txBufMutex);
-            }
-        }
-        else if (memcmp(type, TYPE_CONNECT, typeLen) == 0)
-        {
-            if (!DSTARReflConnected)
-            {
-                bzero(source, 7);
-                bzero(DSTARName, 8);
-                bzero(DSTARModule, 2);
-                memcpy(source, buffer + 8, 6);
-                memcpy(DSTARName, buffer + 14, 7);
-                memcpy(DSTARModule, buffer + 21, 1);
-                fprintf(stderr, "Name: %s  Mod: %s\n", DSTARName, DSTARModule);
-
-                char cBuffer[40];
-                uint8_t ucBytes[12];
-                sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, "        ", source, "TEST");
-                memcpy(cBuffer + 16, DSTARName, 6);
-                cBuffer[22] = DSTARModule[0];
-                cBuffer[23] = 'L';
-                memset(ucBytes, 0, 9);
-                ucBytes[9]  = 0x55;
-                ucBytes[10] = 0x2d;
-                ucBytes[11] = 0x16;
-                sendToGw(cBuffer, ucBytes, true, true);
-                /*
-                                uint8_t buf[4];
-                                buf[0] = 0x61;
-                                buf[1] = 0x00;
-                                buf[2] = 0x10;
-                                buf[3] = 0x04;
-                                RingBuffer_addData(&txBuffer, buf, 4);
-                                RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_CONNECT, 4);
-                                replace_char(DSTARName, 7, 0, ' ');
-                                RingBuffer_addData(&txBuffer, (uint8_t*)DSTARName, 7);
-                                RingBuffer_addData(&txBuffer, (uint8_t*)DSTARModule, 1);
-                                DSTARReflConnected = true; */
-            }
-        }
-        else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
-        {
-            if (DSTARReflConnected)
-            {
-                char cBuffer[40];
-                uint8_t ucBytes[12];
-                sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, "       U", source, "TEST");
-                memset(ucBytes, 0, 9);
-                ucBytes[9]  = 0x55;
-                ucBytes[10] = 0x2d;
-                ucBytes[11] = 0x16;
-                sendToGw(cBuffer, ucBytes, true, true);
-                /*
-                                uint8_t buf[4];
-                                buf[0] = 0x61;
-                                buf[1] = 0x00;
-                                buf[2] = 0x10;
-                                buf[3] = 0x04;
-                                RingBuffer_addData(&txBuffer, buf, 4);
-                                RingBuffer_addData(&txBuffer, (uint8_t*)TYPE_DISCONNECT, 4);
-                                replace_char(DSTARName, 7, 0, ' ');
-                                RingBuffer_addData(&txBuffer, (uint8_t*)DSTARName, 7);
-                                RingBuffer_addData(&txBuffer, (uint8_t*)DSTARModule, 1); */
-            }
-            //  DSTARReflDisconnect = true;
-        }
-        else if (memcmp(type, TYPE_STATUS, typeLen) == 0)
-        {
-        }
-        else if (memcmp(type, TYPE_HEADER, typeLen) == 0)
-        {
-            if (gwStateStartTx())
-            {
-                char cBuffer[37];
-                uint8_t ucBytes[12];
-                memcpy(rpt2Call, buffer + 11, 8);
-                memcpy(rpt1Call, buffer + 19, 8);
-                memcpy(urCall, buffer + 27, 8);
-                memcpy(myCall, buffer + 35, 8);
-                memcpy(suffix, buffer + 43, 4);
-                sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, urCall, myCall, suffix);
-                fprintf(stderr, "Header: %s\n", cBuffer);
-                memcpy(ucBytes, AMBE_SILENCE, 9);
-                ucBytes[9]  = 0x55;
-                ucBytes[10] = 0x2d;
-                ucBytes[11] = 0x16;
-                sendToGw(cBuffer, ucBytes, false, false);
-            }
-        }
-        else if (memcmp(type, TYPE_DATA, typeLen) == 0)
-        {
-            if (gwStateIsTxActive())
-            {
-                gwStateUpdateTime();
-                char cBuffer[37];
-                sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, urCall, myCall, suffix);
-                //     dump((char*)"ucData", (uint8_t*)(buffer + 8), 12);
-                if (buffer[17] == 0x55 && buffer[18] == 0x55 && buffer[19] == 0x55)
-                    sendToGw(cBuffer, (uint8_t*)(buffer + 8), false, true);
-                else
-                    sendToGw(cBuffer, (uint8_t*)(buffer + 8), false, false);
-            }
-        }
-        else if (memcmp(type, TYPE_EOT, typeLen) == 0)
-        {
-            if (gwStateIsTxActive())
-                gwStateEnd("Host EOT");
-        }
-
-        delay(500);
-    }
-    fprintf(stderr, "Client thread exited.\n");
-    close(sockfd);
-    int iRet  = 100;
-    connected = false;
-    pthread_exit(&iRet);
-    return 0;
-}
-#endif
+/*
+ * main()
+ *
+ * Program entry.  Parses the command line (-m modem number 1 to 10; -d
+ * daemon; -x debug; -v version), reads the configuration, starts the client
+ * thread and then runs until the program is stopped.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on exit, 1 on a bad argument.
+ */
 int main(int argc, char** argv)
 {
     bool daemon = false;
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1909,7 +1731,7 @@ int main(int argc, char** argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "DSTAR gateway", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -1917,8 +1739,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(DSTARHost, sizeof(DSTARHost), "%s", optarg);   /* where the protocol service runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -1930,7 +1755,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: DSTAR_Gateway [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: DSTAR_Gateway [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1941,7 +1766,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "DSTAR_Gateway: error in fork(), exiting\n");
+            reportError(modemName, "DSTAR gateway", "DSTAR_Gateway: error in fork(), exiting");
             return 1;
         }
 
@@ -1979,7 +1804,7 @@ int main(int argc, char** argv)
     int err = pthread_create(&(clientid), NULL, &startClient, DSTARHost);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create DSTAR host thread :[%s]", strerror(err));
+        reportError(modemName, "DSTAR gateway", "Can't create DSTAR host thread :[%s]", strerror(err));
         return 1;
     }
     else

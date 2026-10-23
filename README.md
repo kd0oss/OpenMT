@@ -61,6 +61,8 @@ OpenMT			-- project root
 			gateway	-- M17 gateway program
 		P25		-- P25 protocol service program
 			gateway	-- P25 gateway program
+		FM		-- FM repeater service program
+			gateway	-- EchoLink gateway for the FM service
 			...	-- other protocols as needed
 
 
@@ -133,3 +135,7 @@ compared to MMDVM and MMDVMHost programs.
 
 As stated above I would like this project to be as flexible as possible
 with regards to adding new radio protocols and services.
+
+- **Service control from the dashboard**: Settings -> Services lists the hosts and gateways kept in the `modem_host.services` table. A logged in user can start, stop and restart them and choose which start at boot. A root service manager (`tools/service_manager`) carries out the requests; see its README.
+- **Host list updates from the dashboard**: the "Update host lists" box in Settings -> Services runs `updateHosts.php` for the lists kept in `modem_host.host_update_sections` (import `db/host_updates.sql`), either the ticked ones or all, and shows the log while it runs. `updateHosts.php` and `updateHostsRun.php` only run from the command line; the web server starts the runner in the background.
+- **Hosts and gateways on other machines**: every host and gateway takes `-a <address>` (dotted IPv4 address or host name, default `127.0.0.1`). A host uses it to find Modem_Host, a gateway to find its protocol host, so the pieces can run on different machines.

@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -41,7 +42,7 @@
 
 #include "fm_dsp.h"
 
-#define VERSION "2026-10-11"
+#define VERSION "2026-10-20"
 #define BUFFER_SIZE 600
 
 #define AUD_RING 65536U
@@ -52,6 +53,24 @@
 #define FM_DRAIN_TICKS 100U
 #define FM_MODE_WAIT_TICKS 250U
 #define FM_EVENTS 16U
+
+/* EchoLink gateway link */
+#define LINK_RING 32768U
+#define LINK_MASK (LINK_RING - 1U)
+#define LINK_CHUNK 160U
+#define LINK_DELAY 680U
+#define LINK_WATCHDOG_TICKS 500U
+#define LINK_NAME_LEN 24U
+#define GW_FIFO_PACKETS 64U
+#define GW_PACKET_MAX 340U
+#define COMM_UPDATE_CONF 0x04
+#define TYPE_CONNECT "CONN"
+#define TYPE_DISCONNECT "DISC"
+#define TYPE_NACK "NACK"
+#define TYPE_LINK_AUDIO "ELAU"
+#define TYPE_LINK_RX "ELRX"
+#define TYPE_LINK_PTT "ELPT"
+#define TYPE_LINK_DTMF "ELDT"
 
 #ifndef FM_TEST
 #define FM_STATIC static
@@ -152,6 +171,10 @@ typedef struct
     bool     fwCallAtEnd;
     bool     fwCallAtLatch;
     bool     fwCosInvert;
+    float    linkRxLevel;
+    float    linkTxLevel;
+    uint32_t linkPrebuf;
+    bool     dtmfEnable;
 } FmConfig;
 
 uint8_t  packetType    = 0;
@@ -223,32 +246,61 @@ bool      fwParamsDue    = false;
 
 uint32_t  dbgSamples     = 0;
 
+/* EchoLink link: audio and control to and from fm_gateway */
+uint16_t  serverPort     = 18700;
+volatile bool gwConnected = false;
+volatile bool gwLinked    = false;
+volatile int  gwFd        = -1;
+char      linkName[LINK_NAME_LEN] = "";
+pthread_mutex_t gwMutex  = PTHREAD_MUTEX_INITIALIZER;
+uint8_t   gwOut[GW_FIFO_PACKETS][GW_PACKET_MAX];
+uint16_t  gwOutLen[GW_FIFO_PACKETS];
+unsigned int gwHead      = 0;
+unsigned int gwTail      = 0;
+
+FmDecim   linkDecim;
+FmInterp  linkInterp;
+FmDtmf    dtmf;
+bool      dtmfBusy       = false;
+int16_t   linkOut[LINK_CHUNK];
+unsigned int linkOutCnt  = 0;
+int16_t   linkDly[LINK_DELAY];
+unsigned int linkDlyPos  = 0;
+bool      linkRxActive   = false;
+float     lnk[LINK_RING];
+uint64_t  lwIdx          = 0;
+uint64_t  lrIdx          = 0;
+bool      linkTx         = false;
+bool      linkPend       = false;
+bool      linkEnding     = false;
+uint64_t  linkLastTick   = 0;
+
 /*
  * error()
- *   Prints msg with perror() and exits the process with status 1.
+ *
+ * Reports msg with reportError() and exits the process with status 1.
+ *
+ * Parameters:
+ *   msg - Text printed before the system error message.
+ *
+ * Returns: nothing.
  */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "FM", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
 /*
- * delay()
- *   Sleeps for the given number of microseconds.
- */
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = delay / 1000000U;
-    req.tv_nsec = (long)(delay % 1000000U) * 1000L;
-    nanosleep(&req, &rem);
-}
-
-/*
  * sigHandler()
- *   Signal handler for SIGINT and SIGTERM. Asks every loop to finish so the
- *   transmitter is released cleanly.
+ *
+ * Signal handler for SIGINT and SIGTERM. Asks every loop to finish so the
+ * transmitter is released cleanly.
+ *
+ * Parameters:
+ *   sig - The signal number (SIGINT or SIGTERM).
+ *
+ * Returns: nothing.
  */
 FM_STATIC void sigHandler(int sig)
 {
@@ -258,7 +310,15 @@ FM_STATIC void sigHandler(int sig)
 
 /*
  * fmClampf()
- *   Returns v limited to the range lo to hi.
+ *
+ * Returns v limited to the range lo to hi.
+ *
+ * Parameters:
+ *   v  - The value.
+ *   lo - Lower limit.
+ *   hi - Upper limit.
+ *
+ * Returns: v, or lo or hi if v is outside the range.
  */
 static float fmClampf(float v, float lo, float hi)
 {
@@ -271,7 +331,13 @@ static float fmClampf(float v, float lo, float hi)
 
 /*
  * fmRoundByte()
- *   Converts a float to the nearest byte value, limited to 0 to 255.
+ *
+ * Converts a float to the nearest byte value, limited to 0 to 255.
+ *
+ * Parameters:
+ *   v - The value.
+ *
+ * Returns: The nearest byte value, 0 to 255.
  */
 static uint8_t fmRoundByte(float v)
 {
@@ -280,8 +346,15 @@ static uint8_t fmRoundByte(float v)
 
 /*
  * fmWriteAll()
- *   Writes len bytes to the modem host socket under the write lock. Returns
- *   false if the connection failed.
+ *
+ * Writes len bytes to the modem host socket under the write lock. Returns
+ * false if the connection failed.
+ *
+ * Parameters:
+ *   data - The bytes to write.
+ *   len  - Number of bytes in data.
+ *
+ * Returns: true if all bytes were written, false if the connection failed.
  */
 FM_STATIC bool fmWriteAll(const uint8_t* data, size_t len)
 {
@@ -311,7 +384,7 @@ FM_STATIC bool fmWriteAll(const uint8_t* data, size_t len)
 
     if (!ok)
     {
-        fprintf(stderr, "ERROR: modem host connection lost.\n");
+        reportError(modemName, "FM", "modem host connection lost.");
         connected = false;
     }
     return ok;
@@ -319,8 +392,17 @@ FM_STATIC bool fmWriteAll(const uint8_t* data, size_t len)
 
 /*
  * fmConfigText()
- *   Reads the FM setting key into out (size outLen) and, when it is missing,
- *   stores def as its default and returns that instead.
+ *
+ * Reads the FM setting key into out (size outLen) and, when it is missing,
+ * stores def as its default and returns that instead.
+ *
+ * Parameters:
+ *   key    - Name of the FM setting.
+ *   def    - Default stored and used when the setting is missing.
+ *   out    - Receives the value as a string.
+ *   outLen - Size of out, in bytes.
+ *
+ * Returns: nothing.
  */
 static void fmConfigText(const char* key, const char* def, char* out, size_t outLen)
 {
@@ -338,7 +420,14 @@ static void fmConfigText(const char* key, const char* def, char* out, size_t out
 
 /*
  * fmConfigFloat()
- *   Reads the numeric FM setting key, creating it with def when missing.
+ *
+ * Reads the numeric FM setting key, creating it with def when missing.
+ *
+ * Parameters:
+ *   key - Name of the FM setting.
+ *   def - Default, as text, stored and used when the setting is missing.
+ *
+ * Returns: The value as a number.
  */
 static float fmConfigFloat(const char* key, const char* def)
 {
@@ -350,9 +439,14 @@ static float fmConfigFloat(const char* key, const char* def)
 
 /*
  * fmCreateDefaults()
- *   Stores the default FM settings in the database on the first run so they
- *   appear in the dashboard Mode tab. Settings for the sample based modems and
- *   for the MMDVM firmware path are only created for the modem in use.
+ *
+ * Stores the default FM settings in the database on the first run so they
+ * appear in the dashboard Mode tab. Settings for the sample based modems and
+ * for the MMDVM firmware path are only created for the modem in use.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmCreateDefaults(void)
 {
@@ -382,6 +476,10 @@ FM_STATIC void fmCreateDefaults(void)
 
     if (packetType == PACKET_TYPE_SAMP)
     {
+        setHostConfig(modemName, "FM", "linkRxLevel", "input", "50");
+        setHostConfig(modemName, "FM", "linkTxLevel", "input", "50");
+        setHostConfig(modemName, "FM", "linkPrebuf", "input", "120");
+        setHostConfig(modemName, "FM", "dtmfEnable", "input", "1");
         setHostConfig(modemName, "FM", "ctcssHold", "input", "400");
         setHostConfig(modemName, "FM", "noiseOpen", "input", "8");
         setHostConfig(modemName, "FM", "noiseClose", "input", "14");
@@ -418,11 +516,16 @@ FM_STATIC void fmCreateDefaults(void)
 
 /*
  * fmLoadConfig()
- *   Reads every FM setting from the database into cfg, filling in defaults for
- *   any that are missing, then applies them: gains, detector settings, tone
- *   generator and ID timing. Called at start up and when the dashboard saves
- *   the FM section. The CTCSS detector and noise squelch are only restarted when
- *   their settings changed, so a call in progress is not disturbed.
+ *
+ * Reads every FM setting from the database into cfg, filling in defaults for
+ * any that are missing, then applies them: gains, detector settings, tone
+ * generator and ID timing. Called at start up and when the dashboard saves
+ * the FM section. The CTCSS detector and noise squelch are only restarted
+ * when their settings changed, so a call in progress is not disturbed.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmLoadConfig(void)
 {
@@ -458,6 +561,10 @@ FM_STATIC void fmLoadConfig(void)
         n.txDelay    = (uint32_t)fmClampf(fmConfigFloat("txDelay", "100"), 0.0f, 1000.0f);
         if (n.tailMute > n.audioDelay)
             n.tailMute = n.audioDelay;
+        n.linkRxLevel = fmClampf(fmConfigFloat("linkRxLevel", "50"), 0.0f, 200.0f);
+        n.linkTxLevel = fmClampf(fmConfigFloat("linkTxLevel", "50"), 0.0f, 200.0f);
+        n.linkPrebuf  = (uint32_t)fmClampf(fmConfigFloat("linkPrebuf", "120"), 0.0f, 600.0f);
+        n.dtmfEnable  = fmConfigFloat("dtmfEnable", "1") != 0.0f;
     }
     else
     {
@@ -518,8 +625,14 @@ FM_STATIC void fmLoadConfig(void)
 
 /*
  * fmPostEvent()
- *   Queues a call start or end event for the service loop, which writes it to
- *   the database. The audio threads never wait on the database.
+ *
+ * Queues a call start or end event for the service loop, which writes it to
+ * the database. The audio threads never wait on the database.
+ *
+ * Parameters:
+ *   type - The event, EV_START or EV_END.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmPostEvent(FmEventType type)
 {
@@ -534,8 +647,15 @@ FM_STATIC void fmPostEvent(FmEventType type)
 
 /*
  * fmToneText()
- *   Builds the text that identifies how the current call was accessed, used as
- *   the suffix in the dashboard call record.
+ *
+ * Builds the text that identifies how the current call was accessed, used as
+ * the suffix in the dashboard call record.
+ *
+ * Parameters:
+ *   out - Receives the text.
+ *   len - Size of out, in bytes.
+ *
+ * Returns: nothing.
  */
 static void fmToneText(char* out, size_t len)
 {
@@ -547,8 +667,16 @@ static void fmToneText(char* out, size_t len)
 
 /*
  * fmRxAccess()
- *   Combines the CTCSS and noise squelch results into the access decision for
- *   the configured access mode.
+ *
+ * Combines the CTCSS and noise squelch results into the access decision for
+ * the configured access mode.
+ *
+ * Parameters:
+ *   ct - true if the CTCSS tone was detected.
+ *   nq - true if the noise squelch is open.
+ *
+ * Returns: true if the signal has the access that is configured: the tone,
+ *   the noise squelch or both (carrier access uses the noise squelch only).
  */
 static bool fmRxAccess(bool ct, bool nq)
 {
@@ -560,13 +688,202 @@ static bool fmRxAccess(bool ct, bool nq)
 }
 
 /*
+ * gwQueue()
+ *
+ * Puts one packet in the queue for the gateway thread, which writes it to the
+ * gateway. The packet is dropped if the queue is full. Safe to call with
+ * fmMutex held; it only takes gwMutex.
+ *
+ * Parameters:
+ *   data   - The packet.
+ *   length - Number of bytes in the packet (at most GW_PACKET_MAX).
+ *
+ * Returns: nothing.
+ */
+static void gwQueue(const uint8_t* data, unsigned int length)
+{
+    if (length > GW_PACKET_MAX)
+        return;
+
+    pthread_mutex_lock(&gwMutex);
+
+    unsigned int next = (gwHead + 1U) % GW_FIFO_PACKETS;
+
+    if (next != gwTail)
+    {
+        memcpy(gwOut[gwHead], data, length);
+        gwOutLen[gwHead] = (uint16_t)length;
+        gwHead           = next;
+    }
+
+    pthread_mutex_unlock(&gwMutex);
+}
+
+/*
+ * fmLinkSend()
+ *
+ * Wraps a payload in a four character packet type and queues it for the
+ * gateway. Does nothing when no gateway is connected.
+ *
+ * Parameters:
+ *   type    - Four character packet type.
+ *   payload - The bytes after the type (may be NULL when n is 0).
+ *   n       - Number of bytes in payload.
+ *
+ * Returns: nothing.
+ */
+static void fmLinkSend(const char* type, const uint8_t* payload, unsigned int n)
+{
+    uint8_t pkt[GW_PACKET_MAX];
+
+    if (!gwConnected || n + 8U > sizeof(pkt))
+        return;
+
+    pkt[0] = 0x61;
+    pkt[1] = (uint8_t)((8U + n) >> 8);
+    pkt[2] = (uint8_t)((8U + n) & 0xff);
+    pkt[3] = 4;
+    memcpy(pkt + 4, type, 4);
+    if (n > 0)
+        memcpy(pkt + 8, payload, n);
+    gwQueue(pkt, 8U + n);
+}
+
+/*
+ * fmLinkFlushRx()
+ *
+ * Sends the received audio collected so far to the gateway as one ELAU
+ * packet of 8 kSa/s samples. The caller holds fmMutex.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
+static void fmLinkFlushRx(void)
+{
+    uint8_t buf[LINK_CHUNK * 2U];
+
+    if (linkOutCnt == 0)
+        return;
+    for (unsigned int i = 0; i < linkOutCnt; i++)
+    {
+        buf[i * 2U]      = (uint8_t)(linkOut[i] & 0xff);
+        buf[i * 2U + 1U] = (uint8_t)((linkOut[i] >> 8) & 0xff);
+    }
+    fmLinkSend(TYPE_LINK_AUDIO, buf, linkOutCnt * 2U);
+    linkOutCnt = 0;
+}
+
+/*
+ * fmLinkEmit()
+ *
+ * Adds one sample to the packet of received audio for the gateway and sends
+ * the packet when it is full. The caller holds fmMutex.
+ *
+ * Parameters:
+ *   v - The sample.
+ *
+ * Returns: nothing.
+ */
+static void fmLinkEmit(int16_t v)
+{
+    linkOut[linkOutCnt++] = v;
+    if (linkOutCnt >= LINK_CHUNK)
+        fmLinkFlushRx();
+}
+
+/*
+ * fmLinkRx()
+ *
+ * Handles one 8 kSa/s sample of the received audio for the EchoLink link:
+ * runs the DTMF decoder, mutes the tones, and passes the audio to the
+ * gateway while the squelch is open and a station is linked. The audio goes
+ * through a delay of LINK_DELAY samples (85 ms), longer than the decoder needs
+ * to recognise a digit, so the start of the tones can still be muted. A
+ * squelch edge sends an ELRX packet so the gateway knows where a transmission
+ * starts and ends. The caller holds fmMutex.
+ *
+ * Parameters:
+ *   d8   - The 8 kSa/s sample.
+ *   gate - true if the receiver audio gate is open.
+ *
+ * Returns: nothing.
+ */
+static void fmLinkRx(float d8, bool gate)
+{
+    bool send = gwLinked && gate;
+
+    if (cfg.dtmfEnable && rxOpen)
+    {
+        char dg = fmDtmfPush(&dtmf, d8);
+
+        dtmfBusy = true;
+        if (dg != 0)
+        {
+            uint64_t avail = wIdx - rIdx;
+            uint64_t back  = 3U * FM_DTMF_N * FM_LINK_DECIM;
+
+            if (back > avail)
+                back = avail;
+            for (uint64_t k = 1; k <= back; k++)
+                aud[(wIdx - k) & AUD_MASK] = 0.0f;
+            memset(linkDly, 0, sizeof(linkDly));
+            fmLinkSend(TYPE_LINK_DTMF, (const uint8_t*)&dg, 1);
+        }
+    }
+    else if (dtmfBusy)
+    {
+        fmDtmfInit(&dtmf);
+        dtmfBusy = false;
+    }
+
+    if (send && !linkRxActive)
+    {
+        uint8_t on = 1;
+
+        linkRxActive = true;
+        linkOutCnt   = 0;
+        linkDlyPos   = 0;
+        memset(linkDly, 0, sizeof(linkDly));
+        fmLinkSend(TYPE_LINK_RX, &on, 1);
+    }
+    else if (!send && linkRxActive)
+    {
+        uint8_t off = 0;
+
+        for (unsigned int k = 0; k < LINK_DELAY; k++)
+            fmLinkEmit(linkDly[(linkDlyPos + k) % LINK_DELAY]);
+        fmLinkFlushRx();
+        linkRxActive = false;
+        fmLinkSend(TYPE_LINK_RX, &off, 1);
+    }
+
+    if (linkRxActive)
+    {
+        float   v   = dtmf.active ? 0.0f : d8 * (cfg.linkRxLevel / 50.0f);
+        int16_t old = linkDly[linkDlyPos];
+
+        linkDly[linkDlyPos] = (int16_t)lrintf(fmClampf(v, -32000.0f, 32000.0f));
+        linkDlyPos          = (linkDlyPos + 1U) % LINK_DELAY;
+        fmLinkEmit(old);
+    }
+}
+
+/*
  * fmRxSamples()
- *   Processes a block of discriminator samples from the modem host (24 kSa/s).
- *   Each sample goes through the DC blocker, the CTCSS detector and the noise
- *   squelch to decide whether a signal with the right access is present, and
- *   through the voice band filter into the delay ring that feeds the
- *   transmitter. When the tone drops, the most recent audio is muted so the
- *   squelch tail is not repeated.
+ *
+ * Processes a block of discriminator samples from the modem host (24 kSa/s).
+ * Each sample goes through the DC blocker, the CTCSS detector and the noise
+ * squelch to decide whether a signal with the right access is present, and
+ * through the voice band filter into the delay ring that feeds the
+ * transmitter. When the tone drops, the most recent audio is muted so the
+ * squelch tail is not repeated.
+ *
+ * Parameters:
+ *   samples - The discriminator samples.
+ *   count   - Number of samples.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmRxSamples(const int16_t* samples, unsigned int count)
 {
@@ -602,7 +919,8 @@ FM_STATIC void fmRxSamples(const int16_t* samples, unsigned int count)
 
             dbgBand[b] += (double)v * (double)v;
         }
-        float y  = fmAudioShape(&audio, xd) * txGain;
+        float sh = fmAudioShape(&audio, xd);
+        float y  = sh * txGain;
 
         bool access = fmRxAccess(ct, nq);
 
@@ -621,6 +939,16 @@ FM_STATIC void fmRxSamples(const int16_t* samples, unsigned int count)
             rxOpen = false;
 
         bool gate = rxOpen && (useCtcss ? ctcss.weak : true);
+
+        if (gwConnected)
+        {
+            float d8;
+
+            if (fmDecimPush(&linkDecim, sh, &d8))
+                fmLinkRx(d8, gate);
+            if (dtmf.active && rxOpen)
+                y = 0.0f;
+        }
 
         if (audioGate && !gate)
         {
@@ -676,15 +1004,24 @@ FM_STATIC void fmRxSamples(const int16_t* samples, unsigned int count)
 
 /*
  * fmBuildFrame()
- *   Fills out with one transmit frame of audio, 96 samples. The audio comes
- *   from the delay ring when withAudio is set; the CTCSS tone is added when one
- *   is configured, and the CW ID is mixed in while it is running. The caller
- *   holds fmMutex.
+ *
+ * Fills out with one transmit frame of audio, 96 samples. The audio comes
+ * from the delay ring when withAudio is set; the CTCSS tone is added when
+ * one is configured, and the CW ID is mixed in while it is running. The
+ * caller holds fmMutex.
+ *
+ * Parameters:
+ *   out       - Receives FM_FRAME_SAMPLES samples.
+ *   withAudio - true to take the audio from the delay ring, false to make
+ *               only the tone and the ID.
+ *
+ * Returns: nothing.
  */
 static void fmBuildFrame(int16_t* out, bool withAudio)
 {
     float toneAmp = cfg.ctcssTxLevel * 327.67f;
     float cwAmp   = cfg.idLevel * 327.67f;
+    float linkGain = txGain * cfg.linkTxLevel / 50.0f;
 
     for (unsigned int i = 0; i < FM_FRAME_SAMPLES; i++)
     {
@@ -694,6 +1031,12 @@ static void fmBuildFrame(int16_t* out, bool withAudio)
         {
             a = aud[rIdx & AUD_MASK];
             rIdx++;
+        }
+
+        if (withAudio && linkTx && lrIdx < lwIdx)
+        {
+            a += lnk[lrIdx & LINK_MASK] * linkGain;
+            lrIdx++;
         }
 
         float c = 0.0f;
@@ -711,8 +1054,15 @@ static void fmBuildFrame(int16_t* out, bool withAudio)
 
 /*
  * fmSendSamples()
- *   Sends one 96 sample frame to the modem host. With eot set the frame is the
- *   end of transmission marker instead of audio.
+ *
+ * Sends one 96 sample frame to the modem host. With eot set the frame is the
+ * end of transmission marker instead of audio.
+ *
+ * Parameters:
+ *   samples - The FM_FRAME_SAMPLES samples (not used when eot is set).
+ *   eot     - true to send the end of transmission marker instead of audio.
+ *
+ * Returns: true if the frame was sent, false if the connection failed.
  */
 FM_STATIC bool fmSendSamples(const int16_t* samples, bool eot)
 {
@@ -738,8 +1088,13 @@ FM_STATIC bool fmSendSamples(const int16_t* samples, bool eot)
 
 /*
  * fmIdDue()
- *   Returns true when the CW ID is enabled and the ID interval has passed since
- *   the last one. The caller holds fmMutex.
+ *
+ * Returns true when the CW ID is enabled and the ID interval has passed
+ * since the last one. The caller holds fmMutex.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the ID is due.
  */
 static bool fmIdDue(void)
 {
@@ -750,7 +1105,12 @@ static bool fmIdDue(void)
 
 /*
  * fmStartId()
- *   Starts sending the station call as CW. The caller holds fmMutex.
+ *
+ * Starts sending the station call as CW. The caller holds fmMutex.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void fmStartId(void)
 {
@@ -760,11 +1120,16 @@ static void fmStartId(void)
 
 /*
  * fmTxTick()
- *   Advances the transmitter by one 4 ms frame. It runs the state machine that
- *   takes the modem when a signal opens, waits for the modem host to confirm
- *   the mode, keys up, repeats the delayed audio with the CTCSS tone and the
- *   CW ID, holds the carrier for the hang time, then ends the transmission and
- *   releases the modem. Network writes happen after the lock is released.
+ *
+ * Advances the transmitter by one 4 ms frame. It runs the state machine that
+ * takes the modem when a signal opens, waits for the modem host to confirm
+ * the mode, keys up, repeats the delayed audio with the CTCSS tone and the
+ * CW ID, holds the carrier for the hang time, then ends the transmission and
+ * releases the modem. Network writes happen after the lock is released.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmTxTick(void)
 {
@@ -785,13 +1150,16 @@ FM_STATIC void fmTxTick(void)
         audioGate = false;
     }
 
-    if (!rxOpen && lockout && (txState == TXS_IDLE || txState == TXS_HOLD))
+    if (linkTx && ((linkEnding && lrIdx >= lwIdx) || fmTicks - linkLastTick > LINK_WATCHDOG_TICKS))
+        linkTx = false;
+
+    if (!rxOpen && !linkTx && lockout && (txState == TXS_IDLE || txState == TXS_HOLD))
         lockout = false;
 
     switch (txState)
     {
         case TXS_IDLE:
-            if (rxOpen && !lockout)
+            if ((rxOpen || linkTx) && !lockout)
             {
                 txState       = TXS_WAITMODE;
                 waitTicks     = 0;
@@ -833,16 +1201,19 @@ FM_STATIC void fmTxTick(void)
 
         case TXS_ACTIVE:
         {
-            bool drained = !audioGate && rIdx >= audioEndIdx;
+            bool drained = !audioGate && rIdx >= audioEndIdx && !linkTx;
             uint64_t maxLag = (uint64_t)(cfg.audioDelay + cfg.txDelay + 120U) * FM_FS / 1000U;
 
-            if (rxOpen)
+            if (rxOpen || linkTx)
             {
                 if (hangActive)
                 {
                     hangActive = false;
-                    uint64_t back = (uint64_t)cfg.audioDelay * FM_FS / 1000U;
-                    rIdx = wIdx > back ? wIdx - back : 0;
+                    if (rxOpen)
+                    {
+                        uint64_t back = (uint64_t)cfg.audioDelay * FM_FS / 1000U;
+                        rIdx = wIdx > back ? wIdx - back : 0;
+                    }
                 }
                 rxOpenTicks++;
                 if (!lockout && cfg.timeout > 0 && rxOpenTicks * FM_TICK_MS > cfg.timeout * 1000U)
@@ -850,7 +1221,7 @@ FM_STATIC void fmTxTick(void)
                     lockout = true;
                     fprintf(stderr, "FM: transmit timeout after %us, dropping the repeater.\n", cfg.timeout);
                 }
-                if (wIdx - rIdx > maxLag + (uint64_t)FM_FRAME_SAMPLES * 4U)
+                if (rxOpen && wIdx - rIdx > maxLag + (uint64_t)FM_FRAME_SAMPLES * 4U)
                     rIdx = wIdx - maxLag;
             }
             else if (drained)
@@ -936,7 +1307,7 @@ FM_STATIC void fmTxTick(void)
             break;
 
         case TXS_HOLD:
-            if (rxOpen && !lockout)
+            if ((rxOpen || linkTx) && !lockout)
             {
                 txState      = TXS_KEYUP;
                 keyTicks     = cfg.txDelay / FM_TICK_MS;
@@ -970,8 +1341,14 @@ FM_STATIC void fmTxTick(void)
 
 /*
  * fmTxThread()
- *   Thread that calls fmTxTick() every 4 ms, the duration of one 96 sample
- *   frame, from an absolute clock so the transmit stream keeps real time.
+ *
+ * Thread that calls fmTxTick() every 4 ms, the duration of one 96 sample
+ * frame, from an absolute clock so the transmit stream keeps real time.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 FM_STATIC void* fmTxThread(void* arg)
 {
@@ -1004,9 +1381,18 @@ FM_STATIC void* fmTxThread(void* arg)
 
 /*
  * fmSendToModem()
- *   Wraps an MMDVM serial command (cmd byte plus payload) in a modem host
- *   "2MOD" packet. The modem host forwards it to the MMDVM modem as a serial
- *   frame.
+ *
+ * Wraps an MMDVM serial command (cmd byte plus payload) in a modem host
+ * "2MOD" packet. The modem host forwards it to the MMDVM modem as a serial
+ * frame.
+ *
+ * Parameters:
+ *   cmd     - The MMDVM serial command byte.
+ *   payload - The bytes after the command (may be NULL when n is 0).
+ *   n       - Number of bytes in payload.
+ *
+ * Returns: true if the packet was written, false if it does not fit or the
+ *   connection failed.
  */
 FM_STATIC bool fmSendToModem(uint8_t cmd, const uint8_t* payload, unsigned int n)
 {
@@ -1029,10 +1415,15 @@ FM_STATIC bool fmSendToModem(uint8_t cmd, const uint8_t* payload, unsigned int n
 
 /*
  * fmSendFirmwareParams()
- *   Sends the FM settings to the MMDVM firmware: the callsign ID, the
- *   acknowledgement tone and the miscellaneous parameters (timeout, CTCSS,
- *   kerchunk and hang times, access mode, levels, squelch). Used with the plain
- *   MMDVM modem, whose firmware does the CTCSS and repeater work itself.
+ *
+ * Sends the FM settings to the MMDVM firmware: the callsign ID, the
+ * acknowledgement tone and the miscellaneous parameters (timeout, CTCSS,
+ * kerchunk and hang times, access mode, levels, squelch). Used with the
+ * plain MMDVM modem, whose firmware does the CTCSS and repeater work itself.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmSendFirmwareParams(void)
 {
@@ -1102,11 +1493,19 @@ FM_STATIC void fmSendFirmwareParams(void)
 
 /*
  * fmFirmwareFrame()
- *   Handles an FM packet that the modem host forwarded from the MMDVM firmware:
- *   "FMDA" audio data, "FMST" status, "FMEO" end of transmission or "FMRS" RSSI.
- *   Audio data marks a call as active; the end of transmission ends it. The
- *   firmware does the repeating, so the host only tracks the call for the
- *   dashboard.
+ *
+ * Handles an FM packet that the modem host forwarded from the MMDVM
+ * firmware: "FMDA" audio data, "FMST" status, "FMEO" end of transmission or
+ * "FMRS" RSSI. Audio data marks a call as active; the end of transmission
+ * ends it. The firmware does the repeating, so the host only tracks the call
+ * for the dashboard.
+ *
+ * Parameters:
+ *   type    - The four character packet type (FMDA, FMST, FMEO or FMRS).
+ *   payload - The bytes of the packet after the type.
+ *   len     - Number of bytes in payload.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmFirmwareFrame(const char* type, const uint8_t* payload, unsigned int len)
 {
@@ -1140,8 +1539,16 @@ FM_STATIC void fmFirmwareFrame(const char* type, const uint8_t* payload, unsigne
 
 /*
  * fmReadFully()
- *   Reads exactly n bytes from the modem host socket. Returns false when the
- *   connection closed or failed.
+ *
+ * Reads exactly n bytes from the modem host socket. Returns false when the
+ * connection closed or failed.
+ *
+ * Parameters:
+ *   buf - Receives the bytes.
+ *   n   - Number of bytes to read.
+ *
+ * Returns: true if n bytes were read, false if the connection closed or
+ *   failed.
  */
 FM_STATIC bool fmReadFully(uint8_t* buf, size_t n)
 {
@@ -1170,9 +1577,14 @@ FM_STATIC bool fmReadFully(uint8_t* buf, size_t n)
 
 /*
  * fmRegister()
- *   Sends the MODE packet that registers the FM host with the modem host. The
- *   modem radio settings block of the packet is not used for FM and is sent as
- *   zeros.
+ *
+ * Sends the MODE packet that registers the FM host with the modem host. The
+ * modem radio settings block of the packet is not used for FM and is sent as
+ * zeros.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmRegister(void)
 {
@@ -1192,9 +1604,15 @@ FM_STATIC void fmRegister(void)
 
 /*
  * fmClientThread()
- *   Thread that reads the modem host connection. Discriminator samples go to
- *   fmRxSamples(); with the MMDVM modem the forwarded firmware FM packets go to
- *   fmFirmwareFrame(). Command packets update the duplex flag.
+ *
+ * Thread that reads the modem host connection. Discriminator samples go to
+ * fmRxSamples(); with the MMDVM modem the forwarded firmware FM packets go
+ * to fmFirmwareFrame(). Command packets update the duplex flag.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 FM_STATIC void* fmClientThread(void* arg)
 {
@@ -1258,10 +1676,477 @@ FM_STATIC void* fmClientThread(void* arg)
 }
 
 /*
+ * fmLinkAudioIn()
+ *
+ * Takes 8 kSa/s audio from the gateway (a station on the EchoLink link
+ * talking), converts it to the 24 kSa/s transmit rate and puts it in the link
+ * ring, from which the transmitter mixes it with the receiver audio. The
+ * transmitter is keyed once the configured pre-buffer has filled.
+ *
+ * Parameters:
+ *   data  - The samples, 16 bit little endian.
+ *   count - Number of samples.
+ *
+ * Returns: nothing.
+ */
+static void fmLinkAudioIn(const uint8_t* data, unsigned int count)
+{
+    uint64_t prebuf = (uint64_t)cfg.linkPrebuf * FM_FS / 1000U;
+
+    pthread_mutex_lock(&fmMutex);
+
+    for (unsigned int i = 0; i < count; i++)
+    {
+        float x = (float)(int16_t)(data[i * 2U] | (data[i * 2U + 1U] << 8));
+        float o[FM_LINK_DECIM];
+
+        fmInterpRun(&linkInterp, x, o);
+        for (unsigned int k = 0; k < FM_LINK_DECIM; k++)
+            lnk[(lwIdx++) & LINK_MASK] = o[k];
+    }
+
+    if (lwIdx - lrIdx > LINK_RING * 3U / 4U)
+        lrIdx = lwIdx - LINK_RING / 2U;
+
+    linkLastTick = fmTicks;
+    if (!linkTx && linkPend && lwIdx - lrIdx >= prebuf)
+    {
+        linkTx      = true;
+        linkEnding  = false;
+    }
+
+    pthread_mutex_unlock(&fmMutex);
+}
+
+/*
+ * fmLinkPtt()
+ *
+ * Handles the gateway telling that a station on the link started or stopped
+ * talking. A start clears the link ring and waits for the pre-buffer; a stop
+ * lets the transmitter play out what is buffered and then drop the link
+ * audio (a short transmission is played even if the pre-buffer never
+ * filled).
+ *
+ * Parameters:
+ *   on - true when the station started talking, false when it stopped.
+ *
+ * Returns: nothing.
+ */
+static void fmLinkPtt(bool on)
+{
+    pthread_mutex_lock(&fmMutex);
+
+    if (on)
+    {
+        lrIdx        = lwIdx;
+        linkPend     = true;
+        linkEnding   = false;
+        linkTx       = false;
+        linkLastTick = fmTicks;
+        rxOpenTicks  = 0;
+        fmInterpInit(&linkInterp);
+    }
+    else
+    {
+        linkPend   = false;
+        linkEnding = true;
+        if (lwIdx > lrIdx)
+            linkTx = true;
+    }
+
+    pthread_mutex_unlock(&fmMutex);
+}
+
+/*
+ * gwHandle()
+ *
+ * Handles one packet from the gateway: link status replies update the
+ * dashboard, audio from the linked station goes to the link ring and the
+ * talk start and stop messages control the transmitter.
+ *
+ * Parameters:
+ *   buffer  - The packet from the gateway.
+ *   respLen - Length of the packet.
+ *
+ * Returns: nothing.
+ */
+static void gwHandle(const uint8_t* buffer, uint16_t respLen)
+{
+    uint8_t typeLen = buffer[3];
+
+    if (typeLen != 4 || respLen < 8)
+        return;
+
+    char name[LINK_NAME_LEN];
+
+    memset(name, 0x00, sizeof(name));
+    if (respLen > 8)
+        memcpy(name, buffer + 8, (respLen - 8U) < sizeof(name) - 1U ? (respLen - 8U) : sizeof(name) - 1U);
+
+    if (memcmp(buffer + 4, TYPE_LINK_AUDIO, 4) == 0)
+        fmLinkAudioIn(buffer + 8, (respLen - 8U) / 2U);
+    else if (memcmp(buffer + 4, TYPE_LINK_PTT, 4) == 0)
+    {
+        if (respLen > 8)
+            fmLinkPtt(buffer[8] != 0);
+    }
+    else if (memcmp(buffer + 4, TYPE_CONNECT, 4) == 0)
+    {
+        snprintf(linkName, sizeof(linkName), "%s", name);
+        gwLinked = true;
+        ackDashbCommand(modemName, "reflLinkFM", "success");
+        setReflectorStatus(modemName, "FM", name, true);
+    }
+    else if (memcmp(buffer + 4, TYPE_NACK, 4) == 0)
+    {
+        gwLinked = false;
+        ackDashbCommand(modemName, "reflLinkFM", "failed");
+        setReflectorStatus(modemName, "FM", name, false);
+    }
+    else if (memcmp(buffer + 4, TYPE_DISCONNECT, 4) == 0)
+    {
+        gwLinked = false;
+        fmLinkPtt(false);
+        ackDashbCommand(modemName, "reflLinkFM", "unlinked");
+        setReflectorStatus(modemName, "FM", name, false);
+    }
+}
+
+/*
+ * fmFdReadFully()
+ *
+ * Reads exactly n bytes from a socket. Returns false when the connection
+ * closed or failed.
+ *
+ * Parameters:
+ *   fd  - The socket.
+ *   buf - Receives the bytes.
+ *   n   - Number of bytes to read.
+ *
+ * Returns: true if n bytes were read, false if the connection closed or
+ *   failed.
+ */
+static bool fmFdReadFully(int fd, uint8_t* buf, size_t n)
+{
+    size_t got = 0;
+
+    while (got < n && running)
+    {
+        ssize_t r = read(fd, buf + got, n - got);
+
+        if (r == 0)
+            return false;
+        if (r < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                delay(2000);
+                continue;
+            }
+            return false;
+        }
+        got += (size_t)r;
+    }
+    return got == n;
+}
+
+/*
+ * fmFdWriteAll()
+ *
+ * Writes len bytes to a socket. Returns false if the connection failed.
+ *
+ * Parameters:
+ *   fd   - The socket.
+ *   data - The bytes to write.
+ *   len  - Number of bytes in data.
+ *
+ * Returns: true if all bytes were written, false if the connection failed.
+ */
+static bool fmFdWriteAll(int fd, const uint8_t* data, size_t len)
+{
+    size_t sent = 0;
+
+    while (sent < len)
+    {
+        ssize_t n = write(fd, data + sent, len - sent);
+
+        if (n < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                delay(500);
+                continue;
+            }
+            return false;
+        }
+        sent += (size_t)n;
+    }
+    return true;
+}
+
+/*
+ * gatewayThread()
+ *
+ * Serves the connected EchoLink gateway: sends what the audio path and the
+ * dashboard queued for it and reads what it sends. Registers the gateway with
+ * the dashboard while it is connected and clears the link state when it goes.
+ *
+ * Parameters:
+ *   arg - Socket of the gateway connection, passed as a pointer sized
+ *         integer.
+ *
+ * Returns: NULL.
+ */
+static void* gatewayThread(void* arg)
+{
+    int     fd = (int)(intptr_t)arg;
+    uint8_t buffer[BUFFER_SIZE];
+
+    pthread_mutex_lock(&gwMutex);
+    gwHead = gwTail = 0U;
+    pthread_mutex_unlock(&gwMutex);
+
+    pthread_mutex_lock(&fmMutex);
+    gwFd         = fd;
+    gwLinked     = false;
+    gwConnected  = true;
+    linkRxActive = false;
+    linkOutCnt   = 0;
+    dtmfBusy     = true;
+    fmDecimInit(&linkDecim);
+    pthread_mutex_unlock(&fmMutex);
+
+    addGateway(modemName, "main", "FM");
+    fprintf(stderr, "FM: EchoLink gateway connected.\n");
+
+    while (running && connected && gwFd == fd)
+    {
+        fd_set         rfds;
+        struct timeval tv;
+
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        tv.tv_sec  = 0;
+        tv.tv_usec = 20000;
+
+        int r = select(fd + 1, &rfds, NULL, NULL, &tv);
+
+        if (r < 0 && errno != EINTR)
+            break;
+
+        if (r > 0 && FD_ISSET(fd, &rfds))
+        {
+            if (!fmFdReadFully(fd, buffer, 4))
+                break;
+
+            if (buffer[0] != 0x61)
+            {
+                fprintf(stderr, "FM: unknown byte from gateway, 0x%02X\n", buffer[0]);
+                continue;
+            }
+
+            uint16_t respLen = (uint16_t)((buffer[1] << 8) + buffer[2]);
+
+            if (respLen < 5 || respLen > BUFFER_SIZE)
+            {
+                fprintf(stderr, "FM: bad packet length %u from gateway\n", respLen);
+                continue;
+            }
+
+            if (respLen > 4 && !fmFdReadFully(fd, buffer + 4, respLen - 4))
+                break;
+
+            if (debugM && memcmp(buffer + 4, TYPE_LINK_AUDIO, 4) != 0)
+                hexDump("FM gateway data", buffer, respLen);
+
+            gwHandle(buffer, respLen);
+        }
+
+        for (;;)
+        {
+            uint8_t      pkt[GW_PACKET_MAX];
+            unsigned int len;
+
+            pthread_mutex_lock(&gwMutex);
+            if (gwTail == gwHead)
+            {
+                pthread_mutex_unlock(&gwMutex);
+                break;
+            }
+            len = gwOutLen[gwTail];
+            memcpy(pkt, gwOut[gwTail], len);
+            gwTail = (gwTail + 1U) % GW_FIFO_PACKETS;
+            pthread_mutex_unlock(&gwMutex);
+
+            if (!fmFdWriteAll(fd, pkt, len))
+            {
+                reportError(modemName, "FM", "FM: gateway write failed.");
+                r = -1;
+                break;
+            }
+        }
+
+        if (r < 0)
+            break;
+    }
+
+    fprintf(stderr, "FM: EchoLink gateway disconnected.\n");
+
+    close(fd);
+
+    if (gwFd == fd)
+    {
+        pthread_mutex_lock(&fmMutex);
+        gwFd        = -1;
+        gwConnected = false;
+        gwLinked    = false;
+        linkPend    = false;
+        linkEnding  = true;
+        pthread_mutex_unlock(&fmMutex);
+        delGateway(modemName, "main", "FM");
+        clearReflLinkStatus(modemName, "FM");
+    }
+
+    return NULL;
+}
+
+/*
+ * serverThread()
+ *
+ * Listens for the EchoLink gateway on the server port. A new connection
+ * replaces an earlier one.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL.
+ */
+static void* serverThread(void* arg)
+{
+    int                on = 1;
+    struct sockaddr_in addr;
+
+    (void)arg;
+
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (lfd < 0)
+    {
+        reportError(modemName, "FM", "FM: error creating the gateway socket: %s", strerror(errno));
+        return NULL;
+    }
+
+    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+
+    memset(&addr, 0x00, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port        = htons(serverPort);
+
+    if (bind(lfd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+    {
+        reportError(modemName, "FM", "FM: error binding port %u: %s", serverPort, strerror(errno));
+        close(lfd);
+        return NULL;
+    }
+
+    if (listen(lfd, 4) < 0)
+    {
+        reportError(modemName, "FM", "listen: %s", strerror(errno));
+        close(lfd);
+        return NULL;
+    }
+
+    while (running && connected)
+    {
+        int cfd = accept(lfd, NULL, NULL);
+
+        if (cfd < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            reportError(modemName, "FM", "accept: %s", strerror(errno));
+            break;
+        }
+
+        setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+
+        if (gwFd >= 0)
+            shutdown(gwFd, SHUT_RDWR);
+
+        pthread_t id;
+
+        if (pthread_create(&id, NULL, gatewayThread, (void*)(intptr_t)cfd) != 0)
+        {
+            reportError(modemName, "FM", "FM: can't create gateway thread");
+            close(cfd);
+            continue;
+        }
+
+        pthread_detach(id);
+    }
+
+    close(lfd);
+
+    return NULL;
+}
+
+/*
+ * fmLinkDashboard()
+ *
+ * Handles the dashboard's EchoLink commands: "link,<station>,<x>" connects
+ * the link to a station by node number or callsign, "unlink" disconnects it.
+ * Both are passed on to the gateway, which answers with a link status packet
+ * that acknowledges the command. Without a gateway the command is answered
+ * at once.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
+static void fmLinkDashboard(void)
+{
+    char parameter[31] = "";
+
+    readDashbCommand(modemName, "reflLinkFM", parameter);
+    if (strlen(parameter) == 0)
+        return;
+
+    if (!gwConnected)
+    {
+        ackDashbCommand(modemName, "reflLinkFM", "No gateway");
+        return;
+    }
+
+    if (strcasecmp(parameter, "unlink") == 0)
+        fmLinkSend(TYPE_DISCONNECT, NULL, 0);
+    else
+    {
+        char* token = strtok(parameter, ",");
+
+        if (token != NULL && strcasecmp(token, "link") == 0 && (token = strtok(NULL, ",")) != NULL && strlen(token) > 0)
+        {
+            uint8_t name[13];
+
+            memset(name, 0x00, sizeof(name));
+            strncpy((char*)name, token, 12);
+            fmLinkSend(TYPE_CONNECT, name, 12);
+        }
+        else
+            ackDashbCommand(modemName, "reflLinkFM", "failed");
+    }
+}
+
+/*
  * fmServiceEvents()
- *   Writes the queued call start and end events to the dashboard database: the
- *   live call record when a call starts, and the finished record plus a history
- *   entry with the duration when it ends.
+ *
+ * Writes the queued call start and end events to the dashboard database: the
+ * live call record when a call starts, and the finished record plus a
+ * history entry with the duration when it ends.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmServiceEvents(void)
 {
@@ -1298,8 +2183,13 @@ FM_STATIC void fmServiceEvents(void)
 
 /*
  * fmCheckMode()
- *   Looks up the modem host's active mode in the database. Returns true when
- *   it is FM, meaning this host owns the modem.
+ *
+ * Looks up the modem host's active mode in the database. Returns true when
+ * it is FM, meaning this host owns the modem.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the active mode is FM.
  */
 FM_STATIC bool fmCheckMode(void)
 {
@@ -1311,9 +2201,14 @@ FM_STATIC bool fmCheckMode(void)
 
 /*
  * fmServiceOnce()
- *   One pass of the service work done outside the audio threads: database
- *   events, confirming the modem mode for the transmitter, the MMDVM firmware
- *   start up and call timeout, and the dashboard update command.
+ *
+ * One pass of the service work done outside the audio threads: database
+ * events, confirming the modem mode for the transmitter, the MMDVM firmware
+ * start up and call timeout, and the dashboard update command.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmServiceOnce(void)
 {
@@ -1385,6 +2280,14 @@ FM_STATIC void fmServiceOnce(void)
         pthread_mutex_unlock(&fmMutex);
     }
 
+    static time_t lastLink = 0;
+
+    if (packetType == PACKET_TYPE_SAMP && now != lastLink)
+    {
+        lastLink = now;
+        fmLinkDashboard();
+    }
+
     if (now - lastCmd >= 2)
     {
         char parameter[31];
@@ -1394,6 +2297,12 @@ FM_STATIC void fmServiceOnce(void)
         if (strlen(parameter) > 0)
         {
             fmLoadConfig();
+            if (gwConnected)
+            {
+                uint8_t conf = COMM_UPDATE_CONF;
+
+                fmLinkSend(TYPE_COMMAND, &conf, 1);
+            }
             if (packetType == PACKET_TYPE_FRAME && fwModeOk)
                 fwParamsDue = true;
             ackDashbCommand(modemName, "updateConfFM", "success");
@@ -1403,8 +2312,13 @@ FM_STATIC void fmServiceOnce(void)
 
 /*
  * fmConnect()
- *   Opens the TCP connection to the modem host on the modem's port. Returns
- *   false if it could not be made.
+ *
+ * Opens the TCP connection to the modem host on the modem's port. Returns
+ * false if it could not be made.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if connected, false if the connection could not be made.
  */
 FM_STATIC bool fmConnect(void)
 {
@@ -1414,7 +2328,7 @@ FM_STATIC bool fmConnect(void)
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "FM", "Socket creation error: %s", strerror(errno));
         return false;
     }
 
@@ -1425,15 +2339,15 @@ FM_STATIC bool fmConnect(void)
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port   = htons(clientPort);
 
-    if (inet_pton(AF_INET, modemHost, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(modemHost, &serv_addr.sin_addr))
     {
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "FM", "Invalid address/ Address not supported");
         return false;
     }
 
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
     {
-        perror("connection failed");
+        reportError(modemName, "FM", "connection failed: %s", strerror(errno));
         return false;
     }
     return true;
@@ -1441,8 +2355,13 @@ FM_STATIC bool fmConnect(void)
 
 /*
  * fmInitState()
- *   Initialises the DSP state and puts values in cfg that differ from any real
- *   setting, so the first fmLoadConfig() sets every detector up.
+ *
+ * Initialises the DSP state and puts values in cfg that differ from any real
+ * setting, so the first fmLoadConfig() sets every detector up.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 FM_STATIC void fmInitState(void)
 {
@@ -1459,23 +2378,37 @@ FM_STATIC void fmInitState(void)
     memset(&cw, 0, sizeof(cw));
     memset(aud, 0, sizeof(aud));
     wIdx = rIdx = 0;
+
+    fmDecimInit(&linkDecim);
+    fmInterpInit(&linkInterp);
+    fmDtmfInit(&dtmf);
+    memset(lnk, 0, sizeof(lnk));
+    lwIdx = lrIdx = 0;
+    linkTx = linkPend = linkEnding = false;
 }
 
 #ifndef FM_TEST
 /*
  * main()
- *   Program entry. Parses the command line (-m modem number 1-10, -d daemon,
- *   -v version, -x debug), checks the modem type (FM is not available on the
- *   hotspot modems), reads the FM settings, connects to the modem host and
- *   registers the FM mode, then runs the receive and transmit threads and the
- *   service loop until it is stopped.
+ *
+ * Program entry. Parses the command line (-m modem number 1-10, -d daemon,
+ * -v version, -x debug), checks the modem type (FM is not available on the
+ * hotspot modems), reads the FM settings, connects to the modem host and
+ * registers the FM mode, then runs the receive and transmit threads and the
+ * service loop until it is stopped.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on normal exit, 1 on a command line or startup error.
  */
 int main(int argc, char** argv)
 {
     bool daemon = false;
     int  c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1484,16 +2417,20 @@ int main(int argc, char** argv)
                 modemId = (uint8_t)atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "FM", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
                 clientPort = (uint16_t)(18000 + modemId - 1);
+                serverPort = (uint16_t)(18700 + modemId - 1);
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -1505,7 +2442,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: FM_Service [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: FM_Service [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1529,7 +2466,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "FM_Service: error in fork(), exiting\n");
+            reportError(modemName, "FM", "FM_Service: error in fork(), exiting");
             return 1;
         }
         if (pid > 0)
@@ -1556,7 +2493,7 @@ int main(int argc, char** argv)
 
     if (pthread_create(&clientId, NULL, &fmClientThread, NULL) != 0)
     {
-        fprintf(stderr, "Can't create modem host thread.\n");
+        reportError(modemName, "FM", "Can't create modem host thread.");
         return 1;
     }
 
@@ -1567,11 +2504,19 @@ int main(int argc, char** argv)
 
     if (packetType == PACKET_TYPE_SAMP)
     {
+        pthread_t serverId;
+
+        clearReflLinkStatus(modemName, "FM");
+        /* tells the dashboard to show a box for a typed link target (see getLinkInput in data_query.php) */
+        addHostConfigDefault(modemName, "FM", "linkLabel", "linkinput", "EchoLink node or callsign");
+        addHostConfigDefault(modemName, "FM", "linkPattern", "linkinput", "^[A-Za-z0-9\\-/*_]{1,12}$");
         if (pthread_create(&txId, NULL, &fmTxThread, NULL) != 0)
         {
-            fprintf(stderr, "Can't create transmit thread.\n");
+            reportError(modemName, "FM", "Can't create transmit thread.");
             return 1;
         }
+        if (pthread_create(&serverId, NULL, &serverThread, NULL) != 0)
+            reportError(modemName, "FM", "Can't create the EchoLink gateway thread.");
     }
 
     while (running && connected)

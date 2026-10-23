@@ -1,4 +1,5 @@
 #!/bin/sh
+# Created by Rick KD0OSS
 # Downloads the NXDN reflector list used by nxdn_gateway.
 # Format: one reflector per line, "talkgroup address port", # starts a comment.
 #

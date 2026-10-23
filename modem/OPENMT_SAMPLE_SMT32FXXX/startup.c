@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  startup.c - reset handler and vector table for the STM32F105/F107
  *  connectivity line (Cortex-M3) and the STM32F446 (M4) / F722 (M7).
@@ -32,9 +33,19 @@ uint32_t bootMagic __attribute__((section(".noinit")));
 #endif
 
 #if BOOTLOADER_COMMAND && !USE_LOADER
-/* Called first thing after the reset that hw_enter_bootloader() requested:
- * the chip is in its reset state (HSI, no peripherals running), exactly
- * what the ROM boot loader expects. */
+/*
+ * jumpToBootloader()
+ *
+ * Starts the chip's ROM boot loader.  It is called first thing after the
+ * reset that hw_enter_bootloader() requested, when the chip is in its reset
+ * state (HSI, no peripherals running), which is exactly what the ROM boot
+ * loader expects.  The stack pointer and entry address are loaded from the
+ * boot loader's vector table and control jumps there.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing (does not return).
+ */
 static void __attribute__((noreturn)) jumpToBootloader(void)
 {
     uint32_t sp = *(volatile uint32_t *)BOOTLOADER_ADDR;
@@ -122,6 +133,18 @@ const vector_t vectorTable[16 + NUM_IRQS] =
     [16 + 30] = TIM4_IRQHandler,
 };
 
+/*
+ * Reset_Handler()
+ *
+ * Reset entry point: jumps to the ROM boot loader if the boot magic value
+ * was left by a boot loader request, points the vector table register at
+ * this program's vector table, copies initialised data from flash to RAM,
+ * clears the BSS, calls main() and loops if main ever returns.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void Reset_Handler(void)
 {
     uint32_t *src = &_sidata;
@@ -153,6 +176,15 @@ void Reset_Handler(void)
     }
 }
 
+/*
+ * Default_Handler()
+ *
+ * Handler for interrupts that have no handler of their own; loops forever.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void Default_Handler(void)
 {
     for (;;)

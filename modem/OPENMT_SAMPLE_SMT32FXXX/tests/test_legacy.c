@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /* Checks the "raw counts" scaling used to match older firmware.
  * Build:  make -C tests legacy */
 #include <stdio.h>
@@ -11,6 +12,18 @@
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL: "); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
+/*
+ * main()
+ *
+ * Test of the "raw counts" scaling used to match older firmware: an RX input
+ * 1000 counts above mid-scale at RX level 128 must give 500 in the RX frame,
+ * and a TX sample of 2000 at TX level 150 must give a DAC value of 2048 +
+ * 2000 * 150 / 256.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 if both checks pass, 1 otherwise.
+ */
 int main(void)
 {
     uint8_t cfg[196] = { 0x61, 0xC4, 0x20, 0x01, 128 };

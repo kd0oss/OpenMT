@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  OpenMT SAMPLE-mode firmware for STM32F105, F446 and F722
  *
@@ -518,7 +519,7 @@
 #define FW_NAME             "OpenMT-SAMP-" MCU_NAME
 #endif
 #ifndef FW_VERSION
-#define FW_VERSION          "1.5.9-uartdiag"
+#define FW_VERSION          "1.5.9"
 #endif
 
 /* "Reboot into the ROM bootloader" command, for boards where the Pi has */

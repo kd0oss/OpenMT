@@ -70,6 +70,20 @@ struct alsa_playback
     unsigned int negotiated_rate;
 };
 
+/*
+ * log_negotiated()
+ *
+ * Logs the rate, buffer size and period size the ALSA driver reports for a
+ * configured PCM device.  The rate is only advisory because the SX1255 is
+ * the I2S master and sets the real bus rate.
+ *
+ * Parameters:
+ *   kind   - "capture" or "playback", used in the log text.
+ *   handle - PCM device whose current hardware parameters are read.
+ *
+ * Returns: The driver-reported sample rate in Hz, or 0 if the parameters
+ *   cannot be read.
+ */
 static unsigned int log_negotiated(const char* kind, snd_pcm_t* handle)
 {
     snd_pcm_hw_params_t* hw_params;
@@ -93,25 +107,23 @@ static unsigned int log_negotiated(const char* kind, snd_pcm_t* handle)
 }
 
 /*
- * Configure a PCM handle: S32_LE, interleaved, stereo, explicit rate and
- * buffer/period sizes.
+ * reapply_base()
  *
- * So: request 125000 Hz explicitly, exact match first (a driver that
- * genuinely runs the SX1255 at exactly that rate should accept it
- * without needing the reference's "near" avoidance -- REFINE-based exact
- * matches are the case that reportedly fails on their driver, not
- * necessarily this one), falling back to nearest-available if that's
- * refused. Only if *both* fail does this fall back to the reference's
- * "don't ask" approach, at which point you should treat the negotiated
- * rate this logs at startup as a real diagnostic: if it's nowhere near
- * 125000 Hz, capture/playback timing on this system cannot be trusted
- * and something at the device-tree-overlay/driver level needs attention.
+ * Resets the hardware parameter set and applies the fixed base settings:
+ * interleaved read/write access, stereo, 32-bit little-endian samples and
+ * the requested rate.  The exact rate is tried first, then the nearest rate;
+ * if both fail the parameters are reset and the driver default rate is used.
+ * It is called again whenever a failed buffer or period call may have left
+ * the parameters inconsistent.
  *
- * The buffer/period negotiation below (separate from rate) keeps the
- * fallback-candidate-with-reset approach from the reference's
- * NegotiateBufferSize/NegotiatePeriodSize, since a *failed* refine call
- * can leave hw_params in a state that makes even the final commit fail --
- * not just the parameter that failed.
+ * Parameters:
+ *   kind        - "capture" or "playback", used in log text.
+ *   handle      - PCM device being configured.
+ *   hw_params   - Hardware parameter set that is reset and filled in.
+ *   sample_rate - Requested sample rate in Hz.
+ *
+ * Returns: true if the base parameters were applied, false if a mandatory
+ *   setting was refused.
  */
 static bool reapply_base(const char* kind, snd_pcm_t* handle, snd_pcm_hw_params_t* hw_params, unsigned int sample_rate)
 {
@@ -173,6 +185,23 @@ static bool reapply_base(const char* kind, snd_pcm_t* handle, snd_pcm_hw_params_
     return true;
 }
 
+/*
+ * configure_pcm()
+ *
+ * Configures a PCM device: base parameters, then buffer size and period
+ * size, each trying a list of candidate sizes until the driver accepts one.
+ * If every candidate fails the driver default is used.  The parameters are
+ * committed and the device is prepared.
+ *
+ * Parameters:
+ *   kind        - "capture" or "playback", used in log text.
+ *   handle      - PCM device to configure.
+ *   sample_rate - Requested sample rate in Hz.
+ *   out_rate    - Receives the driver-reported rate after configuration; may
+ *                 be NULL.
+ *
+ * Returns: true on success, false if the device could not be configured.
+ */
 static bool configure_pcm(const char* kind, snd_pcm_t* handle, unsigned int sample_rate, unsigned int* out_rate)
 {
     snd_pcm_hw_params_t* hw_params;
@@ -263,6 +292,19 @@ static bool configure_pcm(const char* kind, snd_pcm_t* handle, unsigned int samp
     return true;
 }
 
+/*
+ * alsa_capture_open()
+ *
+ * Opens an ALSA device for capturing the SX1255 I/Q stream and configures
+ * it.
+ *
+ * Parameters:
+ *   device      - ALSA device name.
+ *   sample_rate - Requested sample rate in Hz.
+ *
+ * Returns: A new capture handle, or NULL if the device cannot be opened or
+ *   configured.
+ */
 alsa_capture_t* alsa_capture_open(const char* device, unsigned int sample_rate)
 {
     alsa_capture_t* cap = calloc(1, sizeof(*cap));
@@ -286,11 +328,32 @@ alsa_capture_t* alsa_capture_open(const char* device, unsigned int sample_rate)
     return cap;
 }
 
+/*
+ * alsa_capture_get_rate()
+ *
+ * Gets the sample rate the driver reported when the capture device was
+ * configured.
+ *
+ * Parameters:
+ *   cap - Capture handle, may be NULL.
+ *
+ * Returns: Rate in Hz, or 0 if cap is NULL.
+ */
 unsigned int alsa_capture_get_rate(alsa_capture_t* cap)
 {
     return (cap != NULL) ? cap->negotiated_rate : 0;
 }
 
+/*
+ * alsa_capture_close()
+ *
+ * Closes the capture device and frees the handle and its buffer.
+ *
+ * Parameters:
+ *   cap - Capture handle, may be NULL.
+ *
+ * Returns: nothing.
+ */
 void alsa_capture_close(alsa_capture_t* cap)
 {
     if (cap == NULL)
@@ -305,6 +368,22 @@ void alsa_capture_close(alsa_capture_t* cap)
     free(cap);
 }
 
+/*
+ * alsa_capture_read()
+ *
+ * Reads up to max_samples stereo frames from the capture device and converts
+ * them to complex floats (left channel is I, right channel is Q) scaled to
+ * the range -1 to +1.  An overrun is recovered and reported as zero samples.
+ *
+ * Parameters:
+ *   cap         - Capture handle.
+ *   out         - Receives the complex samples; must hold max_samples
+ *                 entries.
+ *   max_samples - Maximum number of frames to read.
+ *
+ * Returns: Number of samples written to out, 0 after a recovered overrun, or
+ *   -1 on an unrecoverable error.
+ */
 int alsa_capture_read(alsa_capture_t* cap, alsa_cplx_t* out, int max_samples)
 {
     snd_pcm_sframes_t n;
@@ -340,6 +419,19 @@ int alsa_capture_read(alsa_capture_t* cap, alsa_cplx_t* out, int max_samples)
     return (int)n;
 }
 
+/*
+ * alsa_playback_open()
+ *
+ * Opens an ALSA device for playing the I/Q stream to the SX1255 and
+ * configures it.
+ *
+ * Parameters:
+ *   device      - ALSA device name.
+ *   sample_rate - Requested sample rate in Hz.
+ *
+ * Returns: A new playback handle, or NULL if the device cannot be opened or
+ *   configured.
+ */
 alsa_playback_t* alsa_playback_open(const char* device, unsigned int sample_rate)
 {
     alsa_playback_t* pb = calloc(1, sizeof(*pb));
@@ -363,11 +455,32 @@ alsa_playback_t* alsa_playback_open(const char* device, unsigned int sample_rate
     return pb;
 }
 
+/*
+ * alsa_playback_get_rate()
+ *
+ * Gets the sample rate the driver reported when the playback device was
+ * configured.
+ *
+ * Parameters:
+ *   pb - Playback handle, may be NULL.
+ *
+ * Returns: Rate in Hz, or 0 if pb is NULL.
+ */
 unsigned int alsa_playback_get_rate(alsa_playback_t* pb)
 {
     return (pb != NULL) ? pb->negotiated_rate : 0;
 }
 
+/*
+ * alsa_playback_close()
+ *
+ * Closes the playback device and frees the handle and its buffer.
+ *
+ * Parameters:
+ *   pb - Playback handle, may be NULL.
+ *
+ * Returns: nothing.
+ */
 void alsa_playback_close(alsa_playback_t* pb)
 {
     if (pb == NULL)
@@ -382,6 +495,18 @@ void alsa_playback_close(alsa_playback_t* pb)
     free(pb);
 }
 
+/*
+ * clampf()
+ *
+ * Limits a value to a range.
+ *
+ * Parameters:
+ *   v  - Value to limit.
+ *   lo - Lower limit.
+ *   hi - Upper limit.
+ *
+ * Returns: v, or the nearest limit if it is outside the range.
+ */
 static float clampf(float v, float lo, float hi)
 {
     if (v < lo)
@@ -395,6 +520,22 @@ static float clampf(float v, float lo, float hi)
     return v;
 }
 
+/*
+ * alsa_playback_write()
+ *
+ * Converts complex float samples (clamped to -1..+1) to 32-bit stereo frames
+ * and writes them all to the playback device, waiting until the device has
+ * accepted everything.  An underrun is recovered and the write continues.
+ *
+ * Parameters:
+ *   pb        - Playback handle.
+ *   samples   - Complex samples to play (real part is I, imaginary part is
+ *               Q).
+ *   n_samples - Number of samples.
+ *
+ * Returns: true when all samples were written, false on an unrecoverable
+ *   error.
+ */
 bool alsa_playback_write(alsa_playback_t* pb, const alsa_cplx_t* samples, int n_samples)
 {
     int i;
@@ -455,42 +596,51 @@ bool alsa_playback_write(alsa_playback_t* pb, const alsa_cplx_t* samples, int n_
     return true;
 }
 
+/*
+ * alsa_playback_drain()
+ *
+ * Waits until everything already written has been played, then prepares the
+ * device for the next transmission.  This blocks.
+ *
+ * Parameters:
+ *   pb - Playback handle.
+ *
+ * Returns: nothing.
+ */
 void alsa_playback_drain(alsa_playback_t* pb)
 {
     snd_pcm_drain(pb->handle);
     snd_pcm_prepare(pb->handle);
 }
 
-/* Resets the PCM device's internal state -- buffer position tracking,
- * any pending xrun/underrun condition left over from the device
- * sitting idle between transmissions -- without the blocking
- * snd_pcm_drain() call alsa_playback_drain() makes. snd_pcm_prepare()
- * itself is non-blocking and safe to call every time a new
- * transmission is about to start, unlike drain (which waits for
- * already-queued audio to finish playing, with no built-in timeout --
- * unsuitable to call on every key-up/key-down cycle during normal
- * operation, only at final shutdown). Exists specifically so every new
- * transmission starts from a hardware-level-clean PCM device, the same
- * way tx_queue_clear() ensures a software-level-clean queue -- a
- * device that's underrun during an idle gap between transmissions and
- * is only ever recovered reactively, mid-write, via
- * alsa_playback_write()'s own snd_pcm_recover() call, may not be in
- * the same state as one explicitly prepared fresh before that first
- * write ever happens. */
+/*
+ * alsa_playback_prepare()
+ *
+ * Resets the playback device without waiting, clearing position tracking and
+ * any underrun left from the idle time between transmissions.
+ *
+ * Parameters:
+ *   pb - Playback handle.
+ *
+ * Returns: nothing.
+ */
 void alsa_playback_prepare(alsa_playback_t* pb)
 {
     snd_pcm_prepare(pb->handle);
 }
 
-/* Frames currently buffered in ALSA's hardware playback queue -- i.e.
- * how much "lookahead" of already-written audio is still waiting to
- * actually reach the DAC. Returns -1 on error (e.g. device not
- * running yet). Exists so a caller can pace writes against the
- * hardware's own true consumption rate directly, rather than against
- * an independent software clock assumption about what that rate
- * should be -- the two are never exactly identical oscillators, and
- * pacing against an assumed rate that's even slightly off from the
- * real one accumulates drift over time. */
+/*
+ * alsa_playback_delay_frames()
+ *
+ * Gets the number of frames written but not yet played, so a caller can pace
+ * its writes against the hardware.
+ *
+ * Parameters:
+ *   pb - Playback handle.
+ *
+ * Returns: Number of queued frames, or -1 on error (for example the device
+ *   is not running).
+ */
 long alsa_playback_delay_frames(alsa_playback_t* pb)
 {
     snd_pcm_sframes_t delay = 0;

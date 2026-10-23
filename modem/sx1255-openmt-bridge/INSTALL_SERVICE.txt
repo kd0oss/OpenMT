@@ -1,0 +1,14 @@
+SX1255 bridge as a service
+Created by Rick KD0OSS
+
+  cd modem/sx1255-openmt-bridge && mkdir -p build && cd build && cmake .. && make
+  sudo cp ../sx1255-bridge.service /etc/systemd/system/        (edit paths and options first)
+  sudo mkdir -p /etc/systemd/system/modem-host.service.d
+  sudo cp ../modem-host.service.d/sx1255.conf /etc/systemd/system/modem-host.service.d/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now sx1255-bridge
+  mysql -u root -p < db/services.sql          (adds the bridge to the dashboard Services tab)
+
+Set the modem host's serial port (modemtty) to the --pty-symlink path, /dev/sx1255modem.
+The modem host opens the bridge's PTY when it starts, so restart the modem host after the
+bridge is restarted.

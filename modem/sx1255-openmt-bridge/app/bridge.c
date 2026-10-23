@@ -94,6 +94,18 @@
  * between a key-down and the next key-up, across a working case
  * against a failing one -- without needing to guess at timing from
  * message order alone. */
+/*
+ * log_msg()
+ *
+ * Prints a printf-style message to stderr with a Unix timestamp
+ * (seconds.milliseconds) in front, so timing can be read straight from the
+ * log.
+ *
+ * Parameters:
+ *   fmt - printf format string, followed by its arguments.
+ *
+ * Returns: nothing.
+ */
 static void
 log_msg(const char *fmt, ...)
 {
@@ -247,6 +259,17 @@ typedef struct
 
 static volatile sig_atomic_t g_stop = 0;
 
+/*
+ * handle_signal()
+ *
+ * Signal handler for SIGINT and SIGTERM; sets the global stop flag so the
+ * loops and threads exit.
+ *
+ * Parameters:
+ *   sig - Signal number (not used).
+ *
+ * Returns: nothing.
+ */
 static void
 handle_signal(int sig)
 {
@@ -254,6 +277,18 @@ handle_signal(int sig)
     g_stop = 1;
 }
 
+/*
+ * config_set_defaults()
+ *
+ * Fills the bridge configuration with its default values (SPI and GPIO
+ * devices, 434 MHz, gains, PLL bandwidths, ALSA devices, deviation and the
+ * TX/RX timing and level settings).
+ *
+ * Parameters:
+ *   cfg - Configuration to fill in.
+ *
+ * Returns: nothing.
+ */
 static void
 config_set_defaults(bridge_config_t *cfg)
 {
@@ -305,6 +340,16 @@ config_set_defaults(bridge_config_t *cfg)
                             * adjusting for a different one. */
 }
 
+/*
+ * print_usage()
+ *
+ * Prints the command line help text through log_msg().
+ *
+ * Parameters:
+ *   argv0 - Program name to show in the usage line.
+ *
+ * Returns: nothing.
+ */
 static void
 print_usage(const char *argv0)
 {
@@ -398,6 +443,20 @@ print_usage(const char *argv0)
 
 #define NEXT_ARG() (i + 1 < argc ? argv[++i] : NULL)
 
+/*
+ * parse_args()
+ *
+ * Sets the defaults, then reads the command line options into the
+ * configuration.  -h or --help prints the usage and exits the program.
+ *
+ * Parameters:
+ *   argc - Argument count.
+ *   argv - Argument vector.
+ *   cfg  - Configuration to fill in.
+ *
+ * Returns: true if all arguments were understood, false after an unknown or
+ *          incomplete option (usage is printed).
+ */
 static bool
 parse_args(int argc, char **argv, bridge_config_t *cfg)
 {
@@ -534,6 +593,19 @@ parse_args(int argc, char **argv, bridge_config_t *cfg)
  * this program), and fills slave_path with the slave device path (e.g.
  * "/dev/pts/4") -- point OpenMT's modemtty config at that path, or at
  * --pty-symlink's path if one was requested. */
+/*
+ * open_bridge_pty()
+ *
+ * Creates the pseudo terminal pair the host connects to (the Modem_Host
+ * modemtty setting), puts both ends in raw mode and keeps the slave end open
+ * for the life of the program.
+ *
+ * Parameters:
+ *   slave_path     - Receives the slave device path, for example /dev/pts/4.
+ *   slave_path_cap - Size of slave_path in bytes.
+ *
+ * Returns: The master file descriptor, or -1 if the pty could not be created.
+ */
 static int
 open_bridge_pty(char *slave_path, size_t slave_path_cap)
 {
@@ -576,6 +648,24 @@ open_bridge_pty(char *slave_path, size_t slave_path_cap)
  * byte in the frame including the 0x61 itself (matches processSerial()'s
  * "respLen = buffer[1]" then reading up to that many total bytes). */
 
+/*
+ * write_frame()
+ *
+ * Sends one OpenMT frame ([0x61][total length][type and connection][payload])
+ * to the host.  The write waits at most 100 ms for the pty to accept data; if
+ * nothing is reading, the frame is dropped so the RX thread and shutdown
+ * cannot block.
+ *
+ * Parameters:
+ *   fd            - Master side of the pty.
+ *   type_and_conn - Frame type in the high nibble, connection or mode in the
+ *                   low nibble.
+ *   payload       - Frame payload, may be NULL when payload_len is 0.
+ *   payload_len   - Payload length in bytes (at most 252).
+ *
+ * Returns: true if the whole frame was written, false if it was too large,
+ *          the pty was not ready or the write was short.
+ */
 static bool
 write_frame(int fd, uint8_t type_and_conn, const uint8_t *payload, uint8_t payload_len)
 {
@@ -646,6 +736,25 @@ write_frame(int fd, uint8_t type_and_conn, const uint8_t *payload, uint8_t paylo
  * the same way (nothing to do right now, try again shortly), which is
  * also what makes this safe for the caller's main loop to re-check its
  * own exit condition frequently regardless of host-side traffic. */
+/*
+ * read_frame()
+ *
+ * Reads one OpenMT frame from the host.  It waits up to 500 ms for data,
+ * skips bytes until a 0x61 start byte, then reads the rest of the frame with
+ * blocking reads so the stream cannot lose sync mid-frame.  If the payload is
+ * larger than the caller's buffer it is truncated to the buffer size.
+ *
+ * Parameters:
+ *   fd            - Master side of the pty.
+ *   type_and_conn - Receives the type (high nibble) and connection or mode
+ *                   (low nibble).
+ *   payload       - Receives the payload.
+ *   payload_len   - On entry the size of payload; on return the payload
+ *                   length.
+ *
+ * Returns: true if a frame was read, false on timeout, read error, end of
+ *          file or an invalid length.
+ */
 static bool
 read_frame(int fd, uint8_t *type_and_conn, uint8_t *payload, uint8_t *payload_len)
 {
@@ -741,6 +850,16 @@ typedef struct
     pthread_mutex_t mutex;
 } tx_queue_t;
 
+/*
+ * tx_queue_init()
+ *
+ * Empties the TX sample queue and initialises its mutex.
+ *
+ * Parameters:
+ *   q - Queue to initialise.
+ *
+ * Returns: nothing.
+ */
 static void
 tx_queue_init(tx_queue_t *q)
 {
@@ -759,6 +878,17 @@ tx_queue_init(tx_queue_t *q)
  * after it, meaning every subsequent transmission would start by
  * playing out stale data from the end of the previous one before ever
  * reaching its own real content. */
+/*
+ * tx_queue_clear()
+ *
+ * Throws away everything in the queue.  Called at every de-key so old data
+ * from the last transmission is not played at the start of the next one.
+ *
+ * Parameters:
+ *   q - Queue to empty.
+ *
+ * Returns: nothing.
+ */
 static void
 tx_queue_clear(tx_queue_t *q)
 {
@@ -774,6 +904,20 @@ tx_queue_clear(tx_queue_t *q)
  * means the playback thread is falling behind for some other reason,
  * and blocking the frame-reading loop here would reintroduce the exact
  * problem this queue exists to avoid. */
+/*
+ * tx_queue_push()
+ *
+ * Adds bytes to the queue without ever blocking; if there is not enough room,
+ * nothing is added.
+ *
+ * Parameters:
+ *   q    - Queue.
+ *   data - Bytes to add.
+ *   len  - Number of bytes.
+ *
+ * Returns: true if the data was queued, false if the queue was too full and
+ *          the data was dropped.
+ */
 static bool
 tx_queue_push(tx_queue_t *q, const uint8_t *data, size_t len)
 {
@@ -797,6 +941,18 @@ tx_queue_push(tx_queue_t *q, const uint8_t *data, size_t len)
 
 /* Pops up to max_len bytes, returning the actual number popped (0 if
  * the queue is currently empty). */
+/*
+ * tx_queue_pop()
+ *
+ * Removes up to max_len bytes from the queue.
+ *
+ * Parameters:
+ *   q       - Queue.
+ *   out     - Receives the bytes.
+ *   max_len - Size of out in bytes.
+ *
+ * Returns: Number of bytes removed (0 if the queue was empty).
+ */
 static size_t
 tx_queue_pop(tx_queue_t *q, uint8_t *out, size_t max_len)
 {
@@ -816,6 +972,16 @@ tx_queue_pop(tx_queue_t *q, uint8_t *out, size_t max_len)
 
 /* Current queue depth in bytes, without popping anything -- used by
  * the playback thread's prime/drain state machine below. */
+/*
+ * tx_queue_depth()
+ *
+ * Gets the number of bytes waiting in the queue.
+ *
+ * Parameters:
+ *   q - Queue.
+ *
+ * Returns: Queue depth in bytes.
+ */
 static size_t
 tx_queue_depth(tx_queue_t *q)
 {
@@ -870,6 +1036,15 @@ typedef struct
                                 * theoretical, race without this. */
 } tx_state_t;
 
+/*
+ * monotonic_ms()
+ *
+ * Reads the monotonic clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: Milliseconds since an arbitrary fixed point.
+ */
 static long long
 monotonic_ms(void)
 {
@@ -887,6 +1062,22 @@ monotonic_ms(void)
  * BCLK/WS before it can synchronize onto it, so this treats a
  * genuinely locked, stable RX PLL as a hard precondition before ALSA
  * is ever opened. */
+/*
+ * sx1255_startup_configure()
+ *
+ * Resets and configures the SX1255 from the configuration: frequencies,
+ * gains, PLL bandwidths, RX on and TX off.  The RX PLL must lock within 500
+ * ms; if not, the whole sequence is tried once more.  It finishes with a 500
+ * ms wait for the I2S clock to settle, since the host I2S port needs a stable
+ * clock before ALSA is opened.
+ *
+ * Parameters:
+ *   sx  - Open SX1255 device.
+ *   cfg - Configuration to apply.
+ *
+ * Returns: true on success, false if a setting failed or the RX PLL did not
+ *          lock after the retry.
+ */
 static bool
 sx1255_startup_configure(sx1255_t *sx, const bridge_config_t *cfg)
 {
@@ -942,6 +1133,20 @@ sx1255_startup_configure(sx1255_t *sx, const bridge_config_t *cfg)
     return true;
 }
 
+/*
+ * tx_key_up()
+ *
+ * Keys the transmitter: refreshes the TX frequency, switches TX on (briefly
+ * toggled off and on again), waits the settle time, waits up to 100 ms for
+ * the TX PLL, resets the DSP and prepares ALSA, then marks the state as
+ * keyed.  Does nothing if already keyed.
+ *
+ * Parameters:
+ *   t - TX state.
+ *
+ * Returns: true if keyed (or already keyed), false if TX could not be
+ *          enabled.
+ */
 static bool
 tx_key_up(tx_state_t *t)
 {
@@ -1012,6 +1217,18 @@ tx_key_up(tx_state_t *t)
     return true;
 }
 
+/*
+ * tx_key_down()
+ *
+ * Un-keys the transmitter: waits for queued audio to finish playing, switches
+ * TX off, marks the state as not keyed and clears the sample queue.  Does
+ * nothing if not keyed.
+ *
+ * Parameters:
+ *   t - TX state.
+ *
+ * Returns: nothing.
+ */
 static void
 tx_key_down(tx_state_t *t)
 {
@@ -1050,6 +1267,20 @@ tx_key_down(tx_state_t *t)
  * symmetrically by the playback thread's timeout check, plus
  * SET_MODE/OPENMT_SAMP_EOT in handle_frame() as an additional, faster
  * signal when either arrives correctly. */
+/*
+ * tx_handle_samples()
+ *
+ * Handles TX samples from the host: records the arrival time, keys up if
+ * needed and queues the samples for the playback thread.  It does no DSP or
+ * audio output itself so the command loop stays responsive.
+ *
+ * Parameters:
+ *   t           - TX state.
+ *   payload     - 16-bit samples (Q15, native byte order).
+ *   payload_len - Length of payload in bytes.
+ *
+ * Returns: nothing.
+ */
 static void
 tx_handle_samples(tx_state_t *t, const uint8_t *payload, uint8_t payload_len)
 {
@@ -1073,6 +1304,20 @@ typedef struct
     tx_state_t *tx_state;
 } tx_playback_thread_arg_t;
 
+/*
+ * tx_playback_thread_main()
+ *
+ * Thread that plays the TX queue.  It un-keys after tx_key_timeout_ms without
+ * samples, waits for the queue to prime before starting, paces writes against
+ * the ALSA hardware queue depth, converts Q15 samples to floats (scale and
+ * optional inversion), runs the TX DSP and writes the I/Q to ALSA.  It runs
+ * until the stop flag is set.
+ *
+ * Parameters:
+ *   arg - Pointer to a tx_playback_thread_arg_t.
+ *
+ * Returns: NULL.
+ */
 static void *
 tx_playback_thread_main(void *arg)
 {
@@ -1220,6 +1465,19 @@ typedef struct
                                   * restart. */
 } rx_thread_arg_t;
 
+/*
+ * rx_thread_main()
+ *
+ * Thread that handles receive: reads I/Q from ALSA, runs the RX DSP, applies
+ * inversion, gain and clipping, converts to Q15 and sends 100-sample
+ * SAMP_DATA frames to the host.  It runs until the stop flag is set or a
+ * capture error occurs.
+ *
+ * Parameters:
+ *   arg - Pointer to an rx_thread_arg_t.
+ *
+ * Returns: NULL.
+ */
 static void *
 rx_thread_main(void *arg)
 {
@@ -1293,6 +1551,22 @@ rx_thread_main(void *arg)
 #define OPENMTSX_INVERT_RX_BIT 0x01U
 #define OPENMTSX_INVERT_TX_BIT 0x02U
 
+/*
+ * apply_openmtsx_config()
+ *
+ * Applies an "openmtsx" SET_CONFIG payload (version, RX and TX frequency,
+ * LNA, PGA, mixer and DAC gains, PLL bandwidths and invert flags; 18 bytes,
+ * multi-byte fields big-endian) to the configuration and then re-runs the
+ * hardware startup configuration.  A payload of the wrong length or version
+ * is ignored.
+ *
+ * Parameters:
+ *   tx_state    - TX state, whose configuration and SX1255 are updated.
+ *   payload     - SET_CONFIG payload.
+ *   payload_len - Payload length in bytes.
+ *
+ * Returns: nothing.
+ */
 static void
 apply_openmtsx_config(tx_state_t *tx_state, const uint8_t *payload, uint8_t payload_len)
 {
@@ -1364,6 +1638,24 @@ apply_openmtsx_config(tx_state_t *tx_state, const uint8_t *payload, uint8_t payl
     }
 }
 
+/*
+ * handle_frame()
+ *
+ * Handles one frame from the host.  SET_CONFIG, SET_MODE, ADD_MODE and
+ * DEL_MODE are acknowledged (SET_MODE keys or un-keys TX), GET_STATUS reports
+ * free space, SAMP_DATA and TO_MODEM queue TX samples, and SAMP_EOT un-keys
+ * TX at once.  Other types are logged.
+ *
+ * Parameters:
+ *   tx_state      - TX state.
+ *   pty_fd        - Master side of the pty, for the replies.
+ *   type_and_conn - Frame type (high nibble) and connection or mode (low
+ *                   nibble).
+ *   payload       - Frame payload.
+ *   payload_len   - Payload length in bytes.
+ *
+ * Returns: nothing.
+ */
 static void
 handle_frame(tx_state_t *tx_state, int pty_fd, uint8_t type_and_conn, const uint8_t *payload,
     uint8_t payload_len)
@@ -1482,6 +1774,21 @@ handle_frame(tx_state_t *tx_state, int pty_fd, uint8_t type_and_conn, const uint
     }
 }
 
+/*
+ * main()
+ *
+ * Entry point of the SX1255 bridge: reads the options, creates the pty,
+ * starts and configures the SX1255, opens ALSA, starts the RX and TX playback
+ * threads, then runs the command loop reading frames from the host until
+ * SIGINT or SIGTERM.  It then stops the threads, un-keys TX and releases
+ * everything.
+ *
+ * Parameters:
+ *   argc - Argument count.
+ *   argv - Argument vector.
+ *
+ * Returns: 0 on a normal exit, 1 if startup failed.
+ */
 int
 main(int argc, char **argv)
 {

@@ -16,6 +16,6 @@ and the link is dropped if the reflector is silent for 60 s.  Packets to the ref
 Test without hardware:
     echo "10200 127.0.0.1 34010" > /tmp/nxdn_hosts.txt
     gcc -o nxdn_gw_sim test/nxdn_gw_sim.c
-    gcc -I. -I<OpenMT>/tools -o nxdn_gateway gateway/nxdn_gateway.c test/tools_stub.c -lpthread
+    gcc -I. -I<OpenMT>/tools -o nxdn_gateway gateway/nxdn_gateway.c <OpenMT>/tools/test/tools_stub.c -DSTUB_UC=NXDN -DSTUB_LC=nxdn -lpthread
     ./nxdn_gw_sim &
     NXDN_STUB_hostsFile=/tmp/nxdn_hosts.txt ./nxdn_gateway -m 1

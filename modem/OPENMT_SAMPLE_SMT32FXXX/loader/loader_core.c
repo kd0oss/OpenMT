@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  loader_core.c - the ST USART boot loader protocol (AN3155), the subset
  *  stm32flash needs: Get, Get Version, Get ID, Read Memory, Go, Write
@@ -17,9 +18,17 @@
 static uint8_t buf[256];
 static uint8_t rxErr;                       /* a byte was lost to a line error */
 
-/* A byte with a line error still takes its place in the frame (so the
- * rest stays aligned); it is only flagged, and the command that contains
- * it is refused. */
+/*
+ * rx()
+ *
+ * Reads one byte from the loader's serial line.  A byte with a line error
+ * still takes its place in the frame so the rest stays aligned; the error is
+ * only flagged and the command that contains it is refused.
+ *
+ * Parameters: none.
+ *
+ * Returns: The byte, or 0 if there was a line error (the error flag is set).
+ */
 static uint8_t rx(void)
 {
     int c = ld_getc();
@@ -32,34 +41,95 @@ static uint8_t rx(void)
     return (uint8_t)c;
 }
 
+/*
+ * ack()
+ *
+ * Sends the ACK byte to the host.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void ack(void)
 {
     ld_putc(LD_ACK);
 }
 
+/*
+ * nack()
+ *
+ * Sends the NACK byte to the host.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void nack(void)
 {
     ld_putc(LD_NACK);
 }
 
+/*
+ * le32()
+ *
+ * Reads a 32-bit little-endian value.
+ *
+ * Parameters:
+ *   p - Pointer to 4 bytes.
+ *
+ * Returns: The value.
+ */
 static uint32_t le32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
            ((uint32_t)p[3] << 24);
 }
 
+/*
+ * inFlash()
+ *
+ * Tells whether an address range lies inside the chip's flash.
+ *
+ * Parameters:
+ *   a   - Start address.
+ *   len - Length in bytes.
+ *
+ * Returns: 1 if the whole range is in flash, 0 otherwise.
+ */
 static int inFlash(uint32_t a, uint32_t len)
 {
     return (a >= LD_FLASH_BASE) && (a < LD_FLASH_END) && (len <= LD_FLASH_END - a);
 }
 
+/*
+ * inRam()
+ *
+ * Tells whether an address range lies inside the chip's RAM.
+ *
+ * Parameters:
+ *   a   - Start address.
+ *   len - Length in bytes.
+ *
+ * Returns: 1 if the whole range is in RAM, 0 otherwise.
+ */
 static int inRam(uint32_t a, uint32_t len)
 {
     return (a >= LD_RAM_BASE) && (a < LD_RAM_BASE + LD_RAM_SIZE) &&
            (len <= LD_RAM_BASE + LD_RAM_SIZE - a);
 }
 
-/* 4 byte big endian address + XOR; 1 = good */
+/*
+ * rxAddr()
+ *
+ * Reads a 4-byte big-endian address followed by its XOR checksum byte and
+ * clears the line error flag.
+ *
+ * Parameters:
+ *   a - Receives the address.
+ *
+ * Returns: 1 if the checksum is right and there was no line error, 0
+ *   otherwise.
+ */
 static int rxAddr(uint32_t *a)
 {
     uint8_t b[5];
@@ -81,6 +151,18 @@ static int rxAddr(uint32_t *a)
     return ok;
 }
 
+/*
+ * ld_app_valid()
+ *
+ * Checks that a complete application is installed: the completion marker is
+ * valid and the initial stack pointer and reset vector in the application's
+ * vector table are plausible (stack in RAM, odd Thumb address inside the
+ * flash after the loader).
+ *
+ * Parameters: none.
+ *
+ * Returns: 1 if the application can be started, 0 otherwise.
+ */
 int ld_app_valid(void)
 {
     uint8_t v[8];
@@ -98,7 +180,16 @@ int ld_app_valid(void)
            ((pc & 1U) != 0U) && (pc > LD_APP_START) && (pc < LD_FLASH_END);
 }
 
-/* ------------------------------------------------------------------ */
+/*
+ * cmdGet()
+ *
+ * Handles the Get command: replies with the loader version and the list of
+ * commands supported.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void cmdGet(void)
 {
     static const uint8_t list[] =
@@ -116,6 +207,16 @@ static void cmdGet(void)
     ack();
 }
 
+/*
+ * cmdGvr()
+ *
+ * Handles the Get Version command: replies with the loader version and two
+ * zero option bytes.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void cmdGvr(void)
 {
     ack();
@@ -125,6 +226,15 @@ static void cmdGvr(void)
     ack();
 }
 
+/*
+ * cmdGid()
+ *
+ * Handles the Get ID command: replies with the product ID of the chip.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void cmdGid(void)
 {
     ack();
@@ -134,6 +244,17 @@ static void cmdGid(void)
     ack();
 }
 
+/*
+ * cmdRead()
+ *
+ * Handles Read Memory: receives an address and a length (with checks) and
+ * sends back the bytes, from flash or RAM.  Refused with NACK if the range
+ * is not in flash or RAM.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void cmdRead(void)
 {
     uint32_t a;
@@ -166,6 +287,18 @@ static void cmdRead(void)
     }
 }
 
+/*
+ * cmdWrite()
+ *
+ * Handles Write Memory: receives an address (word aligned, inside the
+ * application area), marks the installed image as incomplete, receives up to
+ * 256 bytes with their checksum and programs them into flash.  Refused with
+ * NACK if the checksum or range is wrong or the length is odd.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void cmdWrite(void)
 {
     uint32_t a;
@@ -211,6 +344,16 @@ static void cmdWrite(void)
     ack();
 }
 
+/*
+ * eraseApp()
+ *
+ * Erases every page of the application area, then sends ACK (or NACK if a
+ * page fails).
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void eraseApp(void)
 {
     uint32_t p;
@@ -226,6 +369,19 @@ static void eraseApp(void)
     ack();
 }
 
+/*
+ * cmdErase()
+ *
+ * Handles the Erase command.  A global erase (0xFF) erases only the
+ * application area, never the loader.  Otherwise a list of pages is received
+ * and erased; a list that names a loader page is refused and pages the chip
+ * does not have are skipped.  The installed image is marked incomplete
+ * first.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void cmdErase(void)
 {
     uint8_t n;
@@ -288,9 +444,22 @@ static void cmdErase(void)
     ack();
 }
 
-/* A refused Go.  With LDR_DEBUG the reason follows the NACK on the wire
- * ('G', reason, then address, sp and pc as little endian words): 1 = bad
- * address or checksum, 2 = start vectors out of range, 3 = marker commit. */
+/*
+ * goFail()
+ *
+ * Sends the NACK for a refused Go command.  With LDR_DEBUG, the reason
+ * follows on the wire: 'G', the reason, then the address, stack pointer and
+ * reset vector as little-endian words.
+ *
+ * Parameters:
+ *   why - Reason: 1 = bad address or checksum, 2 = start vectors out of
+ *         range, 3 = the completion marker could not be written.
+ *   a   - Address the host sent.
+ *   sp  - Stack pointer read from the application.
+ *   pc  - Reset vector read from the application.
+ *
+ * Returns: nothing.
+ */
 static void goFail(uint8_t why, uint32_t a, uint32_t sp, uint32_t pc)
 {
     nack();
@@ -321,7 +490,17 @@ static void goFail(uint8_t why, uint32_t a, uint32_t sp, uint32_t pc)
 #endif
 }
 
-/* "Go" to the application start commits the image and restarts. */
+/*
+ * cmdGo()
+ *
+ * Handles the Go command: the address must be the application start and its
+ * vector table plausible.  The image is then marked complete (committed),
+ * ACK is sent and the chip is reset into the application.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void cmdGo(void)
 {
     uint32_t a;
@@ -354,6 +533,19 @@ static void cmdGo(void)
     ld_launch();
 }
 
+/*
+ * ld_run()
+ *
+ * Main loop of the loader: sets the baud rate from the host's first byte,
+ * sends ACK and then handles commands (each sent as a code and its
+ * complement) until the host starts the application.  A 0x7F byte from the
+ * host is answered with NACK; a bad command or a line error also gets NACK.
+ * Does not return.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_run(void)
 {
     uint8_t c;

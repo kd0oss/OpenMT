@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  loader.h - tiny serial loader for the STM32F105 that speaks the ST
  *  USART boot loader protocol (AN3155), so stm32flash works unchanged.

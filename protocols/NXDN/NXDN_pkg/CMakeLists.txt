@@ -16,6 +16,7 @@ target_sources(nxdn_host PRIVATE
     ./nxdn_dsp.c
     ../../tools/string_builder.c
     ../../tools/tools.c
+    ../../tools/fec_tools.c
     ../../tools/dsp_tools.c
 )
 

@@ -1,4 +1,5 @@
 #!/bin/sh
+# Created by Rick KD0OSS
 # Downloads the YSF reflector list used by ysf_gateway (JSON, as G4KLX's YSFHostsUpdate.sh).
 # Set YSF_HOSTS_URL to the list you use.
 URL="${YSF_HOSTS_URL:-https://hostfiles.refcheck.radio/YSFHosts.json}"

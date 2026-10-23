@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -17,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <dsp_tools.h>
+#include <fec_tools.h>
 
 #include "nxdn_func.h"
 
@@ -41,9 +42,15 @@ static const uint8_t SACCH_IDLE[] = { NXDN_MESSAGE_TYPE_IDLE, 0x00U, 0x00U };
 
 /*
  * nxdnScramble()
- *   XORs the whole frame with the NXDN scrambling sequence.  The first three
- *   bytes of the sequence are zero so the frame sync is unaffected.  The same
- *   call scrambles and descrambles.
+ *
+ * XORs the whole frame with the NXDN scrambling sequence.  The first three
+ * bytes of the sequence are zero so the frame sync is unaffected.  The same
+ * call scrambles and descrambles.
+ *
+ * Parameters:
+ *   frame - The 48 byte frame, changed in place.
+ *
+ * Returns: nothing.
  */
 void nxdnScramble(uint8_t* frame)
 {
@@ -53,7 +60,13 @@ void nxdnScramble(uint8_t* frame)
 
 /*
  * nxdnAddSync()
- *   Writes the 20 bit frame sync word at the start of a frame.
+ *
+ * Writes the 20 bit frame sync word at the start of a frame.
+ *
+ * Parameters:
+ *   frame - The frame buffer; the sync word is written at its start.
+ *
+ * Returns: nothing.
  */
 void nxdnAddSync(uint8_t* frame)
 {
@@ -63,7 +76,13 @@ void nxdnAddSync(uint8_t* frame)
 
 /*
  * nxdnHasSync()
- *   True if the start of the frame holds the frame sync word.
+ *
+ * True if the start of the frame holds the frame sync word.
+ *
+ * Parameters:
+ *   frame - The frame.
+ *
+ * Returns: true if the sync word is there, false if not.
  */
 bool nxdnHasSync(const uint8_t* frame)
 {
@@ -75,8 +94,17 @@ bool nxdnHasSync(const uint8_t* frame)
 }
 
 /*
- * CRC routines.  The bit stream is MSB first, the CRC register starts at all
- * ones and the CRC is sent MSB first right after the data.
+ * nxdnCrc6()
+ *
+ * Works out the 6 bit CRC of a bit stream.  The bits are taken most
+ * significant bit first, the CRC register starts with all ones and the CRC
+ * is sent most significant bit first right after the data.
+ *
+ * Parameters:
+ *   in         - The data bits.
+ *   lengthBits - Number of bits in the data.
+ *
+ * Returns: The 6 bit CRC.
  */
 uint8_t nxdnCrc6(const uint8_t* in, unsigned int lengthBits)
 {
@@ -96,6 +124,19 @@ uint8_t nxdnCrc6(const uint8_t* in, unsigned int lengthBits)
     return crc & 0x3FU;
 }
 
+/*
+ * nxdnCrc12()
+ *
+ * Works out the 12 bit CRC of a bit stream.  The bits are taken most
+ * significant bit first, the CRC register starts with all ones and the CRC
+ * is sent most significant bit first right after the data.
+ *
+ * Parameters:
+ *   in         - The data bits.
+ *   lengthBits - Number of bits in the data.
+ *
+ * Returns: The 12 bit CRC.
+ */
 uint16_t nxdnCrc12(const uint8_t* in, unsigned int lengthBits)
 {
     uint16_t crc = 0x0FFFU;
@@ -114,6 +155,19 @@ uint16_t nxdnCrc12(const uint8_t* in, unsigned int lengthBits)
     return crc & 0x0FFFU;
 }
 
+/*
+ * nxdnCrc15()
+ *
+ * Works out the 15 bit CRC of a bit stream.  The bits are taken most
+ * significant bit first, the CRC register starts with all ones and the CRC
+ * is sent most significant bit first right after the data.
+ *
+ * Parameters:
+ *   in         - The data bits.
+ *   lengthBits - Number of bits in the data.
+ *
+ * Returns: The 15 bit CRC.
+ */
 uint16_t nxdnCrc15(const uint8_t* in, unsigned int lengthBits)
 {
     uint16_t crc = 0x7FFFU;
@@ -132,7 +186,19 @@ uint16_t nxdnCrc15(const uint8_t* in, unsigned int lengthBits)
     return crc & 0x7FFFU;
 }
 
-/* Writes the low 'width' bits of value MSB first at bit position 'pos' */
+/*
+ * putBits()
+ *
+ * Writes the low 'width' bits of value MSB first at bit position 'pos'
+ *
+ * Parameters:
+ *   buffer - The bit buffer, changed in place.
+ *   pos    - Bit position where the first bit is written.
+ *   value  - The value to write.
+ *   width  - Number of bits to write.
+ *
+ * Returns: nothing.
+ */
 static void putBits(uint8_t* buffer, unsigned int pos, uint16_t value, unsigned int width)
 {
     for (unsigned int i = 0U; i < width; i++, pos++)
@@ -142,6 +208,19 @@ static void putBits(uint8_t* buffer, unsigned int pos, uint16_t value, unsigned 
     }
 }
 
+/*
+ * getBits()
+ *
+ * Reads 'width' bits starting at bit position 'pos', most significant bit
+ * first.
+ *
+ * Parameters:
+ *   buffer - The bit buffer.
+ *   pos    - Bit position of the first bit.
+ *   width  - Number of bits to read.
+ *
+ * Returns: The value read.
+ */
 static uint16_t getBits(const uint8_t* buffer, unsigned int pos, unsigned int width)
 {
     uint16_t v = 0U;
@@ -152,16 +231,49 @@ static uint16_t getBits(const uint8_t* buffer, unsigned int pos, unsigned int wi
     return v;
 }
 
+/*
+ * checkCrc6()
+ *
+ * Checks the 6 bit CRC that follows the data.
+ *
+ * Parameters:
+ *   in     - The data followed by its CRC.
+ *   length - Number of data bits, not counting the CRC.
+ *
+ * Returns: true if the CRC is correct, false if not.
+ */
 static bool checkCrc6(const uint8_t* in, unsigned int length)
 {
     return nxdnCrc6(in, length) == getBits(in, length, 6U);
 }
 
+/*
+ * checkCrc12()
+ *
+ * Checks the 12 bit CRC that follows the data.
+ *
+ * Parameters:
+ *   in     - The data followed by its CRC.
+ *   length - Number of data bits, not counting the CRC.
+ *
+ * Returns: true if the CRC is correct, false if not.
+ */
 static bool checkCrc12(const uint8_t* in, unsigned int length)
 {
     return nxdnCrc12(in, length) == getBits(in, length, 12U);
 }
 
+/*
+ * checkCrc15()
+ *
+ * Checks the 15 bit CRC that follows the data.
+ *
+ * Parameters:
+ *   in     - The data followed by its CRC.
+ *   length - Number of data bits, not counting the CRC.
+ *
+ * Returns: true if the CRC is correct, false if not.
+ */
 static bool checkCrc15(const uint8_t* in, unsigned int length)
 {
     return nxdnCrc15(in, length) == getBits(in, length, 15U);
@@ -192,6 +304,17 @@ typedef struct
     unsigned int dp;
 } Conv;
 
+/*
+ * convStart()
+ *
+ * Starts a Viterbi decode: the path metrics and the decision count are
+ * cleared.
+ *
+ * Parameters:
+ *   c - The decoder state.
+ *
+ * Returns: nothing.
+ */
 static void convStart(Conv* c)
 {
     memset(c->metrics1, 0x00, sizeof(c->metrics1));
@@ -201,6 +324,21 @@ static void convStart(Conv* c)
     c->dp = 0U;
 }
 
+/*
+ * convDecode()
+ *
+ * Runs one Viterbi step for a pair of received symbols (rate 1/2, constraint
+ * length 5 code; each symbol is 0 for a sure zero, 1 for a punctured bit and
+ * 2 for a sure one).  The path metrics are updated and the decisions are
+ * saved for convChainback().
+ *
+ * Parameters:
+ *   c  - The decoder state.
+ *   s0 - First symbol of the pair.
+ *   s1 - Second symbol of the pair.
+ *
+ * Returns: nothing.
+ */
 static void convDecode(Conv* c, uint8_t s0, uint8_t s1)
 {
     uint64_t dec = 0U;
@@ -231,6 +369,18 @@ static void convDecode(Conv* c, uint8_t s0, uint8_t s1)
     c->newMetrics = tmp;
 }
 
+/*
+ * convChainback()
+ *
+ * Follows the saved decisions backwards to recover the decoded bits.
+ *
+ * Parameters:
+ *   c     - The decoder state, after all steps have been run.
+ *   out   - Receives the decoded bits.
+ *   nBits - Number of bits to recover.
+ *
+ * Returns: nothing.
+ */
 static void convChainback(Conv* c, uint8_t* out, unsigned int nBits)
 {
     uint32_t state = 0U;
@@ -247,6 +397,18 @@ static void convChainback(Conv* c, uint8_t* out, unsigned int nBits)
     }
 }
 
+/*
+ * convEncode()
+ *
+ * Encodes bits with the rate 1/2, constraint length 5 convolutional code.
+ *
+ * Parameters:
+ *   in    - The bits to encode.
+ *   out   - Receives the coded bits (two for each input bit).
+ *   nBits - Number of input bits.
+ *
+ * Returns: nothing.
+ */
 static void convEncode(const uint8_t* in, uint8_t* out, unsigned int nBits)
 {
     uint8_t d1 = 0U, d2 = 0U, d3 = 0U, d4 = 0U;
@@ -286,6 +448,18 @@ typedef struct
     unsigned int steps;         /* Viterbi steps                              */
 } ChanDef;
 
+/*
+ * interleave()
+ *
+ * Gives the position in the frame of a coded bit for a channel (the
+ * interleaver writes columns and reads rows).
+ *
+ * Parameters:
+ *   chan - Channel: 0 for SACCH, 1 for FACCH1, 2 for UDCH.
+ *   i    - Index of the bit in the coded and punctured stream.
+ *
+ * Returns: The bit position, counted from the start of the channel.
+ */
 static unsigned int interleave(unsigned int chan, unsigned int i)
 {
     switch (chan)
@@ -296,6 +470,18 @@ static unsigned int interleave(unsigned int chan, unsigned int i)
     }
 }
 
+/*
+ * punctured()
+ *
+ * Tells whether a coded bit is removed by puncturing; the positions repeat
+ * in a fixed pattern for each channel.
+ *
+ * Parameters:
+ *   chan - Channel: 0 for SACCH, 1 for FACCH1, 2 for UDCH.
+ *   i    - Index of the bit in the coded stream.
+ *
+ * Returns: true if the bit is not sent, false if it is.
+ */
 static bool punctured(unsigned int chan, unsigned int i)
 {
     switch (chan)
@@ -306,7 +492,24 @@ static bool punctured(unsigned int chan, unsigned int i)
     }
 }
 
-/* Reads sentBits from the frame, depunctures and runs the Viterbi decoder */
+/*
+ * chanDecode()
+ *
+ * Decodes a channel: reads sentBits from the frame (undoing the
+ * interleaving), puts back the punctured bits as neutral symbols, and runs
+ * the Viterbi decoder.
+ *
+ * Parameters:
+ *   chan     - Channel: 0 for SACCH, 1 for FACCH1, 2 for UDCH.
+ *   frame    - The descrambled frame.
+ *   offset   - Bit position in the frame where the channel starts.
+ *   sentBits - Number of bits sent on air for the channel.
+ *   steps    - Number of Viterbi steps to run.
+ *   out      - Receives the decoded bits.
+ *   outBits  - Number of bits to recover.
+ *
+ * Returns: nothing.
+ */
 static void chanDecode(unsigned int chan, const uint8_t* frame, unsigned int offset, unsigned int sentBits,
                        unsigned int steps, uint8_t* out, unsigned int outBits)
 {
@@ -351,6 +554,22 @@ static void chanDecode(unsigned int chan, const uint8_t* frame, unsigned int off
     convChainback(&conv, out, outBits);
 }
 
+/*
+ * chanEncode()
+ *
+ * Encodes a channel: the information bits are convolutionally coded,
+ * punctured and interleaved into the frame.
+ *
+ * Parameters:
+ *   chan      - Channel: 0 for SACCH, 1 for FACCH1, 2 for UDCH.
+ *   info      - The information bits including the CRC and tail.
+ *   infoBits  - Number of bits in info.
+ *   codedBits - Number of bits after the convolutional code.
+ *   frame     - The frame, changed in place.
+ *   offset    - Bit position in the frame where the channel starts.
+ *
+ * Returns: nothing.
+ */
 static void chanEncode(unsigned int chan, const uint8_t* info, unsigned int infoBits, unsigned int codedBits,
                        uint8_t* frame, unsigned int offset)
 {
@@ -383,9 +602,15 @@ static void chanEncode(unsigned int chan, const uint8_t* info, unsigned int info
 }
 
 /*
- * nxdnLichDecode()
- *   Reads the 8 LICH bits (every other bit of the 16 bit field).  Returns
- *   true if the parity bit is correct.
+ * nxdnLichParity()
+ *
+ * Works out the parity bit of a LICH from its top four bits: 1 for the
+ * values 0x8 and 0xB, 0 for all others.
+ *
+ * Parameters:
+ *   lich - The LICH byte.
+ *
+ * Returns: The parity bit, 0 or 1.
  */
 uint8_t nxdnLichParity(uint8_t lich)
 {
@@ -399,6 +624,18 @@ uint8_t nxdnLichParity(uint8_t lich)
     }
 }
 
+/*
+ * nxdnLichDecode()
+ *
+ * Reads the 8 LICH bits (every other bit of the 16 bit field) from a frame
+ * and checks the parity bit.
+ *
+ * Parameters:
+ *   frame - The descrambled frame.
+ *   lich  - Receives the LICH byte.
+ *
+ * Returns: true if the parity bit is correct, false if not.
+ */
 bool nxdnLichDecode(const uint8_t* frame, uint8_t* lich)
 {
     uint8_t l = 0U;
@@ -415,7 +652,15 @@ bool nxdnLichDecode(const uint8_t* frame, uint8_t* lich)
 
 /*
  * nxdnLichEncode()
- *   Sets the parity bit and writes the LICH, each bit followed by a one.
+ *
+ * Sets the parity bit and writes the LICH into a frame, each bit followed by
+ * a one.
+ *
+ * Parameters:
+ *   lich  - The LICH byte.
+ *   frame - The frame, changed in place.
+ *
+ * Returns: nothing.
  */
 void nxdnLichEncode(uint8_t lich, uint8_t* frame)
 {
@@ -436,6 +681,19 @@ void nxdnLichEncode(uint8_t lich, uint8_t* frame)
     }
 }
 
+/*
+ * nxdnLichMake()
+ *
+ * Builds a LICH byte from its fields and sets its parity bit.
+ *
+ * Parameters:
+ *   rfct      - RF channel type.
+ *   fct       - Functional channel type.
+ *   option    - Option bits.
+ *   direction - Direction, inbound or outbound.
+ *
+ * Returns: The LICH byte.
+ */
 uint8_t nxdnLichMake(uint8_t rfct, uint8_t fct, uint8_t option, uint8_t direction)
 {
     uint8_t l = 0U;
@@ -452,8 +710,17 @@ uint8_t nxdnLichMake(uint8_t rfct, uint8_t fct, uint8_t option, uint8_t directio
 }
 
 /*
- * SACCH.  36 bits (2 structure, 6 RAN, 18 data, 6 CRC... the CRC covers the
- * first 26 bits) plus 4 tail bits, coded to 72 and punctured to 60.
+ * nxdnSacchDecode()
+ *
+ * Decodes the SACCH of a frame.  The SACCH is 36 bits (2 structure, 6 RAN,
+ * 18 data and a 6 bit CRC that covers the first 26 bits) plus 4 tail bits,
+ * coded to 72 bits and punctured to 60.
+ *
+ * Parameters:
+ *   frame - The descrambled frame.
+ *   sacch - Receives the 26 SACCH bits (5 bytes) and the CRC.
+ *
+ * Returns: true if the CRC is correct, false if not.
  */
 bool nxdnSacchDecode(const uint8_t* frame, uint8_t* sacch)
 {
@@ -468,6 +735,18 @@ bool nxdnSacchDecode(const uint8_t* frame, uint8_t* sacch)
     return checkCrc6(sacch, 26U);
 }
 
+/*
+ * nxdnSacchEncode()
+ *
+ * Encodes a SACCH into a frame: the CRC is added, then the coding,
+ * puncturing and interleaving of the channel.
+ *
+ * Parameters:
+ *   sacch - The first 26 bits of the SACCH (5 bytes).
+ *   frame - The frame, changed in place.
+ *
+ * Returns: nothing.
+ */
 void nxdnSacchEncode(const uint8_t* sacch, uint8_t* frame)
 {
     uint8_t temp1[5];
@@ -485,6 +764,17 @@ void nxdnSacchEncode(const uint8_t* sacch, uint8_t* frame)
     chanEncode(0U, temp1, 36U, 72U, frame, NXDN_FSW_LENGTH_BITS + NXDN_LICH_LENGTH_BITS);
 }
 
+/*
+ * nxdnSacchGetData()
+ *
+ * Copies the 18 data bits of a SACCH.
+ *
+ * Parameters:
+ *   sacch - The SACCH bits.
+ *   data  - Receives the 18 data bits.
+ *
+ * Returns: nothing.
+ */
 void nxdnSacchGetData(const uint8_t* sacch, uint8_t* data)
 {
     unsigned int offset = 8U;
@@ -496,6 +786,17 @@ void nxdnSacchGetData(const uint8_t* sacch, uint8_t* data)
     }
 }
 
+/*
+ * nxdnSacchSetData()
+ *
+ * Stores the 18 data bits in a SACCH.
+ *
+ * Parameters:
+ *   sacch - The SACCH bits, changed in place.
+ *   data  - The 18 data bits.
+ *
+ * Returns: nothing.
+ */
 void nxdnSacchSetData(uint8_t* sacch, const uint8_t* data)
 {
     unsigned int offset = 8U;
@@ -507,18 +808,53 @@ void nxdnSacchSetData(uint8_t* sacch, const uint8_t* data)
     }
 }
 
+/*
+ * nxdnSacchGetRaw()
+ *
+ * Gets the SACCH as 4 bytes (32 bits) with its CRC filled in, the form used
+ * in the network packets.
+ *
+ * Parameters:
+ *   sacch - The SACCH bits.
+ *   raw4  - Receives the 4 bytes.
+ *
+ * Returns: nothing.
+ */
 void nxdnSacchGetRaw(const uint8_t* sacch, uint8_t* raw4)
 {
     memcpy(raw4, sacch, 4U);
     putBits(raw4, 26U, nxdnCrc6(raw4, 26U), 6U);
 }
 
+/*
+ * nxdnSacchSetRAN()
+ *
+ * Stores the radio access number in a SACCH.
+ *
+ * Parameters:
+ *   sacch - The SACCH bits, changed in place.
+ *   ran   - The radio access number.
+ *
+ * Returns: nothing.
+ */
 void nxdnSacchSetRAN(uint8_t* sacch, uint8_t ran)
 {
     sacch[0] &= 0xC0U;
     sacch[0] |= ran;
 }
 
+/*
+ * nxdnSacchSetStructure()
+ *
+ * Stores the structure field (single or one of the superblock parts) in a
+ * SACCH.
+ *
+ * Parameters:
+ *   sacch     - The SACCH bits, changed in place.
+ *   structure - The structure value.
+ *
+ * Returns: nothing.
+ */
 void nxdnSacchSetStructure(uint8_t* sacch, uint8_t structure)
 {
     sacch[0] &= 0x3FU;
@@ -526,8 +862,17 @@ void nxdnSacchSetStructure(uint8_t* sacch, uint8_t structure)
 }
 
 /*
- * FACCH1.  80 bits of layer 3, CRC12 and 4 tail bits (96), coded to 192 and
- * punctured to 144.
+ * nxdnFacch1Decode()
+ *
+ * Decodes one FACCH1 of a frame.  A FACCH1 is 80 bits of layer 3, a 12 bit
+ * CRC and 4 tail bits (96), coded to 192 and punctured to 144.
+ *
+ * Parameters:
+ *   frame  - The descrambled frame.
+ *   offset - Bit position of the FACCH1 in the frame.
+ *   facch  - Receives the 80 bits of layer 3 and the CRC (12 bytes).
+ *
+ * Returns: true if the CRC is correct, false if not.
  */
 bool nxdnFacch1Decode(const uint8_t* frame, unsigned int offset, uint8_t* facch)
 {
@@ -542,6 +887,19 @@ bool nxdnFacch1Decode(const uint8_t* frame, unsigned int offset, uint8_t* facch)
     return checkCrc12(facch, 80U);
 }
 
+/*
+ * nxdnFacch1Encode()
+ *
+ * Encodes a layer 3 message as a FACCH1 into a frame: the CRC is added, then
+ * the coding, puncturing and interleaving of the channel.
+ *
+ * Parameters:
+ *   facch10 - The 80 bits (10 bytes) of layer 3.
+ *   frame   - The frame, changed in place.
+ *   offset  - Bit position of the FACCH1 in the frame.
+ *
+ * Returns: nothing.
+ */
 void nxdnFacch1Encode(const uint8_t* facch10, uint8_t* frame, unsigned int offset)
 {
     uint8_t temp1[12];
@@ -553,6 +911,18 @@ void nxdnFacch1Encode(const uint8_t* facch10, uint8_t* frame, unsigned int offse
     chanEncode(1U, temp1, 96U, 192U, frame, offset);
 }
 
+/*
+ * nxdnFacch1GetRaw()
+ *
+ * Gets a layer 3 message as 12 bytes with its CRC filled in, the form used
+ * in the network packets.
+ *
+ * Parameters:
+ *   facch10 - The 80 bits (10 bytes) of layer 3.
+ *   raw12   - Receives the 12 bytes.
+ *
+ * Returns: nothing.
+ */
 void nxdnFacch1GetRaw(const uint8_t* facch10, uint8_t* raw12)
 {
     memset(raw12, 0x00, 12U);
@@ -561,8 +931,16 @@ void nxdnFacch1GetRaw(const uint8_t* facch10, uint8_t* raw12)
 }
 
 /*
- * UDCH / FACCH2.  184 bits (RAN + layer 3), CRC15 and 4 tail bits (203),
- * coded to 406 and punctured to 348.
+ * nxdnUdchDecode()
+ *
+ * Decodes the UDCH (FACCH2) of a frame.  A UDCH is 184 bits (RAN and layer
+ * 3), a 15 bit CRC and 4 tail bits (203), coded to 406 and punctured to 348.
+ *
+ * Parameters:
+ *   frame - The descrambled frame.
+ *   udch  - Receives the 184 bits and the CRC (25 bytes).
+ *
+ * Returns: true if the CRC is correct, false if not.
  */
 bool nxdnUdchDecode(const uint8_t* frame, uint8_t* udch)
 {
@@ -577,6 +955,18 @@ bool nxdnUdchDecode(const uint8_t* frame, uint8_t* udch)
     return checkCrc15(udch, 184U);
 }
 
+/*
+ * nxdnUdchEncode()
+ *
+ * Encodes a UDCH into a frame: the CRC is added, then the coding, puncturing
+ * and interleaving of the channel.
+ *
+ * Parameters:
+ *   udch23 - The 184 bits (23 bytes) of RAN and layer 3.
+ *   frame  - The frame, changed in place.
+ *
+ * Returns: nothing.
+ */
 void nxdnUdchEncode(const uint8_t* udch23, uint8_t* frame)
 {
     uint8_t temp1[26];
@@ -614,9 +1004,17 @@ static const unsigned int C_TABLE[] =
 
 /*
  * nxdnAudioDecodeBlock()
- *   Takes one 72 bit block and writes the 49 bit parameter set (a, b, c) at
- *   bit offset 'offset' of out.  Errors in the Golay words are corrected.
- *   Returns the number of corrected bits.
+ *
+ * Takes one 72 bit AMBE+2 block and writes its 49 bit parameter set (a, b
+ * and c) at a bit offset of the output.  Errors in the Golay words are
+ * corrected.
+ *
+ * Parameters:
+ *   in     - The 72 bit (9 byte) block as it came off the air.
+ *   out    - Receives the 49 parameter bits.
+ *   offset - Bit position in out where the parameters are written.
+ *
+ * Returns: The number of bits that were corrected.
  */
 unsigned int nxdnAudioDecodeBlock(const uint8_t* in, uint8_t* out, unsigned int offset)
 {
@@ -670,6 +1068,20 @@ unsigned int nxdnAudioDecodeBlock(const uint8_t* in, uint8_t* out, unsigned int 
     return errors;
 }
 
+/*
+ * nxdnAudioEncodeBlock()
+ *
+ * Takes a 49 bit parameter set (a, b and c) from a bit offset of the input
+ * and builds the 72 bit AMBE+2 block for the air, with the Golay words and
+ * the scrambling of b.
+ *
+ * Parameters:
+ *   in     - The parameter bits.
+ *   out    - Receives the 72 bit (9 byte) block.
+ *   offset - Bit position in in where the parameters start.
+ *
+ * Returns: nothing.
+ */
 void nxdnAudioEncodeBlock(const uint8_t* in, uint8_t* out, unsigned int offset)
 {
     unsigned int aOrig = 0U;
@@ -725,19 +1137,38 @@ void nxdnAudioEncodeBlock(const uint8_t* in, uint8_t* out, unsigned int offset)
 }
 
 /*
- * nxdnAudioChipToNet49() / nxdnAudioNet49ToChip()
- *   The AMBE3000R, set to its 72 bit (DMR) rate, delivers the 49 voice bits without
- *   Golay parity: the 49 bits (a 12, b 12, c 25 in the order of the network form),
- *   then 23 zero bits, read row by row from a matrix of 4 rows and 18 columns whose
- *   bit k is at position 4 * (k % 18) + k / 18 of the 72 bit block.
- *   Worked out from 470 frames of a real dongle: those 23 positions are always zero
- *   and the 49 others are independent.
+ * chipPosition()
+ *
+ * Gives the position in the 72 bit chip block of bit k of the 49 voice bits.
+ * The block is a matrix of 4 rows and 18 columns, so bit k is at 4 * (k %
+ * 18) + k / 18.
+ *
+ * Parameters:
+ *   k - Index of the voice bit (0 to 71).
+ *
+ * Returns: The bit position in the chip block.
  */
 static unsigned int chipPosition(unsigned int k)
 {
     return 4U * (k % 18U) + k / 18U;
 }
 
+/*
+ * nxdnAudioChipToNet49()
+ *
+ * Converts a block from an AMBE3000R set to its 72 bit (DMR) rate to the 49
+ * voice bits of the network form.  The chip delivers the 49 bits (a 12, b
+ * 12, c 25 in the order of the network form) without Golay parity, followed
+ * by 23 zero bits, laid out in a matrix of 4 rows and 18 columns.  This was
+ * worked out from 470 frames of a real dongle: those 23 positions are always
+ * zero and the other 49 are independent.
+ *
+ * Parameters:
+ *   chip - The 72 bit (9 byte) chip block.
+ *   net7 - Receives the 49 bits (7 bytes).
+ *
+ * Returns: nothing.
+ */
 void nxdnAudioChipToNet49(const uint8_t* chip, uint8_t* net7)
 {
     memset(net7, 0x00, 7U);
@@ -746,6 +1177,18 @@ void nxdnAudioChipToNet49(const uint8_t* chip, uint8_t* net7)
         WRITE_BIT1(net7, k, READ_BIT1(chip, chipPosition(k)) != 0U);
 }
 
+/*
+ * nxdnAudioNet49ToChip()
+ *
+ * The reverse of nxdnAudioChipToNet49(): puts the 49 voice bits of the
+ * network form into a 72 bit chip block, with the 23 padding bits zero.
+ *
+ * Parameters:
+ *   net7 - The 49 bits (7 bytes).
+ *   chip - Receives the 72 bit (9 byte) chip block.
+ *
+ * Returns: nothing.
+ */
 void nxdnAudioNet49ToChip(const uint8_t* net7, uint8_t* chip)
 {
     memset(chip, 0x00, 9U);
@@ -755,9 +1198,16 @@ void nxdnAudioNet49ToChip(const uint8_t* net7, uint8_t* chip)
 }
 
 /*
- * Coding order and air order.  With its FEC on, a vocoder chip may deliver the 72 bit block
- * as the air block itself (NXDN_CHIP_AIR), or in coding order, 24 bits a, 23 bits b, 25 bits c
- * (NXDN_CHIP_CODING), which the tables of the air block then spread.
+ * chipCodingToAir()
+ *
+ * Converts a chip block in coding order (24 bits a, 23 bits b, 25 bits c) to
+ * the air block, spreading the bits with the tables of the air block.
+ *
+ * Parameters:
+ *   chip - The chip block in coding order.
+ *   air  - Receives the 72 bit air block.
+ *
+ * Returns: nothing.
  */
 static void chipCodingToAir(const uint8_t* chip, uint8_t* air)
 {
@@ -771,6 +1221,18 @@ static void chipCodingToAir(const uint8_t* chip, uint8_t* air)
         WRITE_BIT1(air, C_TABLE[i], READ_BIT1(chip, 47U + i) != 0U);
 }
 
+/*
+ * airToChipCoding()
+ *
+ * Converts an air block to the coding order (24 bits a, 23 bits b, 25 bits
+ * c) that a vocoder chip uses in that layout.
+ *
+ * Parameters:
+ *   air  - The 72 bit air block.
+ *   chip - Receives the chip block in coding order.
+ *
+ * Returns: nothing.
+ */
 static void airToChipCoding(const uint8_t* air, uint8_t* chip)
 {
     memset(chip, 0x00, 9U);
@@ -783,6 +1245,23 @@ static void airToChipCoding(const uint8_t* air, uint8_t* chip)
         WRITE_BIT1(chip, 47U + i, READ_BIT1(air, C_TABLE[i]) != 0U);
 }
 
+/*
+ * nxdnAudioChipDecode()
+ *
+ * Converts a block from the vocoder chip to the 49 voice bits of the network
+ * form.  With its FEC on, a chip may deliver the 72 bit block as the air
+ * block itself (NXDN_CHIP_AIR), or in coding order (NXDN_CHIP_CODING);
+ * otherwise the block is in the layout without Golay parity.
+ *
+ * Parameters:
+ *   layout - Chip layout: NXDN_CHIP_AIR, NXDN_CHIP_CODING or the plain 49
+ *            bit layout.
+ *   chip   - The 72 bit (9 byte) chip block.
+ *   net7   - Receives the 49 bits (7 bytes).
+ *
+ * Returns: Number of corrected bits (or, for the plain layout, the number of
+ *   padding bits that are set).
+ */
 unsigned int nxdnAudioChipDecode(unsigned int layout, const uint8_t* chip, uint8_t* net7)
 {
     uint8_t air[9];
@@ -802,6 +1281,20 @@ unsigned int nxdnAudioChipDecode(unsigned int layout, const uint8_t* chip, uint8
     }
 }
 
+/*
+ * nxdnAudioChipEncode()
+ *
+ * Converts the 49 voice bits of the network form to a block for the vocoder
+ * chip, in the layout the chip uses.
+ *
+ * Parameters:
+ *   layout - Chip layout: NXDN_CHIP_AIR, NXDN_CHIP_CODING or the plain 49
+ *            bit layout.
+ *   net7   - The 49 bits (7 bytes).
+ *   chip   - Receives the 72 bit (9 byte) chip block.
+ *
+ * Returns: nothing.
+ */
 void nxdnAudioChipEncode(unsigned int layout, const uint8_t* net7, uint8_t* chip)
 {
     uint8_t air[9];
@@ -823,7 +1316,18 @@ void nxdnAudioChipEncode(unsigned int layout, const uint8_t* net7, uint8_t* chip
     }
 }
 
-/* Number of the 23 padding bits of a chip block that are set (0 for a block in the layout above) */
+/*
+ * nxdnAudioChipPadding()
+ *
+ * Counts the padding bits of a chip block (the 23 positions after the 49
+ * voice bits) that are set.  A block in the plain layout has none, so a non-
+ * zero count shows that the block is in another layout.
+ *
+ * Parameters:
+ *   chip - The 72 bit (9 byte) chip block.
+ *
+ * Returns: Number of padding bits that are set, 0 to 23.
+ */
 unsigned int nxdnAudioChipPadding(const uint8_t* chip)
 {
     unsigned int n = 0U;
@@ -835,9 +1339,18 @@ unsigned int nxdnAudioChipPadding(const uint8_t* chip)
 }
 
 /*
- * nxdnAudioDecode() / nxdnAudioEncode()
- *   Two consecutive 72 bit blocks (18 bytes on air) to or from 98 bits (13
- *   bytes plus padding) of network data.
+ * nxdnAudioDecode()
+ *
+ * Decodes two consecutive 72 bit blocks (18 bytes on air) to 98 bits (13
+ * bytes plus padding) of network data.
+ *
+ * Parameters:
+ *   in     - The 18 bytes from the air.
+ *   out    - Receives the 98 bits of network data.
+ *   errors - Counter that the number of corrected bits is added to (may be
+ *            NULL).
+ *
+ * Returns: nothing.
  */
 void nxdnAudioDecode(const uint8_t* in, uint8_t* out, unsigned int* errors)
 {
@@ -850,6 +1363,18 @@ void nxdnAudioDecode(const uint8_t* in, uint8_t* out, unsigned int* errors)
         *errors += e;
 }
 
+/*
+ * nxdnAudioEncode()
+ *
+ * Encodes 98 bits (13 bytes plus padding) of network data as two consecutive
+ * 72 bit blocks (18 bytes) for the air.
+ *
+ * Parameters:
+ *   in  - The 98 bits of network data.
+ *   out - Receives the 18 bytes for the air.
+ *
+ * Returns: nothing.
+ */
 void nxdnAudioEncode(const uint8_t* in, uint8_t* out)
 {
     nxdnAudioEncodeBlock(in, out + 0U, 0U);
@@ -858,7 +1383,16 @@ void nxdnAudioEncode(const uint8_t* in, uint8_t* out)
 
 /*
  * nxdnL3Decode()
- *   Copies lengthBits of bytes into the layer 3 buffer at bit offset 'offset'.
+ *
+ * Copies lengthBits of bytes into the layer 3 buffer at bit offset 'offset'.
+ *
+ * Parameters:
+ *   l3         - The layer 3 buffer, changed in place.
+ *   bytes      - The bits to copy.
+ *   lengthBits - Number of bits to copy.
+ *   offset     - Bit position in l3 where the bits are written.
+ *
+ * Returns: nothing.
  */
 void nxdnL3Decode(uint8_t* l3, const uint8_t* bytes, unsigned int lengthBits, unsigned int offset)
 {
@@ -873,6 +1407,18 @@ void nxdnL3Decode(uint8_t* l3, const uint8_t* bytes, unsigned int lengthBits, un
 /* Control                                                                   */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * nxdnCtrlInit()
+ *
+ * Sets up a control: the defaults (RAN 1, 180 second RF timeout, 1.5 second
+ * network watchdog) and the idle state are stored and the callbacks are
+ * cleared.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 void nxdnCtrlInit(NxdnCtrl* c)
 {
     c->ran = 1U;
@@ -905,6 +1451,22 @@ void nxdnCtrlInit(NxdnCtrl* c)
     c->netWatchdogRunning = false;
 }
 
+/*
+ * emit()
+ *
+ * Reports a call event through the event callback: the source, destination
+ * and group flag are taken from the layer 3 message.
+ *
+ * Parameters:
+ *   c       - The control.
+ *   ev      - The event.
+ *   l3      - The layer 3 message of the call.
+ *   data    - true for a data call, false for voice.
+ *   seconds - Duration of the call in seconds.
+ *   ber     - Bit error rate of the call, in percent.
+ *
+ * Returns: nothing.
+ */
 static void emit(NxdnCtrl* c, NxdnEvent ev, const uint8_t* l3, bool data, float seconds, float ber)
 {
     NxdnCall call;
@@ -923,16 +1485,51 @@ static void emit(NxdnCtrl* c, NxdnEvent ev, const uint8_t* l3, bool data, float 
     c->event(c->ctx, &call);
 }
 
+/*
+ * rfBer()
+ *
+ * Works out the bit error rate of the RF call so far, as a percentage of the
+ * bits received.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: The BER of the RF call in percent.
+ */
 static float rfBer(const NxdnCtrl* c)
 {
     return (float)(c->rfErrs * 100U) / (float)c->rfBits;
 }
 
+/*
+ * rfTimedOut()
+ *
+ * Tells whether the RF call has run longer than the RF timeout.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: true if the RF call has lasted longer than the RF timeout, false
+ *   if not.
+ */
 static bool rfTimedOut(const NxdnCtrl* c)
 {
     return c->rfTimerRunning && c->rfTimer >= c->rfTimeoutMs;
 }
 
+/*
+ * toNet()
+ *
+ * Sends a message to the network through the callback, unless the RF call
+ * has timed out.
+ *
+ * Parameters:
+ *   c       - The control.
+ *   netData - The message.
+ *   type    - Message type.
+ *
+ * Returns: nothing.
+ */
 static void toNet(NxdnCtrl* c, const uint8_t* netData, uint8_t type)
 {
     if (c->sendNet == NULL || rfTimedOut(c))
@@ -941,7 +1538,19 @@ static void toNet(NxdnCtrl* c, const uint8_t* netData, uint8_t type)
     c->sendNet(c->ctx, netData, type);
 }
 
-/* frame is unscrambled; it is scrambled on a copy before it is sent */
+/*
+ * toRf()
+ *
+ * Sends a frame to the transmitter through the callback.  The frame is
+ * passed in unscrambled and is scrambled on a copy before it is sent.
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The unscrambled frame.
+ *   eot   - true if this is the last frame of the transmission.
+ *
+ * Returns: nothing.
+ */
 static void toRf(NxdnCtrl* c, const uint8_t* frame, bool eot)
 {
     uint8_t tmp[NXDN_FRAME_LENGTH_BYTES];
@@ -955,6 +1564,16 @@ static void toRf(NxdnCtrl* c, const uint8_t* frame, bool eot)
     c->sendRf(c->ctx, tmp, eot);
 }
 
+/*
+ * endRf()
+ *
+ * Ends the RF call: the state, layer 3 message and timer are cleared.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 static void endRf(NxdnCtrl* c)
 {
     c->rfState = NXDN_RF_LISTENING;
@@ -964,6 +1583,17 @@ static void endRf(NxdnCtrl* c)
     c->rfTimer = 0U;
 }
 
+/*
+ * endNet()
+ *
+ * Ends the network call: the state, layer 3 message, timers and watchdog are
+ * cleared.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 static void endNet(NxdnCtrl* c)
 {
     c->netState = NXDN_NET_IDLE;
@@ -976,20 +1606,49 @@ static void endNet(NxdnCtrl* c)
 
 /*
  * direction()
- *   A simplex hotspot or a remote gateway sends everything "inbound" to the
- *   radios, a duplex repeater sends "outbound".  The copy that goes to the
- *   gateway is always inbound.
+ *
+ * A simplex hotspot or a remote gateway sends everything "inbound" to the
+ * radios, a duplex repeater sends "outbound".  The copy that goes to the
+ * gateway is always inbound.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: NXDN_LICH_DIRECTION_INBOUND or NXDN_LICH_DIRECTION_OUTBOUND.
  */
 static uint8_t direction(const NxdnCtrl* c)
 {
     return (c->remoteGateway || !c->duplex) ? NXDN_LICH_DIRECTION_INBOUND : NXDN_LICH_DIRECTION_OUTBOUND;
 }
 
+/*
+ * inboundRaw()
+ *
+ * Gives a LICH with the direction bit cleared (inbound), for the copy that
+ * goes to the gateway.
+ *
+ * Parameters:
+ *   lich - The LICH byte.
+ *
+ * Returns: The LICH byte with the direction bit cleared.
+ */
 static uint8_t inboundRaw(uint8_t lich)
 {
     return lich & ~0x02U;
 }
 
+/*
+ * startRf()
+ *
+ * Starts an RF call: the counters and timer are reset, the state becomes
+ * audio and the start event is reported.
+ *
+ * Parameters:
+ *   c  - The control.
+ *   ev - The start event to report (normal or late entry).
+ *
+ * Returns: nothing.
+ */
 static void startRf(NxdnCtrl* c, NxdnEvent ev)
 {
     c->rfFrames = 0U;
@@ -1002,7 +1661,21 @@ static void startRf(NxdnCtrl* c, NxdnEvent ev)
     emit(c, ev, c->rfLayer3, false, 0.0F, 0.0F);
 }
 
-/* Builds the frame that carries a layer 3 message in both FACCH1 slots */
+/*
+ * buildFacchFrame()
+ *
+ * Builds the frame that carries a layer 3 message in both FACCH1 slots:
+ * sync, LICH, an idle SACCH and the message twice.  When netData is given,
+ * the matching network message is made too.
+ *
+ * Parameters:
+ *   c       - The control.
+ *   l3      - The 80 bit layer 3 message.
+ *   frame   - Receives the frame.
+ *   netData - Receives the matching network message (may be NULL).
+ *
+ * Returns: nothing.
+ */
 static void buildFacchFrame(NxdnCtrl* c, const uint8_t* l3, uint8_t* frame, uint8_t* netData)
 {
     uint8_t sacch[5];
@@ -1035,6 +1708,25 @@ static void buildFacchFrame(NxdnCtrl* c, const uint8_t* l3, uint8_t* frame, uint
     }
 }
 
+/*
+ * processVoice()
+ *
+ * Handles a received voice frame.  The SACCH is checked (the RAN must match)
+ * and, for a frame that is not part of a superblock, the header or trailer
+ * carried in the FACCH1 starts or ends the call.  Other frames are voice
+ * frames (or late entry): the call information is collected from the FACCH1
+ * or the SACCH superblock, the call is started late if needed, and the frame
+ * is passed on to the network and, for a repeater, to the transmitter.
+ *
+ * Parameters:
+ *   c      - The control.
+ *   usc    - Functional channel type of the frame.
+ *   option - Option bits of the frame.
+ *   data   - The descrambled frame.
+ *
+ * Returns: true if the frame was handled (including a call that was
+ *   rejected), false if it was ignored.
+ */
 static bool processVoice(NxdnCtrl* c, uint8_t usc, uint8_t option, uint8_t* data)
 {
     uint8_t sacch[5];
@@ -1293,6 +1985,21 @@ static bool processVoice(NxdnCtrl* c, uint8_t usc, uint8_t option, uint8_t* data
     return true;
 }
 
+/*
+ * processData()
+ *
+ * Handles a received data frame (UDCH).  A data call header starts the call
+ * (unless the RAN or the source id does not fit), and the frames of the call
+ * are passed on to the network and, for a repeater, to the transmitter.
+ *
+ * Parameters:
+ *   c      - The control.
+ *   option - Option bits of the frame.
+ *   data   - The descrambled frame.
+ *
+ * Returns: true if the frame was handled (including a call that was
+ *   rejected), false if it was ignored.
+ */
 static bool processData(NxdnCtrl* c, uint8_t option, uint8_t* data)
 {
     uint8_t udch[25];
@@ -1384,9 +2091,17 @@ static bool processData(NxdnCtrl* c, uint8_t option, uint8_t* data)
 
 /*
  * nxdnCtrlRf()
- *   Handles one frame from the receiver.  'frame' holds the 48 bytes as they
- *   came off the air (scrambled).  lost = true tells the control that the
- *   signal has gone without an end of transmission frame.
+ *
+ * Handles one frame from the receiver.  'frame' holds the 48 bytes as they
+ * came off the air (scrambled).  lost = true tells the control that the
+ * signal has gone without an end of transmission frame.
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The 48 byte frame as it came off the air.
+ *   lost  - true if the signal was lost.
+ *
+ * Returns: nothing.
  */
 void nxdnCtrlRf(NxdnCtrl* c, const uint8_t* frame, bool lost)
 {
@@ -1435,7 +2150,17 @@ void nxdnCtrlRf(NxdnCtrl* c, const uint8_t* frame, bool lost)
         processVoice(c, usc, option, data);
 }
 
-/* Closes the transmission on the air of a network call that ended without a release message */
+/*
+ * netCloseOnAir()
+ *
+ * Closes the transmission on the air of a network call that ended without a
+ * release message
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 static void netCloseOnAir(NxdnCtrl* c)
 {
     uint8_t l3[22];
@@ -1449,8 +2174,15 @@ static void netCloseOnAir(NxdnCtrl* c)
 
 /*
  * nxdnCtrlNet()
- *   Handles one NXDN message from the gateway and queues the frame it
- *   describes for transmission.
+ *
+ * Handles one NXDN message from the gateway and queues the frame it
+ * describes for transmission.
+ *
+ * Parameters:
+ *   c       - The control.
+ *   netData - The message from the gateway.
+ *
+ * Returns: nothing.
  */
 void nxdnCtrlNet(NxdnCtrl* c, const uint8_t* netData)
 {
@@ -1663,8 +2395,15 @@ void nxdnCtrlNet(NxdnCtrl* c, const uint8_t* netData)
 
 /*
  * nxdnCtrlClock()
- *   Advances the timers.  The network watchdog ends a network transmission
- *   that stopped without a trailer.
+ *
+ * Advances the timers.  The network watchdog ends a network transmission
+ * that stopped without a trailer.
+ *
+ * Parameters:
+ *   c  - The control.
+ *   ms - Time in milliseconds since the last call.
+ *
+ * Returns: nothing.
  */
 void nxdnCtrlClock(NxdnCtrl* c, uint32_t ms)
 {
@@ -1693,11 +2432,31 @@ void nxdnCtrlClock(NxdnCtrl* c, uint32_t ms)
     }
 }
 
+/*
+ * nxdnCtrlBusy()
+ *
+ * Tells whether a call is in progress, from the radio or from the network.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: true if the control is busy, false if it is idle.
+ */
 bool nxdnCtrlBusy(const NxdnCtrl* c)
 {
     return c->rfState != NXDN_RF_LISTENING || c->netState != NXDN_NET_IDLE;
 }
 
+/*
+ * nxdnCtrlReset()
+ *
+ * Ends any call, from the radio or from the network, and returns to idle.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 void nxdnCtrlReset(NxdnCtrl* c)
 {
     endRf(c);

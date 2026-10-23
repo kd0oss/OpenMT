@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -41,6 +42,17 @@ static int udpFd = -1;
 static struct sockaddr_in gwAddr;
 static int failures = 0;
 
+/*
+ * check()
+ *
+ * Prints the result of one check and counts the failures.
+ *
+ * Parameters:
+ *   ok   - Non-zero if the check passed.
+ *   what - Description of the check.
+ *
+ * Returns: nothing.
+ */
 static void check(int ok, const char* what)
 {
     printf("  %s %s\n", ok ? "ok  " : "FAIL", what);
@@ -48,12 +60,34 @@ static void check(int ok, const char* what)
         failures++;
 }
 
+/*
+ * waitFd()
+ *
+ * Waits until a socket has data to read.
+ *
+ * Parameters:
+ *   fd - The socket.
+ *   ms - Longest wait, in milliseconds.
+ *
+ * Returns: Non-zero if data is waiting, 0 on time out.
+ */
 static int waitFd(int fd, int ms)
 {
     struct pollfd p = { fd, POLLIN, 0 };
     return poll(&p, 1, ms) > 0;
 }
 
+/*
+ * hostRead()
+ *
+ * Reads one packet that the gateway sent to the (simulated) host.
+ *
+ * Parameters:
+ *   buf - Receives the packet.
+ *   ms  - Longest wait for the packet, in milliseconds.
+ *
+ * Returns: The length of the packet, or 0 if none arrived.
+ */
 static int hostRead(uint8_t* buf, int ms)
 {
     int len, got;
@@ -75,6 +109,17 @@ static int hostRead(uint8_t* buf, int ms)
     return len;
 }
 
+/*
+ * hostWriteConn()
+ *
+ * Sends a CONN packet to the gateway, as the host does to link a reflector.
+ *
+ * Parameters:
+ *   cs   - The callsign of the station.
+ *   name - The reflector name or id.
+ *
+ * Returns: nothing.
+ */
 static void hostWriteConn(const char* cs, const char* name)
 {
     uint8_t p[34];
@@ -87,6 +132,16 @@ static void hostWriteConn(const char* cs, const char* name)
     write(tcpFd, p, sizeof(p));
 }
 
+/*
+ * hostWriteSimple()
+ *
+ * Sends a packet that has only a type (DISC, for example) to the gateway.
+ *
+ * Parameters:
+ *   type - The four character type.
+ *
+ * Returns: nothing.
+ */
 static void hostWriteSimple(const char* type)
 {
     uint8_t p[8] = { 0x61, 0, 8, 4 };
@@ -94,6 +149,17 @@ static void hostWriteSimple(const char* type)
     write(tcpFd, p, sizeof(p));
 }
 
+/*
+ * hostWriteYsf()
+ *
+ * Sends a YSFG packet with a frame of the radio to the gateway.
+ *
+ * Parameters:
+ *   end  - true for the last frame of the call.
+ *   body - The 151 byte body.
+ *
+ * Returns: nothing.
+ */
 static void hostWriteYsf(bool end, const uint8_t* body)
 {
     uint8_t p[160];
@@ -106,6 +172,18 @@ static void hostWriteYsf(bool end, const uint8_t* body)
     write(tcpFd, p, sizeof(p));
 }
 
+/*
+ * reflRead()
+ *
+ * Reads one packet that the gateway sent to the (simulated) reflector, and
+ * remembers the address it came from.
+ *
+ * Parameters:
+ *   buf - Receives the packet; at least 300 bytes.
+ *   ms  - Longest wait for the packet, in milliseconds.
+ *
+ * Returns: The length of the packet, or 0 if none arrived.
+ */
 static int reflRead(uint8_t* buf, int ms)
 {
     socklen_t l = sizeof(gwAddr);
@@ -118,11 +196,31 @@ static int reflRead(uint8_t* buf, int ms)
     return n > 0 ? n : 0;
 }
 
+/*
+ * reflWrite()
+ *
+ * Sends a packet from the (simulated) reflector to the gateway.
+ *
+ * Parameters:
+ *   buf - The packet.
+ *   len - Number of bytes in buf.
+ *
+ * Returns: nothing.
+ */
 static void reflWrite(const uint8_t* buf, int len)
 {
     sendto(udpFd, buf, len, 0, (struct sockaddr*)&gwAddr, sizeof(gwAddr));
 }
 
+/*
+ * reflPoll()
+ *
+ * Sends a poll answer (YSFP) from the reflector.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void reflPoll(void)
 {
     uint8_t p[14];
@@ -131,7 +229,18 @@ static void reflPoll(void)
     reflWrite(p, 14);
 }
 
-/* Count the YSFP ('P') or YSFU ('U') of this station arriving within 600 ms of the previous one */
+/*
+ * countKind()
+ *
+ * Counts the polls ('P') or unlinks ('U') of this station that arrive at the
+ * reflector, each within 600 ms of the one before, up to three.
+ *
+ * Parameters:
+ *   kind    - 'P' or 'U'.
+ *   firstMs - Longest wait for the first packet, in milliseconds.
+ *
+ * Returns: The number of packets counted.
+ */
 static int countKind(char kind, int firstMs)
 {
     uint8_t x[300];
@@ -149,7 +258,22 @@ static int countKind(char kind, int firstMs)
     return count;
 }
 
-/* A body: gateway, source, destination, counter, then a frame of known content */
+/*
+ * makeBody()
+ *
+ * Makes a 151 byte body: the gateway, source and destination callsigns, the
+ * counter and a frame of known content.
+ *
+ * Parameters:
+ *   body    - Receives the body.
+ *   gw      - The gateway callsign.
+ *   src     - The source callsign.
+ *   dst     - The destination callsign.
+ *   counter - The frame counter byte.
+ *   seed    - Starting value of the frame content.
+ *
+ * Returns: nothing.
+ */
 static void makeBody(uint8_t* body, const char* gw, const char* src, const char* dst, uint8_t counter, uint8_t seed)
 {
     memset(body, ' ', 30);
@@ -162,6 +286,16 @@ static void makeBody(uint8_t* body, const char* gw, const char* src, const char*
         body[31 + i] = (uint8_t)(seed + i * 3);
 }
 
+/*
+ * reflData()
+ *
+ * Sends a YSFD packet with a body from the reflector to the gateway.
+ *
+ * Parameters:
+ *   body - The 151 byte body.
+ *
+ * Returns: nothing.
+ */
 static void reflData(const uint8_t* body)
 {
     uint8_t p[155];
@@ -170,6 +304,17 @@ static void reflData(const uint8_t* body)
     reflWrite(p, 155);
 }
 
+/*
+ * expectReflData()
+ *
+ * Checks that the reflector receives a YSFD packet with the given body.
+ *
+ * Parameters:
+ *   what - Description of the check.
+ *   body - The expected body.
+ *
+ * Returns: nothing.
+ */
 static void expectReflData(const char* what, const uint8_t* body)
 {
     uint8_t r[300];
@@ -177,6 +322,18 @@ static void expectReflData(const char* what, const uint8_t* body)
     check(n == 155 && memcmp(r, "YSFD", 4) == 0 && memcmp(r + 4, body, 151) == 0, what);
 }
 
+/*
+ * expectHostData()
+ *
+ * Checks that the host receives a YSFG packet with the given body.
+ *
+ * Parameters:
+ *   what - Description of the check.
+ *   body - The expected body.
+ *   end  - The expected end flag.
+ *
+ * Returns: nothing.
+ */
 static void expectHostData(const char* what, const uint8_t* body, bool end)
 {
     uint8_t r[300];
@@ -184,6 +341,19 @@ static void expectHostData(const char* what, const uint8_t* body, bool end)
     check(n == 160 && memcmp(r + 4, "YSFG", 4) == 0 && r[8] == (end ? 1 : 0) && memcmp(r + 9, body, 151) == 0, what);
 }
 
+/*
+ * expectName()
+ *
+ * Checks that the host receives a status packet (CONN, NACK or DISC) with
+ * the given reflector name.
+ *
+ * Parameters:
+ *   what - Description of the check.
+ *   type - The expected type.
+ *   name - The expected reflector name.
+ *
+ * Returns: nothing.
+ */
 static void expectName(const char* what, const char* type, const char* name)
 {
     uint8_t r[300];
@@ -196,6 +366,17 @@ static void expectName(const char* what, const char* type, const char* name)
     check(ok, text);
 }
 
+/*
+ * runStatic()
+ *
+ * Runs the test of the static reflector: the gateway must link at start
+ * without a request, and tell the host.
+ *
+ * Parameters:
+ *   lfd - The listening socket that the gateway connects to.
+ *
+ * Returns: 0 if it passes, 1 if it fails.
+ */
 static int runStatic(int lfd)
 {
     tcpFd = accept(lfd, NULL, NULL);
@@ -209,6 +390,21 @@ static int runStatic(int lfd)
     return failures ? 1 : 0;
 }
 
+/*
+ * main()
+ *
+ * Plays ysf_host and a YSF reflector for ysf_gateway.  It makes a JSON and a
+ * text reflector list, then tests linking (by id, by name, by country and
+ * name, XX prefix, from the text list, unknown, no answer), voice in both
+ * directions, filtering of packets, polls, unlinking and the COMM packet.
+ * With the argument "static" only the static reflector is tested.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 if all checks pass, 1 if any fails or on a setup error.
+ */
 int main(int argc, char** argv)
 {
     int one = 1;

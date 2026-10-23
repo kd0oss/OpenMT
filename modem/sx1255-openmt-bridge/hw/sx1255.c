@@ -60,6 +60,20 @@
 
 /* ---- Low-level SPI transfer ---------------------------------------------*/
 
+/*
+ * spi_transfer()
+ *
+ * Performs one full-duplex SPI transfer on the device at the default speed
+ * and word size.
+ *
+ * Parameters:
+ *   fd  - Open SPI device.
+ *   tx  - Bytes to send.
+ *   rx  - Receives the bytes clocked in.
+ *   len - Number of bytes.
+ *
+ * Returns: true if the ioctl succeeded.
+ */
 static bool
 spi_transfer(int fd, const uint8_t* tx, uint8_t* rx, size_t len)
 {
@@ -75,6 +89,19 @@ spi_transfer(int fd, const uint8_t* tx, uint8_t* rx, size_t len)
     return ioctl(fd, SPI_IOC_MESSAGE(1), &xfer) >= 0;
 }
 
+/*
+ * spi_write_reg()
+ *
+ * Writes one SX1255 register over SPI (address with bit 7 set) and waits 10
+ * ms.
+ *
+ * Parameters:
+ *   fd   - Open SPI device.
+ *   addr - Register address.
+ *   val  - Value to write.
+ *
+ * Returns: true if the transfer succeeded.
+ */
 static bool spi_write_reg(int fd, uint8_t addr, uint8_t val)
 {
     uint8_t tx[2] = {(uint8_t)(addr | 0x80), val};
@@ -88,6 +115,18 @@ static bool spi_write_reg(int fd, uint8_t addr, uint8_t val)
     return ok;
 }
 
+/*
+ * spi_read_reg()
+ *
+ * Reads one SX1255 register over SPI and waits 10 ms.
+ *
+ * Parameters:
+ *   fd   - Open SPI device.
+ *   addr - Register address.
+ *   val  - Receives the register value.
+ *
+ * Returns: true if the transfer succeeded; *val is untouched on failure.
+ */
 static bool spi_read_reg(int fd, uint8_t addr, uint8_t* val)
 {
     uint8_t tx[2] = {(uint8_t)(addr & 0x7F), 0x00};
@@ -102,6 +141,21 @@ static bool spi_read_reg(int fd, uint8_t addr, uint8_t* val)
     return ok;
 }
 
+/*
+ * spi_update_reg()
+ *
+ * Changes selected bits of a register: reads it, writes it back with the
+ * masked bits replaced, then reads it again to check the bits took effect.
+ *
+ * Parameters:
+ *   fd    - Open SPI device.
+ *   addr  - Register address.
+ *   mask  - Bits to change.
+ *   value - New value for the masked bits.
+ *
+ * Returns: true if the bits read back as written, false on an SPI error or a
+ *   mismatch (which is logged).
+ */
 static bool spi_update_reg(int fd, uint8_t addr, uint8_t mask, uint8_t value)
 {
     uint8_t reg, want, got;
@@ -130,6 +184,22 @@ static bool spi_update_reg(int fd, uint8_t addr, uint8_t mask, uint8_t value)
 
 /* ---- Open / init ---------------------------------------------------------*/
 
+/*
+ * sx1255_open()
+ *
+ * Opens the SPI device (mode 0, default word size and speed) and, if a chip
+ * path is given, claims the reset GPIO line as an output held low.
+ *
+ * Parameters:
+ *   dev             - Device structure to fill in.
+ *   spi_path        - SPI device, for example /dev/spidev0.0.
+ *   reset_chip_path - GPIO chip with the reset line, or NULL if there is
+ *                     none.
+ *   reset_pin       - Line number of the reset pin on that chip.
+ *
+ * Returns: true on success, false on failure (the error is logged and
+ *   nothing is left open).
+ */
 bool sx1255_open(sx1255_t* dev, const char* spi_path, const char* reset_chip_path, unsigned int reset_pin)
 {
     uint8_t mode   = 0; /* SPI mode 0: CPOL=0, CPHA=0 */
@@ -172,6 +242,18 @@ bool sx1255_open(sx1255_t* dev, const char* spi_path, const char* reset_chip_pat
     return true;
 }
 
+/*
+ * sx1255_reset()
+ *
+ * Pulses the reset line high for 100 ms then low and waits 250 ms for the
+ * chip to start.  Does nothing if no reset line is configured.
+ *
+ * Parameters:
+ *   dev - Device.
+ *
+ * Returns: true on success (also when there is no reset line), false if the
+ *   GPIO write fails.
+ */
 bool sx1255_reset(sx1255_t* dev)
 {
     if (!dev->have_reset_line)
@@ -193,6 +275,18 @@ bool sx1255_reset(sx1255_t* dev)
     return true;
 }
 
+/*
+ * sx1255_init()
+ *
+ * Resets the chip, programs the RX bandwidth filter and TX DAC taps
+ * registers and checks the chip version.
+ *
+ * Parameters:
+ *   dev - Device.
+ *
+ * Returns: true on success, false if the reset or a register write fails or
+ *   the version is not the expected one.
+ */
 bool sx1255_init(sx1255_t* dev)
 {
     if (!sx1255_reset(dev))
@@ -227,11 +321,36 @@ bool sx1255_init(sx1255_t* dev)
 
 /* ---- Frequency -----------------------------------------------------------*/
 
+/*
+ * sx1255_freq_to_reg()
+ *
+ * Converts a frequency to the value of the chip's 24-bit frequency register
+ * (hz * 2^20 / 32 MHz).
+ *
+ * Parameters:
+ *   hz - Frequency in Hz.
+ *
+ * Returns: Register value.
+ */
 uint32_t sx1255_freq_to_reg(uint32_t hz)
 {
     return (uint32_t)llround((double)hz * 1048576.0 / SX1255_CLK_FREQ_HZ);
 }
 
+/*
+ * set_freq()
+ *
+ * Writes the three frequency registers for a frequency.
+ *
+ * Parameters:
+ *   dev     - Device.
+ *   hz      - Frequency in Hz.
+ *   reg_msb - Address of the most significant byte register.
+ *   reg_mid - Address of the middle byte register.
+ *   reg_lsb - Address of the least significant byte register.
+ *
+ * Returns: true if all three writes succeeded.
+ */
 static bool set_freq(sx1255_t* dev, uint32_t hz, uint8_t reg_msb, uint8_t reg_mid, uint8_t reg_lsb)
 {
     uint32_t val = sx1255_freq_to_reg(hz);
@@ -247,19 +366,50 @@ static bool set_freq(sx1255_t* dev, uint32_t hz, uint8_t reg_msb, uint8_t reg_mi
     return spi_write_reg(dev->spi_fd, reg_lsb, (uint8_t)val);
 }
 
+/*
+ * sx1255_set_rx_freq()
+ *
+ * Sets the receive frequency.
+ *
+ * Parameters:
+ *   dev - Device.
+ *   hz  - Frequency in Hz.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_set_rx_freq(sx1255_t* dev, uint32_t hz)
 {
     return set_freq(dev, hz, REG_RX_FREQ_MSB, REG_RX_FREQ_MID, REG_RX_FREQ_LSB);
 }
 
+/*
+ * sx1255_set_tx_freq()
+ *
+ * Sets the transmit frequency.
+ *
+ * Parameters:
+ *   dev - Device.
+ *   hz  - Frequency in Hz.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_set_tx_freq(sx1255_t* dev, uint32_t hz)
 {
     return set_freq(dev, hz, REG_TX_FREQ_MSB, REG_TX_FREQ_MID, REG_TX_FREQ_LSB);
 }
 
-/* ---- Sample rate / I2S -----------------------------------------------------
- * 125 kSa/s, Mode B2 (standard I2S with muxed I/Q). Register order (0x13
- * before 0x12) matters, per libsx1255 init order. */
+/*
+ * sx1255_set_rate()
+ *
+ * Sets the I2S sample rate registers (125 kSa/s, mode B2: standard I2S with
+ * I and Q multiplexed) and logs a warning if the chip reports an I2S error.
+ * Register 0x13 is written before 0x12, as in libsx1255.
+ *
+ * Parameters:
+ *   dev - Device.
+ *
+ * Returns: true if the register writes succeeded.
+ */
 bool sx1255_set_rate(sx1255_t* dev)
 {
     uint8_t reg12 = 0, reg13 = 0;
@@ -286,6 +436,18 @@ bool sx1255_set_rate(sx1255_t* dev)
 
 /* ---- Gain ------------------------------------------------------------------*/
 
+/*
+ * lna_code()
+ *
+ * Picks the LNA gain setting nearest to a wanted gain from the steps 0, 12,
+ * 24, 36, 42 and 48 dB.
+ *
+ * Parameters:
+ *   db     - Wanted gain in dB.
+ *   actual - Receives the gain of the chosen step in dB.
+ *
+ * Returns: Register code (0 to 5) of the chosen step.
+ */
 static uint8_t lna_code(uint8_t db, uint8_t* actual)
 {
     static const uint8_t table_db[6] = {0, 12, 24, 36, 42, 48};
@@ -311,6 +473,18 @@ static uint8_t lna_code(uint8_t db, uint8_t* actual)
     return (uint8_t)best_i;
 }
 
+/*
+ * dac_code()
+ *
+ * Picks the TX DAC gain setting nearest to a wanted gain from the steps 0,
+ * -3, -6 and -9 dB.
+ *
+ * Parameters:
+ *   db     - Wanted gain in dB.
+ *   actual - Receives the gain of the chosen step in dB.
+ *
+ * Returns: Register code (0 to 3) of the chosen step.
+ */
 static uint8_t dac_code(int8_t db, int8_t* actual)
 {
     static const int8_t table_db[4] = {0, -3, -6, -9};
@@ -336,6 +510,17 @@ static uint8_t dac_code(int8_t db, int8_t* actual)
     return (uint8_t)best_i;
 }
 
+/*
+ * sx1255_set_lna_gain()
+ *
+ * Sets the receive LNA gain to the nearest available step.
+ *
+ * Parameters:
+ *   dev - Device.
+ *   db  - Wanted gain in dB.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_set_lna_gain(sx1255_t* dev, uint8_t db)
 {
     uint8_t actual;
@@ -344,6 +529,17 @@ bool sx1255_set_lna_gain(sx1255_t* dev, uint8_t db)
     return spi_update_reg(dev->spi_fd, REG_RX_LNA_PGA, 0xE0, (uint8_t)(code << 5));
 }
 
+/*
+ * sx1255_set_pga_gain()
+ *
+ * Sets the receive PGA gain in 2 dB steps (value limited to 30 dB).
+ *
+ * Parameters:
+ *   dev - Device.
+ *   db  - Wanted gain in dB.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_set_pga_gain(sx1255_t* dev, uint8_t db)
 {
     uint8_t step = db / 2;
@@ -355,6 +551,17 @@ bool sx1255_set_pga_gain(sx1255_t* dev, uint8_t db)
     return spi_update_reg(dev->spi_fd, REG_RX_LNA_PGA, 0x1E, (uint8_t)(step << 1));
 }
 
+/*
+ * sx1255_set_dac_gain()
+ *
+ * Sets the transmit DAC gain to the nearest available step.
+ *
+ * Parameters:
+ *   dev - Device.
+ *   db  - Wanted gain in dB.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_set_dac_gain(sx1255_t* dev, int8_t db)
 {
     int8_t actual;
@@ -365,6 +572,18 @@ bool sx1255_set_dac_gain(sx1255_t* dev, int8_t db)
     return spi_update_reg(dev->spi_fd, REG_TX_DAC_GAIN, 0x70, (uint8_t)(code << 4));
 }
 
+/*
+ * sx1255_set_mixer_gain()
+ *
+ * Sets the transmit mixer gain in 2 dB steps from -37.5 dB, limited to the
+ * 16 available steps.
+ *
+ * Parameters:
+ *   dev - Device.
+ *   db  - Wanted gain in dB.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_set_mixer_gain(sx1255_t* dev, float db)
 {
     int step = (int)lround((double)(db + 37.5) / 2.0);
@@ -380,6 +599,17 @@ bool sx1255_set_mixer_gain(sx1255_t* dev, float db)
     return spi_update_reg(dev->spi_fd, REG_TX_DAC_GAIN, 0x0F, (uint8_t)step);
 }
 
+/*
+ * bw_code()
+ *
+ * Converts a PLL bandwidth in kHz to the chip's 2-bit code: up to 75, 150
+ * and 225 kHz give 0, 1 and 2, anything larger gives 3.
+ *
+ * Parameters:
+ *   bw_khz - Bandwidth in kHz.
+ *
+ * Returns: Code from 0 to 3.
+ */
 static uint8_t bw_code(uint16_t bw_khz)
 {
     if (bw_khz <= 75)
@@ -397,6 +627,17 @@ static uint8_t bw_code(uint16_t bw_khz)
     return 3;
 }
 
+/*
+ * sx1255_set_rx_pll_bw()
+ *
+ * Sets the receive PLL bandwidth.
+ *
+ * Parameters:
+ *   dev    - Device.
+ *   bw_khz - Bandwidth in kHz.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_set_rx_pll_bw(sx1255_t* dev, uint16_t bw_khz)
 {
     uint8_t reg, code = bw_code(bw_khz);
@@ -409,6 +650,17 @@ bool sx1255_set_rx_pll_bw(sx1255_t* dev, uint16_t bw_khz)
     return spi_write_reg(dev->spi_fd, REG_RX_PLL_BW, reg);
 }
 
+/*
+ * sx1255_set_tx_pll_bw()
+ *
+ * Sets the transmit PLL bandwidth.
+ *
+ * Parameters:
+ *   dev    - Device.
+ *   bw_khz - Bandwidth in kHz.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_set_tx_pll_bw(sx1255_t* dev, uint16_t bw_khz)
 {
     uint8_t reg, code = bw_code(bw_khz);
@@ -421,10 +673,20 @@ bool sx1255_set_tx_pll_bw(sx1255_t* dev, uint16_t bw_khz)
     return spi_write_reg(dev->spi_fd, REG_TX_FILTER_BW, reg);
 }
 
-/* ---- Mode control ----------------------------------------------------------
- * The reference oscillator bit is always forced on: without it, the chip
- * locks no PLL and drives no I2S clock, and since the SX1255 is the I2S bus
- * master the host then gets no BCLK/LRCLK and every ALSA transfer fails. */
+/*
+ * set_mode()
+ *
+ * Changes bits in the mode control register and checks them by reading back.
+ * The reference oscillator bit is always kept on, because without it the
+ * chip drives no I2S clock.
+ *
+ * Parameters:
+ *   dev        - Device.
+ *   set_bits   - Mode bits to turn on.
+ *   clear_bits - Mode bits to turn off.
+ *
+ * Returns: true if the mode bits read back as written.
+ */
 static bool set_mode(sx1255_t* dev, uint8_t set_bits, uint8_t clear_bits)
 {
     uint8_t reg, want, got;
@@ -451,11 +713,33 @@ static bool set_mode(sx1255_t* dev, uint8_t set_bits, uint8_t clear_bits)
     return true;
 }
 
+/*
+ * sx1255_enable_rx()
+ *
+ * Turns the receiver on or off.
+ *
+ * Parameters:
+ *   dev    - Device.
+ *   enable - true to turn on.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_enable_rx(sx1255_t* dev, bool enable)
 {
     return enable ? set_mode(dev, MODE_RX_ENABLE, 0) : set_mode(dev, 0, MODE_RX_ENABLE);
 }
 
+/*
+ * sx1255_enable_tx()
+ *
+ * Turns the transmitter (and its driver) on or off.
+ *
+ * Parameters:
+ *   dev    - Device.
+ *   enable - true to turn on.
+ *
+ * Returns: true on success.
+ */
 bool sx1255_enable_tx(sx1255_t* dev, bool enable)
 {
     uint8_t tx_bits = MODE_TX_ENABLE | MODE_DRIVER_ENABLE;
@@ -463,6 +747,18 @@ bool sx1255_enable_tx(sx1255_t* dev, bool enable)
     return enable ? set_mode(dev, tx_bits, 0) : set_mode(dev, 0, tx_bits);
 }
 
+/*
+ * sx1255_enable_rf_loopback()
+ *
+ * Turns the RF loopback bit (bit 2 of the loopback register) on or off and
+ * checks that it read back.
+ *
+ * Parameters:
+ *   dev    - Device.
+ *   enable - true to turn on.
+ *
+ * Returns: true on success, false if the bit did not take (logged).
+ */
 bool sx1255_enable_rf_loopback(sx1255_t* dev, bool enable)
 {
     uint8_t reg, want, got;
@@ -507,6 +803,18 @@ bool sx1255_enable_rf_loopback(sx1255_t* dev, bool enable)
     return true;
 }
 
+/*
+ * sx1255_get_pll_status()
+ *
+ * Reads the PLL lock bits.
+ *
+ * Parameters:
+ *   dev       - Device.
+ *   tx_locked - Receives true if the TX PLL is locked.
+ *   rx_locked - Receives true if the RX PLL is locked.
+ *
+ * Returns: true if the register was read.
+ */
 bool sx1255_get_pll_status(sx1255_t* dev, bool* tx_locked, bool* rx_locked)
 {
     uint8_t reg;
@@ -520,6 +828,19 @@ bool sx1255_get_pll_status(sx1255_t* dev, bool* tx_locked, bool* rx_locked)
     return true;
 }
 
+/*
+ * sx1255_wait_pll_lock()
+ *
+ * Polls the PLL status every 10 ms until the chosen PLL locks or the time
+ * runs out.
+ *
+ * Parameters:
+ *   dev        - Device.
+ *   tx         - true to wait for the TX PLL, false for the RX PLL.
+ *   timeout_ms - Longest time to wait, in milliseconds.
+ *
+ * Returns: true if the PLL locked, false on timeout.
+ */
 bool sx1255_wait_pll_lock(sx1255_t* dev, bool tx, int timeout_ms)
 {
     struct timespec deadline, now;
@@ -553,6 +874,16 @@ bool sx1255_wait_pll_lock(sx1255_t* dev, bool tx, int timeout_ms)
     }
 }
 
+/*
+ * sx1255_get_chip_version()
+ *
+ * Reads the chip version register.
+ *
+ * Parameters:
+ *   dev - Device.
+ *
+ * Returns: Version byte, or 0 if the read fails.
+ */
 uint8_t sx1255_get_chip_version(sx1255_t* dev)
 {
     uint8_t ver = 0;
@@ -564,6 +895,16 @@ uint8_t sx1255_get_chip_version(sx1255_t* dev)
     return ver;
 }
 
+/*
+ * sx1255_close()
+ *
+ * Releases the reset line and closes the SPI device.
+ *
+ * Parameters:
+ *   dev - Device.
+ *
+ * Returns: nothing.
+ */
 void sx1255_close(sx1255_t* dev)
 {
     if (dev->have_reset_line)

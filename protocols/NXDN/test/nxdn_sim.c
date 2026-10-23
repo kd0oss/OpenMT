@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -76,6 +77,15 @@ static unsigned int gwHead = 0U, gwTail = 0U;
 static uint8_t rxbuf[2][600];
 static int rxlen[2] = {0, 0};
 
+/*
+ * nowMs()
+ *
+ * Reads the monotonic clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: Time in milliseconds.
+ */
 static uint64_t nowMs(void)
 {
     struct timespec ts;
@@ -85,6 +95,17 @@ static uint64_t nowMs(void)
     return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
 }
 
+/*
+ * gauss()
+ *
+ * Makes a random number with a Gaussian (normal) distribution, mean 0 and
+ * standard deviation 1 (Box-Muller method), used to add noise to the test
+ * samples.
+ *
+ * Parameters: none.
+ *
+ * Returns: The random number.
+ */
 static double gauss(void)
 {
     double u = (rand() + 1.0) / (RAND_MAX + 2.0);
@@ -95,8 +116,14 @@ static double gauss(void)
 
 /*
  * pump()
- *   Reads whatever packets have arrived from the host on either socket and
- *   queues them, waiting up to timeoutMs for the first.
+ *
+ * Reads whatever packets have arrived from the host on either socket and
+ * queues them, waiting up to timeoutMs for the first.
+ *
+ * Parameters:
+ *   timeoutMs - Longest wait for the first packet, in milliseconds.
+ *
+ * Returns: nothing.
  */
 static void pump(int timeoutMs)
 {
@@ -167,6 +194,19 @@ static void pump(int timeoutMs)
     }
 }
 
+/*
+ * sendAll()
+ *
+ * Writes a whole buffer to a socket, retrying when the write is interrupted
+ * or would block.
+ *
+ * Parameters:
+ *   fd   - Socket to write to.
+ *   data - Bytes to write.
+ *   len  - Number of bytes in data.
+ *
+ * Returns: nothing.
+ */
 static void sendAll(int fd, const uint8_t* data, size_t len)
 {
     size_t done = 0U;
@@ -188,6 +228,16 @@ static void sendAll(int fd, const uint8_t* data, size_t len)
 static char modeNow[10] = "IDLE";
 static unsigned int setModeCount = 0U, setIdleCount = 0U;
 
+/*
+ * writeModeFile()
+ *
+ * Writes the current simulated modem mode to /tmp/nxdn_stub_mode, where the
+ * host can read it as the active mode.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void writeModeFile(void)
 {
     FILE* f = fopen("/tmp/nxdn_stub_mode", "w");
@@ -200,9 +250,16 @@ static void writeModeFile(void)
 }
 
 /*
- * drainModem()
- *   Processes the packets from the host that are not transmit data: mode
- *   commands. Transmit packets stay in the queue for the caller.
+ * handleModemCommands()
+ *
+ * Processes the packets from the host that are not transmit data, such as
+ * the mode commands (SETMODE changes IDLE to NXDN, and the count is kept;
+ * SETIDLE returns to IDLE).  Transmit packets stay in the queue for the
+ * caller.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void handleModemCommands(void)
 {
@@ -228,6 +285,18 @@ static void handleModemCommands(void)
     }
 }
 
+/*
+ * sendGwPacket()
+ *
+ * Sends a packet to the host's gateway port.
+ *
+ * Parameters:
+ *   type    - Four character packet type.
+ *   payload - The payload.
+ *   len     - Number of bytes in payload.
+ *
+ * Returns: nothing.
+ */
 static void sendGwPacket(const char* type, const uint8_t* payload, unsigned int len)
 {
     uint8_t pkt[100];
@@ -241,7 +310,17 @@ static void sendGwPacket(const char* type, const uint8_t* payload, unsigned int 
     sendAll(gwFd, pkt, 8 + len);
 }
 
-/* Sends modem samples to the host as SAMP packets */
+/*
+ * sendSamples()
+ *
+ * Sends modem samples to the host as SAMP packets
+ *
+ * Parameters:
+ *   s     - The samples.
+ *   count - Number of samples.
+ *
+ * Returns: nothing.
+ */
 static void sendSamples(const int16_t* s, unsigned int count)
 {
     uint8_t pkt[200];
@@ -274,7 +353,17 @@ static void sendSamples(const int16_t* s, unsigned int count)
     }
 }
 
-/* Plays a list of on air frames into the host */
+/*
+ * radioTransmit()
+ *
+ * Plays a list of on air frames into the host
+ *
+ * Parameters:
+ *   frames - The frames to play, 48 bytes each.
+ *   n      - Number of frames.
+ *
+ * Returns: nothing.
+ */
 static void radioTransmit(uint8_t frames[][48], unsigned int n)
 {
     if (frameMode)
@@ -341,6 +430,16 @@ static void radioTransmit(uint8_t frames[][48], unsigned int n)
 static uint8_t netMsg[MAXF][41];
 static unsigned int netCount = 0U;
 
+/*
+ * collectGateway()
+ *
+ * Takes the NXDN messages from the packets queued from the gateway port and
+ * stores them in netMsg.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void collectGateway(void)
 {
     while (gwTail != gwHead)
@@ -354,7 +453,17 @@ static void collectGateway(void)
     }
 }
 
-/* Waits until the gateway has gone quiet for quietMs */
+/*
+ * waitGatewayQuiet()
+ *
+ * Waits until the gateway has gone quiet for quietMs
+ *
+ * Parameters:
+ *   quietMs - How long the gateway must be quiet, in milliseconds.
+ *   maxMs   - Longest total wait, in milliseconds.
+ *
+ * Returns: nothing.
+ */
 static void waitGatewayQuiet(unsigned int quietMs, unsigned int maxMs)
 {
     uint64_t start = nowMs();
@@ -385,6 +494,19 @@ typedef struct
     unsigned int cap;
 } TxCapture;
 
+/*
+ * captureFrameCb()
+ *
+ * Receiver callback that stores each frame received from the host's
+ * transmission.
+ *
+ * Parameters:
+ *   ctx  - The capture structure (TxCapture).
+ *   f    - The received frame.
+ *   lost - true if the signal was lost; such calls are ignored.
+ *
+ * Returns: nothing.
+ */
 static void captureFrameCb(void* ctx, const uint8_t* f, bool lost)
 {
     TxCapture* c = ctx;
@@ -395,8 +517,16 @@ static void captureFrameCb(void* ctx, const uint8_t* f, bool lost)
 
 /*
  * collectTransmit()
- *   Gathers what the host transmitted: decodes the samples with the receiver
- *   (or reads the frames of the MMDVM path) until the host has been quiet.
+ *
+ * Gathers what the host transmitted: decodes the samples with the receiver
+ * (or reads the frames of the MMDVM path) until the host has been quiet.
+ *
+ * Parameters:
+ *   c       - Receives the frames and the end of transmission flag.
+ *   quietMs - How long the host must be quiet, in milliseconds.
+ *   maxMs   - Longest total wait, in milliseconds.
+ *
+ * Returns: nothing.
  */
 static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int maxMs)
 {
@@ -455,6 +585,19 @@ static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int max
     }
 }
 
+/*
+ * countEqual()
+ *
+ * Counts how many frames of one list also appear in another.
+ *
+ * Parameters:
+ *   a  - First list of frames, 48 bytes each.
+ *   na - Number of frames in a.
+ *   b  - Second list of frames, 48 bytes each.
+ *   nb - Number of frames in b.
+ *
+ * Returns: The number of frames in a that are also in b.
+ */
 static unsigned int countEqual(uint8_t a[][48], unsigned int na, uint8_t b[][48], unsigned int nb)
 {
     unsigned int same = 0U;
@@ -474,6 +617,19 @@ static unsigned int countEqual(uint8_t a[][48], unsigned int na, uint8_t b[][48]
 static unsigned int refNetCount;
 static uint8_t refNet[MAXF][41];
 
+/*
+ * refNetCb()
+ *
+ * Control callback for the reference run: stores each message the control
+ * would send to the network.
+ *
+ * Parameters:
+ *   ctx - Not used.
+ *   d   - The message data.
+ *   t   - The message type.
+ *
+ * Returns: nothing.
+ */
 static void refNetCb(void* ctx, const uint8_t* d, uint8_t t)
 {
     if (refNetCount < MAXF)
@@ -484,6 +640,18 @@ static void refNetCb(void* ctx, const uint8_t* d, uint8_t t)
     }
 }
 
+/*
+ * reference()
+ *
+ * Runs the control logic directly on a list of frames, to find which network
+ * messages it should produce.  The result is kept in refNet.
+ *
+ * Parameters:
+ *   frames - The frames, 48 bytes each.
+ *   n      - Number of frames.
+ *
+ * Returns: nothing.
+ */
 static void reference(uint8_t frames[][48], unsigned int n)
 {
     NxdnCtrl c;
@@ -499,6 +667,21 @@ static void reference(uint8_t frames[][48], unsigned int n)
 
 static uint8_t txCall[MAXF][48];
 
+/*
+ * main()
+ *
+ * Program entry.  Plays the part of the modem host and the gateway for
+ * nxdn_host and runs five tests: a voice call from radio to network, a voice
+ * call from network to radio, a data call, the mode hang time, and a call
+ * with another RAN, which must be ignored.  Options: -m modem number,
+ * --frame (MMDVM frames instead of samples), --noise rms, --hang seconds.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 if all tests pass, 1 if a test fails, 2 on a setup error.
+ */
 int main(int argc, char** argv)
 {
     int modem = 1;

@@ -15,7 +15,7 @@ target_sources(ysf_gateway PRIVATE
     ./ysf_reflist.c
     ./ysf_wiresx.c
     ../ysf_func.c
-    ../../../tools/dsp_tools.c
+    ../../../tools/fec_tools.c
     ../../../tools/string_builder.c
     ../../../tools/tools.c
 )

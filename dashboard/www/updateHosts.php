@@ -1,0 +1,433 @@
+<?PHP
+/***************************************************************************
+ *   Copyright (C) 2026 by Rick KD0OSS             *
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 3 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ *   This program is distributed in the hope that it will be useful,       *
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+ *   GNU General Public License for more details.                          *
+ *                                                                         *
+ *   You should have received a copy of the GNU General Public License     *
+ *   along with this program; if not, see <http://www.gnu.org/licenses/>   *
+ *                                                                         *
+ * Based on the update script by Tony Corbett G0WFV and Andy Taylor MW0MWZ *
+ *                                                                         *
+ ***************************************************************************/
+
+/* This script changes the database and downloads files, so it must never run because of a web request. The
+   dashboard starts it through updateHostsRun.php, which runs from the command line. */
+if (PHP_SAPI !== 'cli')
+{
+    http_response_code(403);
+    exit;
+}
+
+set_time_limit(600);
+
+$section = $argv[1] ?? "all";
+
+function connect_db()
+{
+    global $mysql_host;
+    global $mysql_username;
+    global $mysql_password;
+    $mysql_username = "openmt";
+    $foundDB = false;
+
+    $file = fopen("/etc/openmt.ini", "r");
+    if ($file != false)
+    {
+        while (!feof($file))
+        {
+            $line = fgets($file);
+            if ($foundDB)
+            {
+                if (stristr($line, "host=") != false)
+                {
+                    parse_str($line, $tmp);
+                    $mysql_host = trim($tmp['host']);
+                }
+                if (stristr($line, "passwd=") != false)
+                {
+                    parse_str($line, $tmp);
+                    $mysql_password = trim($tmp['passwd']);
+                }
+            }
+            if (stristr($line, "[database]") != false && !$foundDB)
+                $foundDB = true;
+        }
+        fclose($file);
+    }
+    return mysqli_connect($mysql_host, $mysql_username, $mysql_password);
+}  /** end connect_db **/
+
+$mysql = connect_db();
+
+/*
+ * hostEsc()
+ *
+ * Escapes a value taken from a downloaded host list so it is safe inside a
+ * quoted SQL string.
+ *
+ * $value - The text to escape.
+ *
+ * Returns the escaped text.
+ */
+function hostEsc($value)
+{
+    global $mysql;
+
+    return mysqli_real_escape_string($mysql, (string)$value);
+}
+
+function getHostFile($file)
+{
+    $user_agent = "Pi-Star_20260101";
+
+    // Initialize a cURL session
+    $ch = curl_init();
+
+    // Set the URL for the cURL transfer
+    curl_setopt($ch, CURLOPT_URL, $file);
+
+    // Set the User-Agent header field
+    curl_setopt($ch, CURLOPT_USERAGENT, $user_agent);
+
+    // Set CURLOPT_RETURNTRANSFER to true to return the response as a string instead of outputting it directly
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+    // Optional: follow redirects
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+
+    // Execute the cURL request
+    $response = curl_exec($ch);
+
+    // Check for errors
+    if ($response === false)
+    {
+        echo 'cURL error: ' . curl_error($ch);
+        return "error";
+    }
+
+    // Close the cURL session to free up resources
+    curl_close($ch);
+    return $response;
+}
+
+function updateP25Hosts()
+{
+    global $mysql;
+
+    $file = "http://www.pistar.uk/downloads/P25_Hosts.txt";
+    $hosts = getHostFile($file);
+    if ($hosts != "error")
+    {
+        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'P25' AND status = 'Unlinked'");
+        $lines = explode("\n", $hosts);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode("\t", $lines[$x]);
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'P25' AND Nick = '".hostEsc($fields[0])."'";
+                $result = mysqli_query($mysql, $query);
+                if (mysqli_num_rows($result) > 0)
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".hostEsc($fields[1])."', port = ".(int)$fields[2]." WHERE Nick = '".hostEsc($fields[0])."' AND refl_type = 'P25'";
+                else
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".hostEsc($fields[0])."', ip4 = '".hostEsc($fields[1])."', port = ".(int)$fields[2].", refl_type = 'P25'";
+                mysqli_free_result($result);
+//                echo $query."\n";
+                mysqli_query($mysql, $query);
+            }
+        }
+    }
+}
+
+function updateNXDNHosts()
+{
+    global $mysql;
+
+    $file = "http://www.pistar.uk/downloads/NXDN_Hosts.txt";
+    $hosts = getHostFile($file);
+    if ($hosts != "error")
+    {
+        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'NXDN' AND status = 'Unlinked'");
+        $lines = explode("\n", $hosts);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            $line = trim($lines[$x]);
+            if (strlen($line) > 6 && $line[0] != '#')
+            {
+                // "talk group <tab or spaces> address <tab or spaces> port"
+                $fields = preg_split('/\s+/', $line);
+                if (count($fields) < 3 || !ctype_digit($fields[0]) || !ctype_digit($fields[2]))
+                    continue;
+                $nick = mysqli_real_escape_string($mysql, $fields[0]);
+                $ip4 = mysqli_real_escape_string($mysql, $fields[1]);
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'NXDN' AND Nick = '".$nick."'";
+                $result = mysqli_query($mysql, $query);
+                if (mysqli_num_rows($result) > 0)
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$ip4."', port = ".(int)$fields[2]." WHERE Nick = '".$nick."' AND refl_type = 'NXDN'";
+                else
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$nick."', ip4 = '".$ip4."', port = ".(int)$fields[2].", refl_type = 'NXDN'";
+                mysqli_free_result($result);
+                mysqli_query($mysql, $query);
+            }
+        }
+    }
+}
+
+function updateDSTARHosts()
+{
+    global $mysql;
+
+    $file = "http://www.pistar.uk/downloads/DPlus_WithXRF_Hosts.txt";
+    $hosts = getHostFile($file);
+    if ($hosts != "error")
+    {
+        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND status = 'Unlinked'");
+        $lines = explode("\n", $hosts);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode("\t", $lines[$x]);
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '".hostEsc($fields[0])."'";
+                $result = mysqli_query($mysql, $query);
+                if (mysqli_num_rows($result) > 0)
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".hostEsc($fields[1])."', port = 0 WHERE Nick = '".hostEsc($fields[0])."' AND refl_type = 'DSTAR'";
+                else
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".hostEsc($fields[0])."', ip4 = '".hostEsc($fields[1])."', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
+                mysqli_free_result($result);
+          //      echo $query."\n";
+                mysqli_query($mysql, $query);
+            }
+        }
+    }
+
+    $file = "http://www.pistar.uk/downloads/DExtra_NoXRF_Hosts.txt";
+    $hosts = getHostFile($file);
+    if ($hosts != "error")
+    {
+        $lines = explode("\n", $hosts);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode("\t", $lines[$x]);
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '".hostEsc($fields[0])."'";
+                $result = mysqli_query($mysql, $query);
+                if (mysqli_num_rows($result) > 0)
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".hostEsc($fields[1])."', port = 0 WHERE Nick = '".hostEsc($fields[0])."' AND refl_type = 'DSTAR'";
+                else
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".hostEsc($fields[0])."', ip4 = '".hostEsc($fields[1])."', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
+                mysqli_free_result($result);
+        //        echo $query."\n";
+                mysqli_query($mysql, $query);
+            }
+        }
+    }
+
+    $file = "http://www.pistar.uk/downloads/DCS_Hosts.txt";
+    $hosts = getHostFile($file);
+    if ($hosts != "error")
+    {
+        $lines = explode("\n", $hosts);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode("\t", $lines[$x]);
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '".hostEsc($fields[0])."'";
+                $result = mysqli_query($mysql, $query);
+                if (mysqli_num_rows($result) > 0)
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".hostEsc($fields[1])."', port = 0 WHERE Nick = '".hostEsc($fields[0])."' AND refl_type = 'DSTAR'";
+                else
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".hostEsc($fields[0])."', ip4 = '".hostEsc($fields[1])."', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
+                mysqli_free_result($result);
+      //          echo $query."\n";
+                mysqli_query($mysql, $query);
+            }
+        }
+    }
+}
+
+function updateM17Hosts()
+{
+    global $mysql;
+
+    $file = "http://www.pistar.uk/downloads/M17_Hosts.txt";
+    $hosts = getHostFile($file);
+    if ($hosts != "error")
+    {
+        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'M17' AND status = 'Unlinked'");
+        $lines = explode("\n", $hosts);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode("\t", $lines[$x]);
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'M17' AND Nick = '".hostEsc($fields[0])."'";
+                $result = mysqli_query($mysql, $query);
+                if (mysqli_num_rows($result) > 0)
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".hostEsc($fields[1])."', port = ".(int)$fields[2]." WHERE Nick = '".hostEsc($fields[0])."' AND refl_type = 'M17'";
+                else
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".hostEsc($fields[0])."', ip4 = '".hostEsc($fields[1])."', port = ".(int)$fields[2].", refl_type = 'M17', has_modules = 'yes'";
+                mysqli_free_result($result);
+              //  echo $query."\n";
+                mysqli_query($mysql, $query);
+            }
+        }
+    }
+}
+
+function updateDMRHosts()
+{
+    global $mysql;
+
+    $file = "http://www.pistar.uk/downloads/DMR_Hosts.txt";
+    $hosts = getHostFile($file);
+    if ($hosts != "error")
+    {
+        echo $hosts;
+        return;
+        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'DMR' AND status = 'Unlinked'");
+        $lines = explode("\n", $hosts);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode("\t", $lines[$x]);
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DMR' AND Nick = '".hostEsc($fields[0])."'";
+                $result = mysqli_query($mysql, $query);
+                if (mysqli_num_rows($result) > 0)
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".hostEsc($fields[1])."', port = ".(int)$fields[2]." WHERE Nick = '".hostEsc($fields[0])."' AND refl_type = 'DMR'";
+                else
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".hostEsc($fields[0])."', ip4 = '".hostEsc($fields[1])."', port = ".(int)$fields[2].", refl_type = 'DMR'";
+                mysqli_free_result($result);
+              //  echo $query."\n";
+                mysqli_query($mysql, $query);
+            }
+        }
+    }
+}
+
+function updateDMRIds()
+{
+    global $mysql;
+
+    exec("curl -sSL http://www.pistar.uk/downloads/DMRIds.dat.gz  --user-agent Pi-Star_Pi-Star_20260101 | gunzip -c > DMRIds.dat", $out, $ret);
+//    echo $out."   ".$ret."\n";
+    //    if ($hosts != "error")
+    {
+        mysqli_query($mysql, "TRUNCATE modem_host.dmr_ids");
+        $lines = file("DMRIds.dat", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        for ($x = 0; $x < count($lines); $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode("\t", $lines[$x]);
+                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '".hostEsc($fields[0])."', Callsign = '".hostEsc($fields[1])."', Name = '".hostEsc($fields[2])."'";
+                mysqli_query($mysql, $query);
+//                echo ".";
+            }
+        }
+    }
+
+    $file = "http://www.pistar.uk/downloads/NXDN.csv";
+    $users = getHostFile($file);
+    if ($users != "error")
+    {
+        $lines = explode("\n", $users);
+        for ($x = 1; $x < count($lines)-1; $x++)
+        {
+            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
+            {
+                $fields = explode(",", $lines[$x]);
+                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '".hostEsc($fields[0])."', Callsign = '".hostEsc($fields[1])."', Name = '".hostEsc(substr($fields[2], 0, 40))."'";
+                mysqli_query($mysql, $query);
+//                echo ".";
+            }
+        }
+    }
+}
+
+function updateYSFHosts()
+{
+    global $mysql;
+//sleep(2000);
+    // JSON list of the YSF reflectors (the same file as YSFHostsUpdate.sh)
+    exec("curl -H 'Authorization: Token f8278d375db51dfcde20be8b30fa7537aebf3af3' https://refcheck.radio/api/hostfile-gate/fetch/json/ysf/ -o  YSFHosts.json", $out, $ret);
+    $lines = file_get_contents("YSFHosts.json");
+
+        $list = json_decode($lines, true);
+        if (!is_array($list) || !isset($list['reflectors']) || !is_array($list['reflectors']))
+            return;
+
+        mysqli_query($mysql, "DELETE FROM modem_host.reflectors WHERE refl_type = 'YSF' AND status = 'Unlinked'");
+        foreach ($list['reflectors'] as $r)
+        {
+            if (!isset($r['designator']) || !isset($r['name']) || !isset($r['ipv4']) || !isset($r['port']))
+                continue;
+            if (!ctype_digit((string)$r['designator']) || !ctype_digit((string)$r['port']) || (int)$r['port'] == 0)
+                continue;
+            $nick = mysqli_real_escape_string($mysql, (string)$r['designator']);
+            $ip4 = mysqli_real_escape_string($mysql, (string)$r['ipv4']);
+            $country = (!empty($r['use_xx_prefix'])) ? "XX" : (isset($r['country']) ? (string)$r['country'] : "na");
+            $name = mysqli_real_escape_string($mysql, $country."-".$r['name']);
+            $country = mysqli_real_escape_string($mysql, substr($country, 0, 2));
+            $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'YSF' AND Nick = '".$nick."'";
+            $result = mysqli_query($mysql, $query);
+            if (mysqli_num_rows($result) > 0)
+                $query = "UPDATE modem_host.reflectors SET ip4 = '".$ip4."', port = ".(int)$r['port'].", Name = '".$name."', Country = '".$country."' WHERE Nick = '".$nick."' AND refl_type = 'YSF'";
+            else
+                $query = "INSERT INTO modem_host.reflectors SET Nick = '".$nick."', ip4 = '".$ip4."', port = ".(int)$r['port'].", Name = '".$name."', Country = '".$country."', refl_type = 'YSF'";
+            mysqli_free_result($result);
+            mysqli_query($mysql, $query);
+        }
+}
+
+if ($section == "p25" || $section =="all")
+{
+    echo "Updating P25 Hosts.\n";
+    updateP25Hosts();
+}
+
+if ($section == "nxdn" || $section =="all")
+{
+    echo "Updating NXDN Hosts.\n";
+    updateNXDNHosts();
+}
+
+if ($section == "ysf" || $section =="all")
+{
+    echo "Updating YSF Hosts.\n";
+    updateYSFHosts();
+}
+
+if ($section == "m17" || $section =="all")
+{
+    echo "Updating M17 Hosts.\n";
+    updateM17Hosts();
+}
+
+if ($section == "dstar" || $section =="all")
+{
+    echo "Updating DSTAR Hosts.\n";
+    updateDSTARHosts();
+}
+
+if ($section == "ids" || $section =="all")
+{
+    echo "Updating DMR Id's.\n";
+    updateDMRIds();
+}
+echo "\nUpdates complete.\n";
+
+mysqli_close($mysql);
+?>

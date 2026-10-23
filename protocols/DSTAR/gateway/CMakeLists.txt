@@ -18,6 +18,7 @@ target_link_libraries(dstar_gateway PUBLIC PkgConfig::mariadb)
 target_sources(dstar_gateway PRIVATE
     ./dstargateway.c
     ../dstar_gps.c
+    ../dstar_slowdata.c
     ../../../tools/tools.c
     ../../../tools/CCITTChecksumReverse.c
     ../../../tools/string_builder.c

@@ -88,77 +88,35 @@ const uint8_t COMM_UPDATE_CONF = 0x04;
 uint8_t ldu1[P25_LDU_FRAME_LENGTH_BYTES];
 uint8_t ldu2[P25_LDU_FRAME_LENGTH_BYTES];
 
-// error - wrapper for perror
+/*
+ * error()
+ *
+ * Reports a message with reportError() and ends the program with exit status 1.
+ *
+ * Parameters:
+ *   msg - Text printed in front of the system error message.
+ *
+ * Returns: nothing.
+ */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "P25 gateway", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
-// Wait for 'delay' miroseconds
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-};
+;
 
-// Print debug data.
-// From MMDVM project by Jonathan Naylor G4KLX.
-void dump(char* text, uint8_t* data, unsigned int length)
-{
-    struct timespec ts;
-    uint64_t milliseconds;
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    // Get the current time with nanosecond precision
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("clock_gettime");
-        return;
-    }
-
-    // Convert to milliseconds
-    milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-
-    fprintf(stdout, "%s: %llu (ms)\n", text, milliseconds);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++) fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++) fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            uint8_t c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-}
-
-// Send out going bytes to P25 service.
+/*
+ * txThread()
+ *
+ * Thread that sends outgoing data to the P25 host.  At regular intervals it
+ * takes complete frames from txBuffer and writes them to the host socket.
+ *
+ * Parameters:
+ *   arg - Socket of the host connection, passed as a pointer sized integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* txThread(void* arg)
 {
     int sockfd    = (intptr_t)arg;
@@ -213,7 +171,7 @@ void* txThread(void* arg)
 
                     if (write(sockfd, tbuf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        reportError(modemName, "P25 gateway", "remote disconnect");
                         break;
                     }
                 }
@@ -223,12 +181,24 @@ void* txThread(void* arg)
         }
     }
     fprintf(stderr, "TX thread exited.\n");
-    int iRet  = 500;
     connected = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * insertMissingAudio()
+ *
+ * Fills in lost voice frames of a network LDU.  Each of the nine IMBE voice
+ * frames whose first byte is 0 is replaced by the last good frame; a good
+ * frame is remembered as the new last one.
+ *
+ * Parameters:
+ *   data - The assembled network LDU (the records laid out end to end),
+ *          changed in place.
+ *
+ * Returns: nothing.
+ */
 void insertMissingAudio(uint8_t* data)
 {
     if (data[0U] == 0x00U)
@@ -313,6 +283,21 @@ void insertMissingAudio(uint8_t* data)
     }
 }
 
+/*
+ * writeLDU1()
+ *
+ * Sends an LDU1 from the radio to the reflector.  The link control is
+ * decoded, then the nine voice frames and the link control and low speed
+ * data are written into the reflector records 0x62 to 0x6A, which are queued
+ * in reflTxBuffer.  The terminator record (0x80) follows if this is the end
+ * of the call.
+ *
+ * Parameters:
+ *   ldu1 - The LDU1 frame.
+ *   end  - true if this is the last frame of the call.
+ *
+ * Returns: true.
+ */
 bool writeLDU1(const uint8_t* ldu1, bool end)
 {
     assert(ldu1 != NULL);
@@ -426,6 +411,20 @@ bool writeLDU1(const uint8_t* ldu1, bool end)
     return true;
 }
 
+/*
+ * writeLDU2()
+ *
+ * Sends an LDU2 from the radio to the reflector.  The nine voice frames and
+ * the encryption data are written into the reflector records 0x6B to 0x73,
+ * which are queued in reflTxBuffer.  The terminator record (0x80) follows if
+ * this is the end of the call.
+ *
+ * Parameters:
+ *   ldu2 - The LDU2 frame.
+ *   end  - true if this is the last frame of the call.
+ *
+ * Returns: true.
+ */
 bool writeLDU2(const uint8_t* ldu2, bool end)
 {
     assert(ldu2 != NULL);
@@ -545,6 +544,19 @@ bool writeLDU2(const uint8_t* ldu2, bool end)
     return true;
 }
 
+/*
+ * createHeader()
+ *
+ * Starts a transmission from the network.  The link control (format,
+ * manufacturer id, source and destination ids) is taken from the assembled
+ * LDU1, txOn is set, and a header frame is built (sync, NID, header data and
+ * busy bits) and queued in txBuffer for the host.
+ *
+ * Parameters:
+ *   data - The assembled network LDU1.
+ *
+ * Returns: nothing.
+ */
 void createHeader(const uint8_t* data)
 {
     txOn = true;
@@ -590,6 +602,19 @@ void createHeader(const uint8_t* data)
     pthread_mutex_unlock(&txBufMutex);
 }
 
+/*
+ * createNetLDU1()
+ *
+ * Builds an LDU1 frame for the radio from the network records.  Missing
+ * voice frames are filled in, then the sync, NID, link control, nine IMBE
+ * voice frames, low speed data and busy bits are added.  The frame is queued
+ * in txBuffer and the LDU1 store is cleared.
+ *
+ * Parameters:
+ *   data - The assembled network LDU1 (the records laid out end to end).
+ *
+ * Returns: nothing.
+ */
 void createNetLDU1(uint8_t* data)
 {
     uint8_t ldu[P25_LDU_FRAME_LENGTH_BYTES + 8];
@@ -638,6 +663,19 @@ void createNetLDU1(uint8_t* data)
     memset(ldu1, 0x00U, P25_LDU_FRAME_LENGTH_BYTES);
 }
 
+/*
+ * createNetLDU2()
+ *
+ * Builds an LDU2 frame for the radio from the network records.  Missing
+ * voice frames are filled in, then the sync, NID, encryption data, nine IMBE
+ * voice frames, low speed data and busy bits are added.  The frame is queued
+ * in txBuffer and the LDU2 store is cleared.
+ *
+ * Parameters:
+ *   data - The assembled network LDU2 (the records laid out end to end).
+ *
+ * Returns: nothing.
+ */
 void createNetLDU2(uint8_t* data)
 {
     uint8_t ldu[P25_LDU_FRAME_LENGTH_BYTES + 8];
@@ -686,6 +724,17 @@ void createNetLDU2(uint8_t* data)
     memset(ldu2, 0x00U, P25_LDU_FRAME_LENGTH_BYTES);
 }
 
+/*
+ * checkNetLDU1()
+ *
+ * If a transmission is on and the LDU1 store holds any voice records, sends
+ * it as an LDU1 frame.  This sends an LDU1 that is only partly complete when
+ * its last record was lost.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void checkNetLDU1()
 {
     if (!txOn)
@@ -700,6 +749,17 @@ void checkNetLDU1()
         createNetLDU1(ldu1);
 }
 
+/*
+ * checkNetLDU2()
+ *
+ * If a transmission is on and the LDU2 store holds any voice records, sends
+ * it as an LDU2 frame.  This sends an LDU2 that is only partly complete when
+ * its last record was lost.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void checkNetLDU2()
 {
     if (!txOn)
@@ -714,6 +774,16 @@ void checkNetLDU2()
         createNetLDU2(ldu2);
 }
 
+/*
+ * createNetTerminator()
+ *
+ * Ends a transmission from the network.  A terminator frame (sync, NID and
+ * busy bits) is queued in txBuffer and txOn is cleared.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void createNetTerminator()
 {
     uint8_t data[P25_TERM_FRAME_LENGTH_BYTES + 8U];
@@ -740,6 +810,20 @@ void createNetTerminator()
     txOn = false;
 }
 
+/*
+ * writeNetwork()
+ *
+ * Handles one record from the reflector.  Records 0x62 to 0x6A are stored in
+ * the LDU1 store and records 0x6B to 0x73 in the LDU2 store; the last record
+ * of each starts the transmission (header) if it is not on yet and builds
+ * the LDU frames.  Record 0x80 ends the call.  Earlier incomplete LDUs are
+ * sent as they are when the next one begins.
+ *
+ * Parameters:
+ *   dataIn - The record, starting with its record type byte.
+ *
+ * Returns: nothing.
+ */
 void writeNetwork(uint8_t* dataIn)
 {
     switch (dataIn[0U])
@@ -842,7 +926,22 @@ void writeNetwork(uint8_t* dataIn)
     }
 }
 
-// Connect and process bytes from P25 reflector.
+/*
+ * connectP25Refl()
+ *
+ * Thread that talks to a P25 reflector over UDP.  It resolves the reflector,
+ * sends the connect message (0xF0 with the callsign), and then reads the
+ * reflector's packets and passes them to writeNetwork().  A poll is sent
+ * every five seconds, records from reflTxBuffer are sent to the reflector,
+ * and the connection is dropped after six seconds without a packet.  On exit
+ * a disconnect message (0xF1) is sent.
+ *
+ * Parameters:
+ *   argv - Text "hostfd callsign hostname port", prepared by
+ *          connectToRefl().
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* connectP25Refl(void* argv)
 {
     struct sockaddr_in serveraddr;
@@ -869,7 +968,7 @@ void* connectP25Refl(void* argv)
     server = gethostbyname(hostname);
     if (server == NULL)
     {
-        fprintf(stderr, "ERROR, no such host as %s\n", hostname);
+        reportError(modemName, "P25 gateway", "no such host as %s", hostname);
         exit(0);
     }
 
@@ -933,14 +1032,13 @@ void* connectP25Refl(void* argv)
         pthread_mutex_unlock(&txBufMutex);
         sleep(1);
         close(sockfd);
-        fprintf(stderr, "Failed to connect to P25 reflector.\n");
-        int iRet = 100;
-        pthread_exit(&iRet);
+        reportError(modemName, "P25 gateway", "Failed to connect to P25 reflector.");
+        pthread_exit(NULL);
         return NULL;
     }
 
     if (debugM)
-        dump((char*)"P25 Refl recv data", (uint8_t*)buf, n);
+        hexDump((char*)"P25 Refl recv data", (uint8_t*)buf, n);
 
     p25ReflDisconnect = false;
 
@@ -953,14 +1051,14 @@ void* connectP25Refl(void* argv)
         if (n > 11)
         {
             if (debugM)
-                dump((char*)"P25 Refl recv data", (uint8_t*)buf, n);
+                hexDump((char*)"P25 Refl recv data", (uint8_t*)buf, n);
 
             writeNetwork(buf);
         }
         else if (n == 11)
         {
             if (debugM)
-                dump((char*)"P25 Refl recv data", (uint8_t*)buf, n);
+                hexDump((char*)"P25 Refl recv data", (uint8_t*)buf, n);
         }
 
         if (timeout >= 5000)
@@ -1036,12 +1134,24 @@ void* connectP25Refl(void* argv)
     sleep(1);
     close(sockfd);
     fprintf(stderr, "Disconnected from P25 reflector.\n");
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
-// Start up reflector threads.
+/*
+ * connectToRefl()
+ *
+ * Starts the threads for the reflector link: txThread() to send to the P25
+ * host and connectP25Refl() to talk to the reflector.
+ *
+ * Parameters:
+ *   sockfd    - Socket of the host connection.
+ *   source    - Callsign of the repeater.
+ *   reflector - Address of the reflector.
+ *   port      - UDP port of the reflector.
+ *
+ * Returns: nothing.
+ */
 void connectToRefl(int sockfd, char* source, char* reflector, uint16_t port)
 {
     static char server[80] = "";
@@ -1054,7 +1164,7 @@ void connectToRefl(int sockfd, char* source, char* reflector, uint16_t port)
     pthread_t txid;
     int err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)sockfd);
     if (err != 0)
-        fprintf(stderr, "Can't create tx thread :[%s]", strerror(err));
+        reportError(modemName, "P25 gateway", "Can't create tx thread :[%s]", strerror(err));
     else
     {
         if (debugM)
@@ -1062,7 +1172,7 @@ void connectToRefl(int sockfd, char* source, char* reflector, uint16_t port)
     }
     err = pthread_create(&(p25Reflid), NULL, &connectP25Refl, server);
     if (err != 0)
-        fprintf(stderr, "Can't create P25 reflector thread :[%s]", strerror(err));
+        reportError(modemName, "P25 gateway", "Can't create P25 reflector thread :[%s]", strerror(err));
     else
     {
         if (debugM)
@@ -1070,7 +1180,18 @@ void connectToRefl(int sockfd, char* source, char* reflector, uint16_t port)
     }
 }
 
-// Start up connection to P25 service.
+/*
+ * startClient()
+ *
+ * Thread that keeps the gateway connected to the P25 host service and reads
+ * its packets: commands, connect and disconnect requests for a reflector,
+ * status, and P25 frames to send to the reflector.
+ *
+ * Parameters:
+ *   arg - Address of the P25 host, as a text string.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* startClient(void* arg)
 {
     int sockfd = 0;
@@ -1082,14 +1203,14 @@ void* startClient(void* arg)
 
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "P25 gateway", "Socket creation error: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags == -1)
     {
-        perror("fcntl F_GETFL");
+        reportError(modemName, "P25 gateway", "fcntl F_GETFL: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -1101,9 +1222,9 @@ void* startClient(void* arg)
     serv_addr.sin_port   = htons(clientPort);
 
     // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(hostAddress, &serv_addr.sin_addr))
     {  // Connect to localhost
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "P25 gateway", "Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
 
@@ -1112,7 +1233,7 @@ void* startClient(void* arg)
     {
         if (errno != EINPROGRESS)
         {
-            perror("connection failed");
+            reportError(modemName, "P25 gateway", "connection failed: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
     }
@@ -1142,7 +1263,7 @@ void* startClient(void* arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "P25_Gateway: error when reading from P25 host, errno=%d\n", errno);
+            reportError(modemName, "P25 gateway", "P25_Gateway: error when reading from P25 host, errno=%d", errno);
             break;
         }
 
@@ -1187,7 +1308,7 @@ void* startClient(void* arg)
         memcpy(type, buffer + 4, typeLen);
 
         if (debugM)
-            dump((char*)"P25 Service data:", (uint8_t*)buffer, respLen);
+            hexDump((char*)"P25 Service data:", (uint8_t*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -1249,19 +1370,32 @@ void* startClient(void* arg)
     }
     fprintf(stderr, "Client thread exited.\n");
     close(sockfd);
-    int iRet  = 100;
     connected = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
+/*
+ * main()
+ *
+ * Program entry.  Parses the command line (-m modem number 1 to 10, which
+ * also selects the TCP port; -d daemon; -x debug; -v version), reads the
+ * configuration, starts the client thread and then runs until the program is
+ * stopped.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on exit, 1 on a bad argument.
+ */
 int main(int argc, char** argv)
 {
     bool daemon = false;
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1270,7 +1404,7 @@ int main(int argc, char** argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "P25 gateway", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -1278,8 +1412,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(p25Host, sizeof(p25Host), "%s", optarg);   /* where the protocol service runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -1291,7 +1428,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: P25_Gateway [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: P25_Gateway [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1302,7 +1439,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "P25_Gateway: error in fork(), exiting\n");
+            reportError(modemName, "P25 gateway", "P25_Gateway: error in fork(), exiting");
             return 1;
         }
 
@@ -1323,7 +1460,7 @@ int main(int argc, char** argv)
     int err = pthread_create(&(clientid), NULL, &startClient, p25Host);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create modem host thread :[%s]", strerror(err));
+        reportError(modemName, "P25 gateway", "Can't create modem host thread :[%s]", strerror(err));
         return 1;
     }
     else

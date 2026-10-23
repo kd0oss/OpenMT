@@ -16,6 +16,7 @@ target_sources(ysf_host PRIVATE
     ./ysf_dsp.c
     ../../tools/string_builder.c
     ../../tools/tools.c
+    ../../tools/fec_tools.c
     ../../tools/dsp_tools.c
     ../../tools/ADF7021.c
 )

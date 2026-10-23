@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 #pragma once
 extern "C" {
 unsigned int golay24128_encode23127(unsigned int data);

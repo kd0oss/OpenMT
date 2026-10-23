@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -51,6 +52,20 @@ int ambeFlow = 0;           /* 1: RTS/CTS hardware flow control */
 int ambeHwReset = 0;        /* 1 pulse DTR low, 2 pulse RTS low, 3 both, before the chip is used */
 int ambeInit = 0x00;        /* PKT_INIT flags sent after the rate (bit 0 encoder, bit 1 decoder); 0 = none */
 
+/*
+ * dump()
+ *
+ * Debug output.  When ambeDebug is set, prints the direction, packet type,
+ * length and the first bytes of a packet to stderr.
+ *
+ * Parameters:
+ *   dir  - Text giving the direction, "rx" or "tx".
+ *   type - Packet type.
+ *   p    - The packet payload.
+ *   len  - Number of bytes in p.
+ *
+ * Returns: nothing.
+ */
 static void dump(const char* dir, uint8_t type, const uint8_t* p, size_t len)
 {
     if (!ambeDebug)
@@ -63,6 +78,17 @@ static void dump(const char* dir, uint8_t type, const uint8_t* p, size_t len)
     fprintf(stderr, "\n");
 }
 
+/*
+ * ambeDefaultRate()
+ *
+ * Sets the chip's rate control words to the default (a 3600 bit/s rate with
+ * FEC) and selects no rate index.
+ *
+ * Parameters:
+ *   a - The AMBE connection.
+ *
+ * Returns: nothing.
+ */
 void ambeDefaultRate(Ambe* a)
 {
     static const uint16_t words[6] = { 0x0431U, 0x0754U, 0x2400U, 0x0000U, 0x0000U, 0x6F48U };
@@ -71,6 +97,16 @@ void ambeDefaultRate(Ambe* a)
     a->rateIndex = -1;
 }
 
+/*
+ * baudConstant()
+ *
+ * Converts a baud rate to the termios speed constant.
+ *
+ * Parameters:
+ *   baud - Baud rate: 115200, 230400, 460800 or 921600.
+ *
+ * Returns: The speed constant, or B0 if the rate is not supported.
+ */
 static speed_t baudConstant(unsigned int baud)
 {
     switch (baud)
@@ -83,6 +119,19 @@ static speed_t baudConstant(unsigned int baud)
     }
 }
 
+/*
+ * writeAll()
+ *
+ * Writes a whole buffer to a file descriptor, retrying when the write is
+ * interrupted.
+ *
+ * Parameters:
+ *   fd   - File descriptor to write to.
+ *   data - Bytes to write.
+ *   len  - Number of bytes in data.
+ *
+ * Returns: true if everything was written, false on an error.
+ */
 static bool writeAll(int fd, const uint8_t* data, size_t len)
 {
     while (len > 0U)
@@ -101,6 +150,19 @@ static bool writeAll(int fd, const uint8_t* data, size_t len)
     return true;
 }
 
+/*
+ * readBytes()
+ *
+ * Reads an exact number of bytes, waiting up to a timeout for each part.
+ *
+ * Parameters:
+ *   fd        - File descriptor to read from.
+ *   data      - Receives the bytes.
+ *   len       - Number of bytes to read.
+ *   timeoutMs - Longest wait for more data, in milliseconds.
+ *
+ * Returns: true if all the bytes were read, false on a timeout or error.
+ */
 static bool readBytes(int fd, uint8_t* data, size_t len, int timeoutMs)
 {
     while (len > 0U)
@@ -123,7 +185,20 @@ static bool readBytes(int fd, uint8_t* data, size_t len, int timeoutMs)
     return true;
 }
 
-/* Reads one packet. Returns its type, or -1 on timeout. 'payload' receives the bytes after the 4 byte header. */
+/*
+ * readPacket()
+ *
+ * Reads one packet. Returns its type, or -1 on timeout. 'payload' receives
+ * the bytes after the 4 byte header.
+ *
+ * Parameters:
+ *   fd        - Serial port.
+ *   payload   - Receives the bytes after the 4 byte header.
+ *   length    - Receives the number of bytes in payload.
+ *   timeoutMs - Longest wait for data, in milliseconds.
+ *
+ * Returns: The packet type, or -1 on a timeout or error.
+ */
 static int readPacket(int fd, uint8_t* payload, size_t* length, int timeoutMs)
 {
     uint8_t b, hdr[3];
@@ -151,6 +226,22 @@ static int readPacket(int fd, uint8_t* payload, size_t* length, int timeoutMs)
     return hdr[2];
 }
 
+/*
+ * sendPacket()
+ *
+ * Sends one packet to the chip: the start byte, the 16 bit length, the type
+ * and the payload.  The packet can be written in small chunks with a pause
+ * between them (ambeChunk and ambeGapUs) for slow serial adapters.
+ *
+ * Parameters:
+ *   fd      - Serial port.
+ *   type    - Packet type.
+ *   payload - The payload.
+ *   len     - Number of bytes in payload.
+ *
+ * Returns: true if the whole packet was written, false if it is too long or
+ *   the write failed.
+ */
 static bool sendPacket(int fd, uint8_t type, const uint8_t* payload, size_t len)
 {
     uint8_t buf[PKT_MAX + 4U];
@@ -184,7 +275,22 @@ static bool sendPacket(int fd, uint8_t type, const uint8_t* payload, size_t len)
     return true;
 }
 
-/* Sends a control packet and waits for the reply with the same field id. */
+/*
+ * control()
+ *
+ * Sends a control packet and waits for the reply with the same field id.
+ *
+ * Parameters:
+ *   a         - The AMBE connection.
+ *   payload   - The control packet payload; its first byte is the field id.
+ *   len       - Number of bytes in payload.
+ *   reply     - Receives the reply payload (may be NULL).
+ *   replyLen  - Receives the length of the reply.
+ *   timeoutMs - Longest wait for each packet, in milliseconds.
+ *
+ * Returns: true if a reply with the same field id arrived, false on a
+ *   timeout or failure.
+ */
 static bool control(Ambe* a, const uint8_t* payload, size_t len, uint8_t* reply, size_t* replyLen, int timeoutMs)
 {
     uint8_t rx[PKT_MAX];
@@ -212,6 +318,23 @@ static bool control(Ambe* a, const uint8_t* payload, size_t len, uint8_t* reply,
     return false;
 }
 
+/*
+ * ambeOpen()
+ *
+ * Opens the serial port of an AMBE3000 vocoder chip and starts it.  The port
+ * is set to raw 8N1 at the given baud rate (with RTS/CTS if ambeFlow is
+ * set), the chip is reset through DTR or RTS if ambeHwReset asks for it, and
+ * the READY packet is waited for.  The product id is read, the rate is set
+ * and the vocoder is initialised.
+ *
+ * Parameters:
+ *   a      - The AMBE connection, filled in.
+ *   device - Path of the serial port.
+ *   baud   - Baud rate: 115200, 230400, 460800 or 921600.
+ *
+ * Returns: true if the chip is ready, false if the port could not be opened
+ *   or the chip did not answer or refused the rate.
+ */
 bool ambeOpen(Ambe* a, const char* device, unsigned int baud)
 {
     struct termios tio;
@@ -408,6 +531,16 @@ bool ambeOpen(Ambe* a, const char* device, unsigned int baud)
     return true;
 }
 
+/*
+ * ambeClose()
+ *
+ * Closes the serial port of the chip.
+ *
+ * Parameters:
+ *   a - The AMBE connection.
+ *
+ * Returns: nothing.
+ */
 void ambeClose(Ambe* a)
 {
     if (a->fd >= 0)
@@ -415,6 +548,21 @@ void ambeClose(Ambe* a)
     a->fd = -1;
 }
 
+/*
+ * ambeEncode()
+ *
+ * Encodes one frame of speech to a channel block.  The samples are sent to
+ * the chip as a speech packet and the channel data packet that comes back is
+ * checked to be the expected number of bits.
+ *
+ * Parameters:
+ *   a     - The AMBE connection.
+ *   pcm   - The AMBE_SAMPLES speech samples (16 bit).
+ *   block - Receives the channel block (AMBE_BLOCK_BYTES).
+ *
+ * Returns: true if a block was returned, false on a timeout or an unexpected
+ *   answer.
+ */
 bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block)
 {
     uint8_t tx[2U + AMBE_SAMPLES * 2U];
@@ -470,6 +618,20 @@ bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block)
     return false;
 }
 
+/*
+ * ambeDecode()
+ *
+ * Decodes one channel block to a frame of speech.  The block is sent to the
+ * chip as a channel packet and the speech packet that comes back is read.
+ *
+ * Parameters:
+ *   a     - The AMBE connection.
+ *   block - The channel block (AMBE_BLOCK_BYTES).
+ *   pcm   - Receives the AMBE_SAMPLES speech samples (16 bit).
+ *
+ * Returns: true if speech was returned, false on a timeout or an unexpected
+ *   answer.
+ */
 bool ambeDecode(Ambe* a, const uint8_t* block, int16_t* pcm)
 {
     uint8_t tx[2U + AMBE_BLOCK_BYTES];

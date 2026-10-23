@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 #define private public
 #include <cstdio>
 #include <cstdlib>

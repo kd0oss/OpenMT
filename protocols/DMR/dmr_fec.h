@@ -23,7 +23,7 @@
  * uses for its DMR BER.
  *
  * The Golay coding and the scrambling table (AMBE_PRNG_TABLE) are in
- * dsp_tools, shared with D-Star and P25.  Only the DMR specific part is
+ * fec_tools, shared with D-Star and P25.  Only the DMR specific part is
  * here: where the three groups sit in a burst.
  *
  * Based on MMDVMHost AMBEFEC.cpp:
@@ -36,7 +36,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <dsp_tools.h>
+#include <fec_tools.h>
 
 #define DMR_FEC_BITS_PER_FRAME 47U  /* protected bits checked per vocoder frame */
 #define DMR_FEC_BITS_PER_BURST 141U /* three vocoder frames per voice burst */

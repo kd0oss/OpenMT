@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  test_engine.c - exercises the OpenMT protocol and sample engine on a
  *  PC with a simulated 24 kHz sample interrupt.
@@ -22,6 +23,20 @@ static int failures;
 
 /* run the sample interrupt for n ticks, a conversion of v at every tick */
 static uint16_t lastDac;
+/*
+ * ticks()
+ *
+ * Runs the engine for a number of sample ticks, feeding it ADC values from a
+ * generator.  Every 24 ticks counts as 1 ms: the fake clock is advanced and
+ * engine_poll() is called.  The last DAC value is kept in lastDac.
+ *
+ * Parameters:
+ *   n       - Number of sample ticks to run.
+ *   adc     - Function that gives the ADC value for a sample counter value.
+ *   counter - Running sample counter; updated.
+ *
+ * Returns: nothing.
+ */
 static void ticks(uint32_t n, uint16_t (*adc)(uint32_t), uint32_t *counter)
 {
     uint32_t i;
@@ -38,16 +53,49 @@ static void ticks(uint32_t n, uint16_t (*adc)(uint32_t), uint32_t *counter)
 }
 
 static uint32_t sampleCounter;
+/*
+ * adcSine()
+ *
+ * ADC generator: a 1 kHz sine wave of amplitude 1000 counts around mid-
+ * scale, at 24 kHz.
+ *
+ * Parameters:
+ *   n - Sample counter.
+ *
+ * Returns: ADC value for that sample.
+ */
 static uint16_t adcSine(uint32_t n)
 {
     return (uint16_t)(2048 + 1000.0 * sin(2.0 * M_PI * 1000.0 * n / 24000.0));
 }
+/*
+ * adcMid()
+ *
+ * ADC generator: constant mid-scale (silence).
+ *
+ * Parameters:
+ *   n - Sample counter (not used).
+ *
+ * Returns: 2048.
+ */
 static uint16_t adcMid(uint32_t n)
 {
     (void)n;
     return 2048;
 }
 
+/*
+ * sendConfig()
+ *
+ * Feeds a SET_CONFIG frame to the engine's fake UART.
+ *
+ * Parameters:
+ *   flags   - Configuration flags byte (bit 0 duplex, bit 1 RX invert, bit 2
+ *             TX invert, bit 3 PTT invert).
+ *   rxLevel - RX level byte.
+ *
+ * Returns: nothing.
+ */
 static void sendConfig(uint8_t flags, uint8_t rxLevel)
 {
     uint8_t f[196];
@@ -61,6 +109,19 @@ static void sendConfig(uint8_t flags, uint8_t rxLevel)
     fake_feed(f, 196);
 }
 
+/*
+ * sendSamples()
+ *
+ * Feeds a TX SAMP_DATA frame to the engine's fake UART, with every sample
+ * the same value.
+ *
+ * Parameters:
+ *   txLevel - TX level byte.
+ *   value   - Sample value.
+ *   count   - Number of samples in the frame.
+ *
+ * Returns: nothing.
+ */
 static void sendSamples(uint8_t txLevel, int16_t value, int count)
 {
     uint8_t f[256];
@@ -78,6 +139,15 @@ static void sendSamples(uint8_t txLevel, int16_t value, int count)
     fake_feed(f, f[1]);
 }
 
+/*
+ * sendEot()
+ *
+ * Feeds an end-of-transmission frame to the engine's fake UART.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void sendEot(void)
 {
     uint8_t f[3] = { 0x61, 0x03, 0x00 };
@@ -85,7 +155,21 @@ static void sendEot(void)
     fake_feed(f, 3);
 }
 
-/* Count RX sample frames in the captured UART output; returns frames */
+/*
+ * scanOutput()
+ *
+ * Goes through the frames the engine sent and counts them by type.  An RX
+ * sample frame that is not 195 bytes long or not type 0x70 counts as a
+ * format error, as does any byte that is not the start of a frame.
+ *
+ * Parameters:
+ *   acks      - Receives the number of ACK frames.
+ *   status    - Receives the number of GET_STATUS replies.
+ *   naks      - Receives the number of NAK frames.
+ *   badFormat - Receives the number of format errors.
+ *
+ * Returns: The number of RX sample frames.
+ */
 static int scanOutput(int *acks, int *status, int *naks, int *badFormat)
 {
     uint32_t p = 0;
@@ -130,6 +214,17 @@ static int scanOutput(int *acks, int *status, int *naks, int *badFormat)
     return frames;
 }
 
+/*
+ * testProtocol()
+ *
+ * Test: no RX frames before SET_CONFIG; SET_CONFIG is acknowledged; about
+ * 250 RX frames per second afterwards, in the right format and with the
+ * right amplitude; GET_STATUS reports free space.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testProtocol(void)
 {
     int acks, status, naks, bad, frames;
@@ -210,6 +305,18 @@ static void testProtocol(void)
     }
 }
 
+/*
+ * testTx()
+ *
+ * Test: PTT goes on with the first data and off after the end of
+ * transmission; all frames are accepted; exactly the expected number of
+ * samples is played at the expected DAC level; no overflow or underrun; the
+ * DAC returns to idle.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testTx(void)
 {
     uint32_t t;
@@ -260,6 +367,15 @@ static void testTx(void)
     CHECK(lastDac == DAC_MID, "DAC idle %u", lastDac);
 }
 
+/*
+ * testLevelsAndInvert()
+ *
+ * Test: the TX level scales the output and the TX invert flag inverts it.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testLevelsAndInvert(void)
 {
     int i;
@@ -294,6 +410,17 @@ static void testLevelsAndInvert(void)
     CHECK(!fake_ptt, "ptt after drain");
 }
 
+/*
+ * testOverflowAndTimeout()
+ *
+ * Test: sending more than the buffer holds gives an overflow count and a NAK
+ * (error 6), and the transmitter is un-keyed after the host stops sending
+ * without an end of transmission.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testOverflowAndTimeout(void)
 {
     int i;
@@ -343,6 +470,17 @@ static void testOverflowAndTimeout(void)
     CHECK(!fake_ptt, "PTT stuck on without EOT");
 }
 
+/*
+ * testTimingReport()
+ *
+ * Test: the TX timing report is sent once with the right length, TX sample
+ * index 0 and the RX sample position at which the first TX sample was
+ * played.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testTimingReport(void)
 {
     int i;
@@ -410,7 +548,18 @@ static void testTimingReport(void)
     CHECK(found == 1, "%d timing reports (want 1)", found);
 }
 
-/* count DEBUG text frames whose text begins with FW_NAME */
+/*
+ * countVersionFrames()
+ *
+ * Counts the DEBUG text frames in the engine's output that start with the
+ * firmware name, and copies the first one's text.
+ *
+ * Parameters:
+ *   textOut - Receives the text of the first matching frame; may be NULL.
+ *   outSize - Size of textOut in bytes.
+ *
+ * Returns: Number of matching frames.
+ */
 static int countVersionFrames(char *textOut, size_t outSize)
 {
     uint32_t p;
@@ -436,6 +585,17 @@ static int countVersionFrames(char *textOut, size_t outSize)
     return found;
 }
 
+/*
+ * testVersion()
+ *
+ * Test: the version text (name, version, date, chip ID) is sent once at the
+ * first SET_CONFIG, not repeated at a second one, and a version query gets a
+ * reply.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testVersion(void)
 {
     uint8_t q[3] = {0x61, 0x03, 0xD0};
@@ -466,6 +626,17 @@ static void testVersion(void)
     CHECK(countVersionFrames(NULL, 0) == 1, "no reply to version query");
 }
 
+/*
+ * testBootloaderCommand()
+ *
+ * Test: the "BOOT" command is acknowledged and starts the boot loader; a
+ * wrong key is refused with NAK; with the command disabled, the boot loader
+ * is not started.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testBootloaderCommand(void)
 {
     static const uint8_t good[7] = {0x61, 0x07, 0xD1, 'B', 'O', 'O', 'T'};
@@ -513,6 +684,16 @@ static void testBootloaderCommand(void)
 #endif
 }
 
+/*
+ * testResync()
+ *
+ * Test: line noise before a valid frame is skipped and the engine still
+ * configures itself.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testResync(void)
 {
     uint8_t junk[] = { 0x00, 0xFF, 0x13, 0x61, 0x02, 0x55 };
@@ -530,6 +711,15 @@ static void testResync(void)
     CHECK(engine_stats()->badBytes >= 4, "bad bytes %u", engine_stats()->badBytes);
 }
 
+/*
+ * testSimplex()
+ *
+ * Test: in simplex mode the RX audio is muted while keyed.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testSimplex(void)
 {
     uint8_t d[1];
@@ -586,6 +776,16 @@ static void testSimplex(void)
     CHECK(nonzero == 0, "%d nonzero bytes while keyed in simplex", nonzero);
 }
 
+/*
+ * testClockPlans()
+ *
+ * Test: clk_plan_hse() finds a plan, at most 72 MHz and under 5000 ppm
+ * error, for a range of crystal frequencies.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testClockPlans(void)
 {
     static const uint32_t xtals[] = { 8000000, 12000000, 16000000, 25000000, 24000000,
@@ -615,6 +815,23 @@ static void testClockPlans(void)
     }
 }
 
+/*
+ * checkPllPlan()
+ *
+ * Checks a clk_plan_pll() result for one chip and source: the VCO input and
+ * output ranges, the N, P and Q values, the system and bus clock limits, the
+ * timer clocks and a baud rate error under 5000 ppm.
+ *
+ * Parameters:
+ *   chip     - Chip name for messages.
+ *   lim      - Clock limits of the chip.
+ *   src      - PLL source frequency in Hz.
+ *   uart     - UART number.
+ *   timApb2  - true if the sample timer is on APB2.
+ *   internal - true if the sample timer is divided from the system clock.
+ *
+ * Returns: nothing.
+ */
 static void checkPllPlan(const char *chip, const clk_pll_limits_t *lim, uint32_t src, uint8_t uart,
     bool timApb2, bool internal)
 {
@@ -660,6 +877,16 @@ static void checkPllPlan(const char *chip, const clk_pll_limits_t *lim, uint32_t
         (unsigned long)p.costPpm);
 }
 
+/*
+ * testPllPlans()
+ *
+ * Test: the F446 and F722 PLL plans for a range of crystal frequencies, and
+ * for the 16 MHz internal oscillator.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testPllPlans(void)
 {
     static const clk_pll_limits_t f446 = { 180000000UL, 42000000UL, 84000000UL, 45000000UL, 90000000UL,
@@ -695,6 +922,16 @@ static void testPllPlans(void)
     }
 }
 
+/*
+ * testExtClock()
+ *
+ * Prints the divider and the resulting sample rate error for a range of
+ * external clock frequencies.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testExtClock(void)
 {
     static const uint32_t ext[] = { 12288000, 6144000, 12000000, 24000000, 9600000,
@@ -718,7 +955,16 @@ static void testExtClock(void)
 }
 
 
-/* After an underrun the audio must restart on a whole TDMA cycle (1440). */
+/*
+ * testStallAlign()
+ *
+ * Test: after an underrun the audio restarts on a whole TDMA cycle (1440
+ * samples).
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testStallAlign(void)
 {
     uint32_t n = 0, lastPlayed = 0, firstAfter = 0;
@@ -763,8 +1009,17 @@ static void testStallAlign(void)
     ticks(24 * 300, adcMid, &sampleCounter);
 }
 
-/* Frames arriving one at a time (the next header not yet in the buffer):
- * a frame that lost bytes must still be detected and replaced by silence. */
+/*
+ * testDripLoss()
+ *
+ * Test: frames that arrive one byte at a time and lose bytes (including a
+ * false header inside the data) are detected and replaced by silence frames,
+ * with the right lost-frame count.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testDripLoss(void)
 {
     int i;
@@ -809,7 +1064,16 @@ static void testDripLoss(void)
           (unsigned)(engine_stats()->badBytes - badBefore));
 }
 
-/* sample clock trim: the dithered period averages to the requested ppm */
+/*
+ * testSampleTrim()
+ *
+ * Test: the sample clock trim dithers the timer period so the average period
+ * over two million samples matches the requested trim in ppm.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testSampleTrim(void)
 {
     static const int32_t trims[] = { 0, 198, 1000, -150, 20000 };
@@ -847,6 +1111,15 @@ static void testSampleTrim(void)
     }
 }
 
+/*
+ * main()
+ *
+ * Runs all the tests and prints the failures or "ALL TESTS PASSED".
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 if all passed, 1 if any failed.
+ */
 int main(void)
 {
     testProtocol();

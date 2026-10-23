@@ -5,7 +5,7 @@ MMDVM_HS  (config/modem = mmdvmhs) and MMDVM
     - Mode YSF = 3, data 0x20 / lost 0x21, 1 flag byte + 120 byte frame (+ 2 RSSI bytes from the modem).
     - SET_CONFIG: YSF enable bit 0x04 in buffer[4], low deviation bit 0x08 in buffer[3] (YSF/loDev), TX level buffer[14].
     - GET_STATUS: the YSF space is buffer[9], in frames (the FIFO holds 10).
-  patched/ adds the host side of this (enable/disable YSF, space, frame pacing); see the *.ysf.patch files.
+  modem/Modem_Host.c and modem/mmdvm.c add the host side of this (enable/disable YSF, space, frame pacing).
 
 OpenMT_HS (config/modem = openmths)
   The ADF7021 slices the 4FSK itself and the host passes BITS packets.

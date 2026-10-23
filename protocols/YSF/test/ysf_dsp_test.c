@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -17,7 +18,7 @@
 /*
  * Loopback tests of the YSF modulator and demodulators.
  *
- *   gcc -I.. -I../.. ysf_dsp_test.c ../ysf_dsp.c ../ysf_func.c ../../dsp_tools.c -lm -o ysf_dsp_test
+ *   gcc -I.. -I../.. ysf_dsp_test.c ../ysf_dsp.c ../ysf_func.c ../../dsp_tools.c ../../fec_tools.c -lm -o ysf_dsp_test
  */
 
 #include <math.h>
@@ -41,6 +42,19 @@ typedef struct
     int lost;
 } Got;
 
+/*
+ * onFrame()
+ *
+ * Receiver callback: stores each frame that arrives and counts the losses of
+ * the signal.
+ *
+ * Parameters:
+ *   ctx   - The result structure (Got).
+ *   frame - The received frame.
+ *   lost  - true if the signal was lost instead of a frame received.
+ *
+ * Returns: nothing.
+ */
 static void onFrame(void* ctx, const uint8_t* frame, bool lost)
 {
     Got* g = (Got*)ctx;
@@ -51,6 +65,16 @@ static void onFrame(void* ctx, const uint8_t* frame, bool lost)
         memcpy(g->frames[g->count++], frame, YSF_FRAME_LENGTH_BYTES);
 }
 
+/*
+ * gauss()
+ *
+ * Makes a random number with a Gaussian (normal) distribution, mean 0 and
+ * standard deviation 1 (Box-Muller method).
+ *
+ * Parameters: none.
+ *
+ * Returns: The random number.
+ */
 static float gauss(void)
 {
     float u = ((float)rand() + 1.0F) / ((float)RAND_MAX + 2.0F);
@@ -59,7 +83,17 @@ static float gauss(void)
     return sqrtf(-2.0F * logf(u)) * cosf(6.2831853F * v);
 }
 
-/* A frame with a good FICH and random contents behind it */
+/*
+ * makeFrame()
+ *
+ * A frame with a good FICH and random contents behind it.
+ *
+ * Parameters:
+ *   f - Receives the frame.
+ *   n - Number of the frame; the frame number field is n modulo 7.
+ *
+ * Returns: nothing.
+ */
 static void makeFrame(uint8_t* f, int n)
 {
     YsfFich h;
@@ -76,6 +110,25 @@ static void makeFrame(uint8_t* f, int n)
     ysfFichEncode(&h, f);
 }
 
+/*
+ * runSamples()
+ *
+ * Sends a transmission through the modulator, a distortion and the sample
+ * receiver: noise, a preamble, the frames, the flush and then silence until
+ * the receiver reports the loss of the signal.
+ *
+ * Parameters:
+ *   nFrames - Number of frames to send, up to MAX_FRAMES.
+ *   gain    - Factor applied to the samples.
+ *   dc      - Offset added to the samples.
+ *   noise   - Standard deviation of the noise added to the samples.
+ *   txShape - Pulse shape of the transmitter.
+ *   rxShape - Pulse shape of the receiver.
+ *   lead    - Number of noise samples before the preamble.
+ *   got     - Receives the frames and the loss count.
+ *
+ * Returns: The number of received frames that are identical to those sent.
+ */
 static int runSamples(int nFrames, float gain, float dc, float noise, uint8_t txShape, uint8_t rxShape, int lead, Got* got)
 {
     static uint8_t sent[MAX_FRAMES][YSF_FRAME_LENGTH_BYTES];
@@ -127,6 +180,16 @@ static int runSamples(int nFrames, float gain, float dc, float noise, uint8_t tx
     return match;
 }
 
+/*
+ * testSamples()
+ *
+ * Tests the sample receiver: a clean signal, a different gain and offset,
+ * noise, a raised cosine transmitter, and that pure noise gives no frame.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testSamples(void)
 {
     Got g;
@@ -162,7 +225,17 @@ static void testSamples(void)
     }
 }
 
-/* Bits of a transmission: random lead-in, preamble, frames, junk */
+/*
+ * testBits()
+ *
+ * Tests the bit receiver: a random lead-in, a preamble, 12 frames (every
+ * other one with two bit errors in the sync word), the loss of the signal,
+ * and a start that is one bit out of step.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testBits(void)
 {
     static uint8_t sent[MAX_FRAMES][YSF_FRAME_LENGTH_BYTES];
@@ -231,6 +304,15 @@ static void testBits(void)
     CHECK(g.count >= 1, "bits: shifted frames %d", g.count);
 }
 
+/*
+ * main()
+ *
+ * Runs the tests.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 if all tests pass, 1 if any failed.
+ */
 int main(void)
 {
     srand(3);

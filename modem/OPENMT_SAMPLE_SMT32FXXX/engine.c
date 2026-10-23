@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  engine.c - OpenMT SAMPLE-mode protocol and sample engine.
  *
@@ -100,7 +101,16 @@ static const uint8_t ledPin[NUM_LEDS] =
 
 /* ------------------------------------------------------------------ */
 /* Sample interrupt                                                   */
-/* ------------------------------------------------------------------ */
+/*
+ * clamp16()
+ *
+ * Limits a value to the symmetric 16-bit range -32767..+32767.
+ *
+ * Parameters:
+ *   v - Value to limit.
+ *
+ * Returns: v, or the nearest limit if it is outside the range.
+ */
 static inline int16_t clamp16(int32_t v)
 {
     if (v > 32767)
@@ -114,13 +124,34 @@ static inline int16_t clamp16(int32_t v)
     return (int16_t)v;
 }
 
+/*
+ * txCount()
+ *
+ * Gets the number of samples waiting in the TX ring buffer.
+ *
+ * Parameters: none.
+ *
+ * Returns: Samples between the buffer's tail and head.
+ */
 static inline uint16_t txCount(void)
 {
     return (uint16_t)((txHead - txTail) & TX_MASK);
 }
 
 #if TX_TEST_PATTERN
-/* n = TX sample index within the downlink */
+/*
+ * testPattern()
+ *
+ * Generates a fixed test waveform in place of the real TX audio (only when
+ * TX_TEST_PATTERN is enabled).  It steps through six 400 ms phases: full
+ * level, one third, minus one third, minus full, silence and a 2400 Hz
+ * square wave at full level.
+ *
+ * Parameters:
+ *   n - Index of the TX sample within the downlink.
+ *
+ * Returns: Sample value for that index.
+ */
 static int16_t testPattern(uint32_t n)
 {
     uint32_t step = (n / 9600U) % 6U;               /* 400 ms steps      */
@@ -139,6 +170,24 @@ static int16_t testPattern(uint32_t n)
 }
 #endif
 
+/*
+ * engine_sample_tick()
+ *
+ * Called from the sample timer interrupt once per sample period, so it must
+ * be short.  RX: converts the ADC reading to Q15, blocks DC, applies invert
+ * and gain, mutes it while transmitting in simplex, and stores it in the RX
+ * frame buffer (dropping the frame if the main loop is not draining).  TX:
+ * runs the prime/play state machine that takes samples from the TX ring
+ * buffer, keys down once the host has ended the transmission and the buffer
+ * is empty, and goes back to priming after an underrun.  Records activity,
+ * clipping and underrun flags for the main loop.
+ *
+ * Parameters:
+ *   adcRaw - 12-bit ADC reading of the receive audio.
+ *
+ * Returns: 12-bit value to write to the DAC for the transmit audio (mid-
+ *   scale when idle).
+ */
 uint16_t engine_sample_tick(uint16_t adcRaw)
 {
     int32_t  s;
@@ -301,12 +350,32 @@ uint16_t engine_sample_tick(uint16_t adcRaw)
 
 /* ------------------------------------------------------------------ */
 /* Helpers (main loop)                                                */
-/* ------------------------------------------------------------------ */
+/*
+ * ledPulse()
+ *
+ * Lights an LED for a time; updateLeds() turns it off again.
+ *
+ * Parameters:
+ *   n  - LED number.
+ *   ms - How long to keep it on, in milliseconds.
+ *
+ * Returns: nothing.
+ */
 static void ledPulse(uint8_t n, uint32_t ms)
 {
     ledUntil[n] = hw_millis() + ms;
 }
 
+/*
+ * sendSmall()
+ *
+ * Sends a 3-byte OpenMT frame with no payload to the host.
+ *
+ * Parameters:
+ *   type - Type and mode byte of the frame.
+ *
+ * Returns: nothing.
+ */
 static void sendSmall(uint8_t type)
 {
     uint8_t f[3];
@@ -317,11 +386,31 @@ static void sendSmall(uint8_t type)
     hw_uart_tx(f, 3);
 }
 
+/*
+ * sendAck()
+ *
+ * Sends an ACK frame to the host.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void sendAck(void)
 {
     sendSmall(OMT_ACK);
 }
 
+/*
+ * sendNak()
+ *
+ * Sends a NAK frame that names the request being refused and the reason.
+ *
+ * Parameters:
+ *   type - Type byte of the refused request.
+ *   err  - Error code.
+ *
+ * Returns: nothing.
+ */
 static void sendNak(uint8_t type, uint8_t err)
 {
     uint8_t f[5];
@@ -334,6 +423,16 @@ static void sendNak(uint8_t type, uint8_t err)
     hw_uart_tx(f, 5);
 }
 
+/*
+ * freeSpaceNibble()
+ *
+ * Works out how many more sample frames the TX buffer can take, as the 4-bit
+ * value reported in GET_STATUS replies.
+ *
+ * Parameters: none.
+ *
+ * Returns: Free space in frames, limited to 15.
+ */
 static uint8_t freeSpaceNibble(void)
 {
     uint32_t freeSamples = (uint32_t)(TX_BUF_SAMPLES - 1) - txCount();
@@ -342,6 +441,16 @@ static uint8_t freeSpaceNibble(void)
     return (uint8_t)(frames > 15U ? 15U : frames);
 }
 
+/*
+ * keyDown()
+ *
+ * Ends the transmission at once: goes to idle, discards any queued samples
+ * and releases PTT.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void keyDown(void)
 {
     /* used for timeouts and abort: drop whatever is queued */
@@ -350,6 +459,16 @@ static void keyDown(void)
     hw_ptt(false);
 }
 
+/*
+ * requestEot()
+ *
+ * Asks for the transmission to end once the buffered samples have been
+ * played.  Does nothing if not transmitting.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void requestEot(void)
 {
     if (txState != TX_IDLE)
@@ -362,7 +481,16 @@ static void requestEot(void)
 /* Frame handlers                                                     */
 /* ------------------------------------------------------------------ */
 /* "NAME vX.Y.Z Mon DD YYYY id=IDCODE" as a DEBUG (0xC0) text frame, the same kind  */
-/* the host already logs as "Modem rec data::".                           */
+/*
+ * sendVersion()
+ *
+ * Sends the firmware name, version, build date and chip ID code as a DEBUG
+ * text frame, which the host logs as modem data.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void sendVersion(void)
 {
     static const char text[] = FW_NAME " v" FW_VERSION " " __DATE__ " id=";
@@ -386,6 +514,20 @@ static void sendVersion(void)
     hw_uart_tx(f, n);
 }
 
+/*
+ * handleSetConfig()
+ *
+ * Handles SET_CONFIG: reads the flags (duplex, RX invert, TX invert, PTT
+ * invert) and the RX level, sets the RX gain, marks the modem as configured
+ * and sends ACK.  The version text is sent the first time only.  A frame
+ * shorter than 5 bytes changes no settings but is still acknowledged.
+ *
+ * Parameters:
+ *   f   - Whole frame, starting with the 0x61 byte.
+ *   len - Frame length in bytes.
+ *
+ * Returns: nothing.
+ */
 static void handleSetConfig(const uint8_t *f, uint8_t len)
 {
     if (len >= 5)
@@ -421,6 +563,21 @@ static void handleSetConfig(const uint8_t *f, uint8_t len)
     }
 }
 
+/*
+ * handleSampData()
+ *
+ * Handles a TX sample frame: refuses it with a NAK (at most one per 100 ms)
+ * if it does not fit in the TX buffer, otherwise applies the TX level and
+ * invert, stores the samples in the ring buffer and starts the transmission
+ * (PTT on and priming) if the modem was idle.
+ *
+ * Parameters:
+ *   f   - Whole frame, starting with the 0x61 byte.
+ *   len - Frame length in bytes; the samples are little-endian 16-bit after
+ *         a 4-byte header that ends with the TX level.
+ *
+ * Returns: nothing.
+ */
 static void handleSampData(const uint8_t *f, uint8_t len)
 {
     uint8_t  txLevel;
@@ -487,6 +644,20 @@ static void handleSampData(const uint8_t *f, uint8_t len)
     }
 }
 
+/*
+ * handleFrame()
+ *
+ * Handles one complete frame from the host: end of TX, firmware version
+ * request (and the "BOOT" command to start the ROM boot loader), status
+ * request, SET_CONFIG, SET_MODE (idle ends the transmission), ADD_MODE and
+ * DEL_MODE (acknowledged only) and sample data.  Other types are ignored.
+ *
+ * Parameters:
+ *   f   - Whole frame, starting with the 0x61 byte.
+ *   len - Frame length in bytes.
+ *
+ * Returns: nothing.
+ */
 static void handleFrame(const uint8_t *f, uint8_t len)
 {
     uint8_t type = f[2] & 0xF0U;
@@ -553,6 +724,16 @@ static void handleFrame(const uint8_t *f, uint8_t len)
     }
 }
 
+/*
+ * knownType()
+ *
+ * Tells whether the high nibble of a frame type is one the protocol uses.
+ *
+ * Parameters:
+ *   t - Type byte.
+ *
+ * Returns: true if the type is known.
+ */
 static bool knownType(uint8_t t)
 {
     switch (t & 0xF0U)
@@ -581,6 +762,17 @@ static uint16_t dbgMaxAvail;                /* deepest UART RX backlog   */
 static uint32_t dbgMaxGap;                  /* longest gap between polls */
 static uint32_t dbgLastPoll;
 
+/*
+ * dbgNoteSkip()
+ *
+ * Debug aid: counts a skipped byte and, at the start of a run of skipped
+ * bytes, saves the first bytes of the run and the 6 bytes before it.
+ *
+ * Parameters:
+ *   avail - Number of bytes in the UART receive buffer.
+ *
+ * Returns: nothing.
+ */
 static void dbgNoteSkip(uint16_t avail)
 {
     uint8_t i;
@@ -604,9 +796,16 @@ static void dbgNoteSkip(uint16_t avail)
 #define DBG_GOOD(l,t) ((void)0)
 #endif
 
-/* A sample frame whose bytes were damaged on the way in (the next header is not
- * where a frame of this length says it should be) is dropped and replaced by one
- * frame of silence, so the TX stream keeps its sample alignment. */
+/*
+ * insertSilenceFrame()
+ *
+ * Replaces a lost sample frame with one frame of silence so the TX stream
+ * keeps its timing.  Does nothing if not transmitting.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void insertSilenceFrame(void)
 {
     static uint8_t z[4U + 2U * SAMPLES_PER_FRAME];
@@ -638,6 +837,17 @@ static uint8_t  resyncFrame;                /* hunt began at a damaged frame   *
  * one sample frame the timeline has to keep, so replace them by silence. */
 #define NOTE_SKIP() do { if (resyncBytes < 60000U) { resyncBytes++; } resync = 1U; resyncMs = hw_millis(); } while (0)
 
+/*
+ * endResync()
+ *
+ * Ends a search for the next frame start after damaged data.  Each 196
+ * skipped bytes (a damaged frame of sample data) is replaced by a frame of
+ * silence; at least one if the search began at a damaged frame.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void endResync(void)
 {
     uint16_t n = (uint16_t)((resyncBytes + 98U) / 196U);
@@ -662,6 +872,19 @@ static void endResync(void)
 static uint32_t dbgRecovered;               /* false alarms avoided      */
 static uint8_t  dbgBadNext;                 /* byte seen after a bad frame */
 
+/*
+ * nextIsStart()
+ *
+ * Checks that the byte after a frame is a frame start (0x61).  The check is
+ * repeated a few times with a short pause, because the DMA position can be
+ * one byte ahead of the data actually written.
+ *
+ * Parameters:
+ *   len - Length of the frame being checked.
+ *
+ * Returns: true if a frame start follows, false if not (the byte seen is
+ *   kept for debugging).
+ */
 static bool nextIsStart(uint16_t len)
 {
     uint8_t k;
@@ -685,6 +908,20 @@ static bool nextIsStart(uint16_t len)
     return false;
 }
 
+/*
+ * parseUart()
+ *
+ * Takes frames from the UART receive buffer and passes them to
+ * handleFrame().  Bytes that are not part of a valid frame are skipped.  A
+ * sample frame is accepted only if another frame header follows it (waiting
+ * up to 8 ms for it); after damage the parser only accepts the two normal
+ * frame lengths until the stream is quiet for 20 ms, and the lost samples
+ * are replaced with silence.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void parseUart(void)
 {
     uint8_t frame[255];
@@ -810,7 +1047,17 @@ static void parseUart(void)
 
 /* ------------------------------------------------------------------ */
 /* RX streaming                                                       */
-/* ------------------------------------------------------------------ */
+/*
+ * sendRxFrames()
+ *
+ * Sends completed RX sample frames to the host, if the host has configured
+ * the modem (otherwise they are discarded).  Stops when the UART is busy and
+ * tries again on the next call.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void sendRxFrames(void)
 {
     uint8_t f[RX_FRAME_BYTES];
@@ -838,10 +1085,20 @@ static void sendRxFrames(void)
     }
 }
 
-/* [0x61][0x0B][0xB0][offset int32 BE][k uint32 BE]
- *   k      index of a TX sample (0 = first sample of the downlink)
- *   offset the RX sample being captured as TX sample k went on air,
- *          relative to the next RX sample the host will receive. */
+/*
+ * sendTimingReport()
+ *
+ * Sends a TX timing report (offset and TX sample index) that lets the host
+ * line up received samples with transmitted ones.  It is skipped if no
+ * measurement is ready or if the interrupt is updating it.  Frame:
+ * [0x61][0x0B][0xB0][offset int32 BE][k uint32 BE], where k is the index of
+ * a TX sample and offset is the RX position when that sample went out,
+ * relative to the next RX sample the host will receive.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void sendTimingReport(void)
 {
     uint8_t  f[11];
@@ -884,7 +1141,18 @@ static void sendTimingReport(void)
 
 /* ------------------------------------------------------------------ */
 /* LEDs and housekeeping                                              */
-/* ------------------------------------------------------------------ */
+/*
+ * updateLeds()
+ *
+ * Drives the LEDs: pulse LEDs follow their timers; LED 0 blinks fast until
+ * the host is configured (or silent for 5 s) and flashes briefly once a
+ * second when linked; LED 3 shows PTT, LED 4 shows audio playing and LED 7
+ * also shows a missing external clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void updateLeds(void)
 {
     uint32_t now = hw_millis();
@@ -918,7 +1186,20 @@ static void updateLeds(void)
 }
 
 #if DEBUG_FRAMES
-/* tiny "label=number" formatter (no printf, keeps the image small) */
+/*
+ * dbgText()
+ *
+ * Debug aid: appends "label" followed by a decimal number to a frame buffer,
+ * without printf.
+ *
+ * Parameters:
+ *   f     - Frame buffer.
+ *   n     - Current length of the frame.
+ *   label - Text put before the number.
+ *   v     - Number to append.
+ *
+ * Returns: New length of the frame.
+ */
 static uint8_t dbgText(uint8_t *f, uint8_t n, const char *label, uint32_t v)
 {
     char digits[10];
@@ -941,6 +1222,19 @@ static uint8_t dbgText(uint8_t *f, uint8_t n, const char *label, uint32_t v)
     return n;
 }
 
+/*
+ * dbgSigned()
+ *
+ * Debug aid: like dbgText() but for a signed number.
+ *
+ * Parameters:
+ *   f     - Frame buffer.
+ *   n     - Current length of the frame.
+ *   label - Text put before the number.
+ *   v     - Number to append.
+ *
+ * Returns: New length of the frame.
+ */
 static uint8_t dbgSigned(uint8_t *f, uint8_t n, const char *label, int32_t v)
 {
     n = dbgText(f, n, label, 0);                    /* writes "label0" */
@@ -954,6 +1248,18 @@ static uint8_t dbgSigned(uint8_t *f, uint8_t n, const char *label, int32_t v)
 }
 #endif
 
+/*
+ * housekeeping()
+ *
+ * Main loop tasks: turns the interrupt's flags and counters into LED pulses
+ * and statistics, un-keys if the host stops sending samples for
+ * TX_UNDERRUN_TIMEOUT_MS, forces PTT off when idle, and (with DEBUG_FRAMES)
+ * sends a statistics line to the host every 5 seconds.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void housekeeping(void)
 {
     uint32_t now = hw_millis();
@@ -1095,7 +1401,15 @@ static void housekeeping(void)
 
 /* ------------------------------------------------------------------ */
 /* Public                                                             */
-/* ------------------------------------------------------------------ */
+/*
+ * engine_init()
+ *
+ * Resets the engine state, statistics and LEDs and makes sure PTT is off.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void engine_init(void)
 {
     uint8_t i;
@@ -1124,6 +1438,17 @@ void engine_init(void)
     hw_ptt(false);
 }
 
+/*
+ * engine_poll()
+ *
+ * Main loop step: services the UART, parses frames from the host, sends RX
+ * frames, sends the timing report (if enabled), runs housekeeping, updates
+ * the LEDs and services the UART again.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void engine_poll(void)
 {
     hw_uart_poll();
@@ -1137,16 +1462,43 @@ void engine_poll(void)
     hw_uart_poll();
 }
 
+/*
+ * engine_stats()
+ *
+ * Gets the engine statistics.
+ *
+ * Parameters: none.
+ *
+ * Returns: Pointer to the statistics (read only).
+ */
 const engine_stats_t *engine_stats(void)
 {
     return &stats;
 }
 
+/*
+ * engine_is_keyed()
+ *
+ * Tells whether a transmission is in progress.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if transmitting or priming.
+ */
 bool engine_is_keyed(void)
 {
     return txState != TX_IDLE;
 }
 
+/*
+ * engine_configured()
+ *
+ * Tells whether the host has sent SET_CONFIG.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if configured.
+ */
 bool engine_configured(void)
 {
     return configured;

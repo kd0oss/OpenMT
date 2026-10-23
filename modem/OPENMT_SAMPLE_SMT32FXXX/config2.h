@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  OpenMT SAMPLE-mode firmware for STM32F105, F446 and F722
  *

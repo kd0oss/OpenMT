@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  hw.h - hardware abstraction used by the portable engine.
  *

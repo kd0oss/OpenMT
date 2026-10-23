@@ -81,80 +81,205 @@ uint8_t          modem_ax25TXLevel         = 50U;
 extern RingBuffer modemCommandBuffer;  /* Modem command buffer */
 extern char modem[20];                 /* modem type */
 
-/* function to return M17 queue free space in modem */
+/*
+ * getM17Space()
+ *
+ * Returns the number of free M17 frame slots the modem last reported.
+ *
+ * Parameters: none.
+ *
+ * Returns: Free frame slots in the modem M17 queue.
+ */
 uint8_t getM17Space()
 {
     return m17_space;
 }
 
-/* function to record M17 queue free space. */
+/*
+ * setM17Space()
+ *
+ * Records the number of free M17 frame slots the modem reported in its
+ * status.
+ *
+ * Parameters:
+ *   space - Free frame slots in the modem M17 queue.
+ *
+ * Returns: nothing.
+ */
 void setM17Space(uint8_t space)
 {
     m17_space = space;
 }
 
-/* function to return DSTAR queue free space in modem */
+/*
+ * getDSTARSpace()
+ *
+ * Returns the number of free D-Star frame slots the modem last reported.
+ *
+ * Parameters: none.
+ *
+ * Returns: Free frame slots in the modem D-Star queue.
+ */
 uint8_t getDSTARSpace()
 {
     return dstar_space;
 }
 
-/* function to record DSTAR queue free space */
+/*
+ * setDSTARSpace()
+ *
+ * Records the number of free D-Star frame slots the modem reported in its
+ * status.
+ *
+ * Parameters:
+ *   space - Free frame slots in the modem D-Star queue.
+ *
+ * Returns: nothing.
+ */
 void setDSTARSpace(uint8_t space)
 {
     dstar_space = space;
 }
 
-/* function to return P25 queue free space in modem */
+/*
+ * getP25Space()
+ *
+ * Returns the number of free P25 frame slots the modem last reported.
+ *
+ * Parameters: none.
+ *
+ * Returns: Free frame slots in the modem P25 queue.
+ */
 uint8_t getP25Space()
 {
     return p25_space;
 }
 
-/* function to return YSF queue free space in modem */
+/*
+ * getYSFSpace()
+ *
+ * Returns the number of free YSF frame slots the modem last reported.
+ *
+ * Parameters: none.
+ *
+ * Returns: Free frame slots in the modem YSF queue.
+ */
 uint8_t getYSFSpace()
 {
     return ysf_space;
 }
 
-/* function to record YSF queue free space */
+/*
+ * setYSFSpace()
+ *
+ * Records the number of free YSF frame slots the modem reported in its
+ * status.
+ *
+ * Parameters:
+ *   space - Free frame slots in the modem YSF queue.
+ *
+ * Returns: nothing.
+ */
 void setYSFSpace(uint8_t space)
 {
     ysf_space = space;
 }
 
-/* function to return NXDN queue free space in modem */
+/*
+ * getNXDNSpace()
+ *
+ * Returns the number of free NXDN frame slots the modem last reported.
+ *
+ * Parameters: none.
+ *
+ * Returns: Free frame slots in the modem NXDN queue.
+ */
 uint8_t getNXDNSpace()
 {
     return nxdn_space;
 }
 
-/* function to record NXDN queue free space */
+/*
+ * setNXDNSpace()
+ *
+ * Records the number of free NXDN frame slots the modem reported in its
+ * status.
+ *
+ * Parameters:
+ *   space - Free frame slots in the modem NXDN queue.
+ *
+ * Returns: nothing.
+ */
 void setNXDNSpace(uint8_t space)
 {
     nxdn_space = space;
 }
 
-/* function to record P25 queue free space */
+/*
+ * setP25Space()
+ *
+ * Records the number of free P25 frame slots the modem reported in its
+ * status.
+ *
+ * Parameters:
+ *   space - Free frame slots in the modem P25 queue.
+ *
+ * Returns: nothing.
+ */
 void setP25Space(uint8_t space)
 {
     p25_space = space;
 }
 
-/* function to return DMR queue free space in modem */
+/*
+ * getDMRSpace()
+ *
+ * Returns the number of free DMR frame slots the modem last reported for a
+ * DMR slot.
+ *
+ * Parameters:
+ *   slot - DMR slot number, 1 or 2.
+ *
+ * Returns: Free frame slots in the modem DMR slot queue.
+ */
 uint8_t getDMRSpace(uint8_t slot)
 {
     return dmr_space[slot - 1];
 }
 
-/* function to record DMR queue free space */
+/*
+ * setDMRSpace()
+ *
+ * Records the number of free DMR frame slots the modem reported for each of
+ * its two slots.
+ *
+ * Parameters:
+ *   space1 - Free frame slots for DMR slot 1.
+ *   space2 - Free frame slots for DMR slot 2.
+ *
+ * Returns: nothing.
+ */
 void setDMRSpace(uint8_t space1, uint8_t space2)
 {
     dmr_space[0] = space1;
     dmr_space[1] = space2;
 }
 
-/* function to enable M17 mode in modem */
+/*
+ * enableM17()
+ *
+ * Turns on M17 in the MMDVM modem.  If it was not already enabled, it is
+ * marked enabled and the modem configuration is sent again with
+ * set_ConfigHS() for a hotspot modem (type mmdvmhs) or set_Config()
+ * otherwise, followed by a one second pause.  A command that puts the modem
+ * into M17 mode is then queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void enableM17(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -175,7 +300,20 @@ void enableM17(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to disable M17 mode in modem. */
+/*
+ * disableM17()
+ *
+ * Turns off M17 in the MMDVM modem.  The mode is marked disabled, the modem
+ * configuration is sent again with set_ConfigHS() for a hotspot modem (type
+ * mmdvmhs) or set_Config() otherwise, and after a one second pause a command
+ * that puts the modem into idle mode is queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void disableM17(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -194,7 +332,21 @@ void disableM17(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to enable DSTAR mode in modem. */
+/*
+ * enableDSTAR()
+ *
+ * Turns on D-Star in the MMDVM modem.  If it was not already enabled, it is
+ * marked enabled and the modem configuration is sent again with
+ * set_ConfigHS() for a hotspot modem (type mmdvmhs) or set_Config()
+ * otherwise, followed by a one second pause.  A command that puts the modem
+ * into D-Star mode is then queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void enableDSTAR(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -215,7 +367,21 @@ void enableDSTAR(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to disable DSTAR mode in modem. */
+/*
+ * disableDSTAR()
+ *
+ * Turns off D-Star in the MMDVM modem.  The mode is marked disabled, the
+ * modem configuration is sent again with set_ConfigHS() for a hotspot modem
+ * (type mmdvmhs) or set_Config() otherwise, and after a one second pause a
+ * command that puts the modem into idle mode is queued in the modem command
+ * buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void disableDSTAR(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -234,7 +400,20 @@ void disableDSTAR(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to enable FM mode in modem. */
+/*
+ * enableFM()
+ *
+ * Turns on FM in the MMDVM modem.  If it was not already enabled, it is
+ * marked enabled and the modem configuration is sent again with
+ * set_Config(), followed by a one second pause.  A command that puts the
+ * modem into FM mode is then queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void enableFM(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -252,7 +431,20 @@ void enableFM(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to disable FM mode in modem. */
+/*
+ * disableFM()
+ *
+ * Turns off FM in the MMDVM modem.  The mode is marked disabled, the modem
+ * configuration is sent again with set_Config(), and after a one second
+ * pause a command that puts the modem into idle mode is queued in the modem
+ * command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void disableFM(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -268,7 +460,21 @@ void disableFM(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to enable YSF mode in modem. */
+/*
+ * enableYSF()
+ *
+ * Turns on YSF in the MMDVM modem.  If it was not already enabled, it is
+ * marked enabled and the modem configuration is sent again with
+ * set_ConfigHS() for a hotspot modem (type mmdvmhs) or set_Config()
+ * otherwise, followed by a one second pause.  A command that puts the modem
+ * into YSF mode is then queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void enableYSF(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -289,7 +495,20 @@ void enableYSF(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to disable YSF mode in modem. */
+/*
+ * disableYSF()
+ *
+ * Turns off YSF in the MMDVM modem.  The mode is marked disabled, the modem
+ * configuration is sent again with set_ConfigHS() for a hotspot modem (type
+ * mmdvmhs) or set_Config() otherwise, and after a one second pause a command
+ * that puts the modem into idle mode is queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void disableYSF(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -308,7 +527,21 @@ void disableYSF(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to enable NXDN mode in modem. */
+/*
+ * enableNXDN()
+ *
+ * Turns on NXDN in the MMDVM modem.  If it was not already enabled, it is
+ * marked enabled and the modem configuration is sent again with
+ * set_ConfigHS() for a hotspot modem (type mmdvmhs) or set_Config()
+ * otherwise, followed by a one second pause.  A command that puts the modem
+ * into NXDN mode is then queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void enableNXDN(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -329,7 +562,20 @@ void enableNXDN(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to disable NXDN mode in modem. */
+/*
+ * disableNXDN()
+ *
+ * Turns off NXDN in the MMDVM modem.  The mode is marked disabled, the modem
+ * configuration is sent again with set_ConfigHS() for a hotspot modem (type
+ * mmdvmhs) or set_Config() otherwise, and after a one second pause a command
+ * that puts the modem into idle mode is queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void disableNXDN(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -348,7 +594,21 @@ void disableNXDN(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to enable P25 mode in modem. */
+/*
+ * enableP25()
+ *
+ * Turns on P25 in the MMDVM modem.  If it was not already enabled, it is
+ * marked enabled and the modem configuration is sent again with
+ * set_ConfigHS() for a hotspot modem (type mmdvmhs) or set_Config()
+ * otherwise, followed by a one second pause.  A command that puts the modem
+ * into P25 mode is then queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void enableP25(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -369,7 +629,20 @@ void enableP25(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to disable P25 mode in modem. */
+/*
+ * disableP25()
+ *
+ * Turns off P25 in the MMDVM modem.  The mode is marked disabled, the modem
+ * configuration is sent again with set_ConfigHS() for a hotspot modem (type
+ * mmdvmhs) or set_Config() otherwise, and after a one second pause a command
+ * that puts the modem into idle mode is queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void disableP25(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -388,7 +661,21 @@ void disableP25(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to enable DMR mode in modem. */
+/*
+ * enableDMR()
+ *
+ * Turns on DMR in the MMDVM modem.  If it was not already enabled, it is
+ * marked enabled and the modem configuration is sent again with
+ * set_ConfigHS() for a hotspot modem (type mmdvmhs) or set_Config()
+ * otherwise, followed by a one second pause.  A command that puts the modem
+ * into DMR mode is then queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void enableDMR(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -409,7 +696,20 @@ void enableDMR(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to disable DMR mode in modem. */
+/*
+ * disableDMR()
+ *
+ * Turns off DMR in the MMDVM modem.  The mode is marked disabled, the modem
+ * configuration is sent again with set_ConfigHS() for a hotspot modem (type
+ * mmdvmhs) or set_Config() otherwise, and after a one second pause a command
+ * that puts the modem into idle mode is queued in the modem command buffer.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose configuration is read from the
+ *                database.
+ *
+ * Returns: nothing.
+ */
 void disableDMR(const char* modem_name)
 {
     uint8_t buffer[4];
@@ -428,7 +728,21 @@ void disableDMR(const char* modem_name)
     RingBuffer_addData(&modemCommandBuffer, buffer, 4);
 }
 
-/* function to comvert OpemMT type to MMDVM type. */
+/*
+ * openMTtoMMDVM()
+ *
+ * Converts an MMDVM M17 frame type byte (LSF, stream, packet or end of
+ * transmission) into the four character OpenMT type name "M17L", "M17S",
+ * "M17P" or "M17E".
+ *
+ * Parameters:
+ *   mmdvm_in   - MMDVM frame type value (TYPE_M17_*).
+ *   openmt_out - Output buffer for the four character name and its
+ *                terminating NUL (5 bytes).  Left unchanged if the type is
+ *                not recognised.
+ *
+ * Returns: true if the type was recognised, false otherwise.
+ */
 bool openMTtoMMDVM(uint8_t mmdvm_in, char* openmt_out)
 {
     bool ret = false;
@@ -458,35 +772,61 @@ bool openMTtoMMDVM(uint8_t mmdvm_in, char* openmt_out)
     return ret;
 }
 
-/* function to comvert MMDVM type to OpenMT type. */
-bool mmdvmToOpenMT(const char* openmt_in, uint8_t mmdvm_out)
+/*
+ * mmdvmToOpenMT()
+ *
+ * Converts a four character OpenMT M17 type name ("M17L", "M17S", "M17P" or
+ * "M17E") into the MMDVM frame type value.
+ *
+ * Parameters:
+ *   openmt_in - OpenMT type name to convert (case insensitive).
+ *   mmdvm_out - Receives the MMDVM type value.  Left unchanged if the name is
+ *               not recognised.
+ *
+ * Returns: true if the name was recognised, false otherwise.
+ */
+bool mmdvmToOpenMT(const char* openmt_in, uint8_t* mmdvm_out)
 {
     bool ret = false;
 
     if (strcasecmp(openmt_in, "M17L") == 0)
     {
-        mmdvm_out = TYPE_M17_LSF;
+        *mmdvm_out = TYPE_M17_LSF;
         ret = true;
     }
     else if (strcasecmp(openmt_in, "M17S") == 0)
     {
-        mmdvm_out = TYPE_M17_STREAM;
+        *mmdvm_out = TYPE_M17_STREAM;
         ret = true;
     }
     else if (strcasecmp(openmt_in, "M17P") == 0)
     {
-        mmdvm_out = TYPE_M17_PACKET;
+        *mmdvm_out = TYPE_M17_PACKET;
         ret = true;
     }
     else if (strcasecmp(openmt_in, "M17E") == 0)
     {
-        mmdvm_out = TYPE_M17_EOT;
+        *mmdvm_out = TYPE_M17_EOT;
         ret = true;
     }
     return ret;
 }
 
-/* function to setup frequencies in MMDVM Hotspot. */
+/*
+ * setFrequency()
+ *
+ * Queues the command that sets the radio frequencies of an MMDVM hotspot.
+ * The three frequencies are converted from text to 32 bit values, sent low
+ * byte first.
+ *
+ * Parameters:
+ *   rxFreq     - Receive frequency in Hz, as text.
+ *   txFreq     - Transmit frequency in Hz, as text.
+ *   pocsagFreq - POCSAG frequency in Hz, as text.
+ *   rfPower    - RF output power level.
+ *
+ * Returns: nothing.
+ */
 void setFrequency(const char* rxFreq, const char* txFreq, const char* pocsagFreq, uint8_t rfPower)
 {
     uint8_t buffer[17];
@@ -518,7 +858,22 @@ void setFrequency(const char* rxFreq, const char* txFreq, const char* pocsagFreq
     RingBuffer_addData(&modemCommandBuffer, buffer, 17);
 }
 
-/* function to set config in MMDVM modem. */
+/*
+ * set_Config()
+ *
+ * Builds the 40 byte configuration frame for an MMDVM modem and queues it in
+ * the modem command buffer.  The inversion flags, duplex mode, TX delay, DC
+ * offsets, RX level and the per mode TX levels are read from the host
+ * configuration database and also stored in the modem_* variables.  The
+ * enabled mode flags, TX hang times, DMR colour code and delay and the AX.25
+ * settings come from the modem_* variables.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose settings are read from the
+ *                database.
+ *
+ * Returns: Always true.
+ */
 bool set_Config(const char* modem_name)
 {
     uint8_t buffer[50U];
@@ -695,7 +1050,21 @@ bool set_Config(const char* modem_name)
     return true;
 }
 
-/* function to set config in MMDVM Hotspot. */
+/*
+ * set_ConfigHS()
+ *
+ * Builds the 26 byte configuration frame for an MMDVM hotspot board and
+ * queues it in the modem command buffer.  The YSF low deviation, debug and
+ * duplex settings and the TX levels are read from the host configuration
+ * database; the enabled mode flags, DC offsets, TX hang times and DMR colour
+ * code and delay come from the modem_* variables.
+ *
+ * Parameters:
+ *   modem_name - Name of the modem whose settings are read from the
+ *                database.
+ *
+ * Returns: Always true.
+ */
 bool set_ConfigHS(const char* modem_name)
 {
     uint8_t buffer[30U];

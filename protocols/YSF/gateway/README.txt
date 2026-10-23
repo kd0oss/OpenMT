@@ -44,9 +44,9 @@ Not included: DTMF reflector selection, GPS/APRS, the Wires-X command passthroug
 
 Test without hardware (ysf_gw_sim writes the list files; the gateway is started with the YSF_STUB_<key> variables
 that tools_stub.c turns into configuration values):
-    gcc -I. -Igateway -o ysf_gw_sim test/ysf_gw_sim.c gateway/ysf_wiresx.c gateway/ysf_reflist.c ysf_func.c <OpenMT>/tools/dsp_tools.c -lm
+    gcc -I. -Igateway -o ysf_gw_sim test/ysf_gw_sim.c gateway/ysf_wiresx.c gateway/ysf_reflist.c ysf_func.c <OpenMT>/tools/fec_tools.c -lm
     gcc -I. -I<OpenMT>/tools -o ysf_gateway gateway/ysf_gateway.c gateway/ysf_reflist.c gateway/ysf_wiresx.c ysf_func.c \
-        test/tools_stub.c <OpenMT>/tools/dsp_tools.c -lm -lpthread
+        <OpenMT>/tools/test/tools_stub.c -DSTUB_UC=YSF -DSTUB_LC=ysf -DSTUB_DB <OpenMT>/tools/fec_tools.c -lm -lpthread
   links, voice, polls, lists:   ./ysf_gw_sim &      YSF_STUB_wiresX=0 YSF_STUB_hostsFile=/tmp/ysf_hosts.json ./ysf_gateway -m 1
   static reflector:             ./ysf_gw_sim static &   YSF_STUB_staticReflector=Test-One ./ysf_gateway -m 1
   FCS:                          ./ysf_gw_sim fcs &   YSF_STUB_enableFCS=1 YSF_STUB_fcsServer=127.0.0.1 YSF_STUB_options=OPT=1

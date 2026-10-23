@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  test_damage.c - damaged sample frames on the link: checks that the
  *  parser classifies them (FW2 short= / long=) and keeps the timeline.
@@ -10,6 +11,18 @@
 #include "../engine.h"
 #include "fakehw.h"
 
+/*
+ * frame()
+ *
+ * Builds a 196-byte TX sample frame (TX level 128) in which every sample has
+ * the same value.
+ *
+ * Parameters:
+ *   f - Receives the frame.
+ *   v - Sample value.
+ *
+ * Returns: nothing.
+ */
 static void frame(uint8_t *f, int16_t v)
 {
     int i;
@@ -25,6 +38,17 @@ static void frame(uint8_t *f, int16_t v)
     }
 }
 
+/*
+ * run()
+ *
+ * Runs the engine for a number of milliseconds: 24 sample ticks, a clock
+ * step and engine_poll() per millisecond.
+ *
+ * Parameters:
+ *   ms - Number of milliseconds to run.
+ *
+ * Returns: nothing.
+ */
 static void run(int ms)
 {
     int i, t;
@@ -40,6 +64,18 @@ static void run(int ms)
     }
 }
 
+/*
+ * main()
+ *
+ * Test: sends 40 good frames, a frame that is 3 bytes short, 40 good frames,
+ * a frame that is 2 bytes too long and 40 more good frames.  It then lets
+ * the transmission time out and prints the engine's frame, lost frame and
+ * bad byte counts and the firmware's "FW2" debug line.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0.
+ */
 int main(void)
 {
     uint8_t cfg[196];

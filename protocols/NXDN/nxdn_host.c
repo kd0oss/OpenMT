@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -36,7 +37,7 @@
 
 #include <tools.h>
 #include <mariadb/mysql.h>
-#include <dsp_tools.h>
+#include <fec_tools.h>
 #include <ADF7021.h>
 
 #include "nxdn_dsp.h"
@@ -196,35 +197,17 @@ static char     callSuffix[16] = "";
 static char     callDst[16]    = "";
 
 /*
- * delay()
- *   Sleeps for the given number of microseconds.
- */
-static void delay(uint32_t us)
-{
-    struct timespec req;
-
-    req.tv_sec  = us / 1000000U;
-    req.tv_nsec = (long)(us % 1000000U) * 1000L;
-    nanosleep(&req, NULL);
-}
-
-/*
- * nowMs()
- *   Milliseconds on the monotonic clock.
- */
-static uint64_t nowMs(void)
-{
-    struct timespec ts;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
-}
-
-/*
  * dump()
- *   Debug helper. Prints text, then a hex and ASCII dump of length bytes of
- *   data, 16 bytes per line.
+ *
+ * Debug helper. Prints text, then a hex and ASCII dump of length bytes of
+ * data, 16 bytes per line.
+ *
+ * Parameters:
+ *   text   - Label printed above the dump.
+ *   data   - Bytes to dump.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
  */
 static void dump(const char* text, const uint8_t* data, unsigned int length)
 {
@@ -258,8 +241,16 @@ static void dump(const char* text, const uint8_t* data, unsigned int length)
 
 /*
  * writeAll()
- *   Writes a whole buffer to a socket, retrying on partial writes. Returns
- *   false if the connection has failed.
+ *
+ * Writes a whole buffer to a socket, retrying on partial writes. Returns
+ * false if the connection has failed.
+ *
+ * Parameters:
+ *   fd     - Socket to write to.
+ *   data   - Bytes to write.
+ *   length - Number of bytes in data.
+ *
+ * Returns: true if everything was written, false if the connection failed.
  */
 static bool writeAll(int fd, const uint8_t* data, size_t length)
 {
@@ -287,8 +278,16 @@ static bool writeAll(int fd, const uint8_t* data, size_t length)
 
 /*
  * modemWrite()
- *   Writes one packet to the modem host. The mutex keeps packets from
- *   different threads from being mixed up.
+ *
+ * Writes one packet to the modem host. The mutex keeps packets from
+ * different threads from being mixed up.
+ *
+ * Parameters:
+ *   data   - The packet.
+ *   length - Number of bytes in data.
+ *
+ * Returns: true if the packet was written, false if the modem host is not
+ *   connected or the write failed.
  */
 static bool modemWrite(const uint8_t* data, size_t length)
 {
@@ -303,7 +302,15 @@ static bool modemWrite(const uint8_t* data, size_t length)
 
 /*
  * readFully()
- *   Reads exactly length bytes. Returns false on end of file or error.
+ *
+ * Reads exactly length bytes. Returns false on end of file or error.
+ *
+ * Parameters:
+ *   fd     - Socket to read from.
+ *   data   - Receives the bytes.
+ *   length - Number of bytes to read.
+ *
+ * Returns: true if all the bytes were read, false on end of file or error.
  */
 static bool readFully(int fd, uint8_t* data, size_t length)
 {
@@ -336,88 +343,103 @@ static bool readFully(int fd, uint8_t* data, size_t length)
 
 /*
  * cfgValue()
- *   Reads a configuration value, writing the default to the configuration
- *   database when the key does not exist yet.
+ *
+ * Reads a configuration value, writing the default to the configuration
+ * database when the key does not exist yet.
+ *
+ * Parameters:
+ *   key - Name of the NXDN configuration key.
+ *   def - Default value, written to the database when the key does not
+ *         exist.
+ *   out  - Receives the value.
+ *   size - Size of the out buffer; a longer value is cut.
+ *
+ * Returns: nothing.
  */
-static void cfgValue(const char* key, const char* def, char* out)
+static void cfgValue(const char* key, const char* def, char* out, size_t size)
 {
     out[0] = '\0';
-    readHostConfig(modemName, "NXDN", key, out);
+    readHostConfigN(modemName, "NXDN", key, out, size);
 
     if (strlen(out) == 0)
     {
         setHostConfig(modemName, "NXDN", key, "input", def);
-        strcpy(out, def);
+        snprintf(out, size, "%s", def);
     }
 }
 
 /*
  * loadConfig()
- *   Fills the configuration structure from the host configuration, creating
- *   any missing keys with their defaults.
+ *
+ * Fills the configuration structure from the host configuration, creating
+ * any missing keys with their defaults.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void loadConfig(void)
 {
     char tmp[40];
 
-    cfgValue("RAN", "1", tmp);
+    cfgValue("RAN", "1", tmp, sizeof(tmp));
     cfg.ran = (uint8_t)(atoi(tmp) & 0x3F);
 
-    cfgValue("id", "0", tmp);
+    cfgValue("id", "0", tmp, sizeof(tmp));
     cfg.id = (uint16_t)atoi(tmp);
 
-    cfgValue("selfOnly", "0", tmp);
+    cfgValue("selfOnly", "0", tmp, sizeof(tmp));
     cfg.selfOnly = atoi(tmp) != 0;
 
-    cfgValue("remoteGateway", "0", tmp);
+    cfgValue("remoteGateway", "0", tmp, sizeof(tmp));
     cfg.remoteGateway = atoi(tmp) != 0;
 
-    cfgValue("rxLevel", "50", tmp);
+    cfgValue("rxLevel", "50", tmp, sizeof(tmp));
     cfg.rxLevel = (uint8_t)atoi(tmp);
 
-    cfgValue("txLevel", "50", tmp);
+    cfgValue("txLevel", "50", tmp, sizeof(tmp));
     cfg.txLevel = (uint8_t)atoi(tmp);
 
-    cfgValue("txDelay", "100", tmp);
+    cfgValue("txDelay", "100", tmp, sizeof(tmp));
     cfg.txDelay = (uint16_t)atoi(tmp);
 
-    cfgValue("rfPower", "128", tmp);
+    cfgValue("rfPower", "128", tmp, sizeof(tmp));
     cfg.rfPower = (uint8_t)atoi(tmp);
 
     /* Only used with an OpenMT_HS modem; the P25 and M17 values */
-    cfgValue("bitFlags0", "0x20", tmp);
+    cfgValue("bitFlags0", "0x20", tmp, sizeof(tmp));
     cfg.bitFlags0 = (uint8_t)strtol(tmp, NULL, 0);
 
-    cfgValue("bitFlags1", "0x11", tmp);
+    cfgValue("bitFlags1", "0x11", tmp, sizeof(tmp));
     cfg.bitFlags1 = (uint8_t)strtol(tmp, NULL, 0);
 
-    cfgValue("modeHang", "30", tmp);
+    cfgValue("modeHang", "30", tmp, sizeof(tmp));
     long hang = atol(tmp);
     cfg.modeHang = (uint32_t)(hang < 0 ? 0 : (hang > 600 ? 600 : hang));
 
-    cfgValue("timeout", "180", tmp);
+    cfgValue("timeout", "180", tmp, sizeof(tmp));
     cfg.timeout = (uint32_t)atoi(tmp);
 
     /* The network delivers the frames in bursts and with stalls of up to a second.  A transmission starts when
        this many ms of frames have arrived and then goes out at the frame rate, so a stall shorter than this does
        not run the transmitter dry.  0 sends every frame as it comes. */
-    cfgValue("jitterMs", "300", tmp);
+    cfgValue("jitterMs", "300", tmp, sizeof(tmp));
     long jit = atol(tmp);
     cfg.jitterMs = (uint32_t)(jit < 0 ? 0 : (jit > 2000 ? 2000 : jit));
 
-    cfgValue("txShape", "0", tmp);
+    cfgValue("txShape", "0", tmp, sizeof(tmp));
     cfg.txShape = atoi(tmp) ? NXDN_SHAPE_RC : NXDN_SHAPE_RRC;
 
-    cfgValue("rxShape", "0", tmp);
+    cfgValue("rxShape", "0", tmp, sizeof(tmp));
     cfg.rxShape = atoi(tmp) ? NXDN_SHAPE_RC : NXDN_SHAPE_RRC;
 
-    cfgValue("rxMinAmp", "30", tmp);
+    cfgValue("rxMinAmp", "30", tmp, sizeof(tmp));
     cfg.rxMinAmp = (float)atof(tmp);
 
     if (cfg.rxMinAmp < 1.0F)
         cfg.rxMinAmp = 1.0F;
 
-    readHostConfig(modemName, "main", "callsign", station_call);
+    readHostConfigN(modemName, "main", "callsign", station_call, sizeof(station_call));
 
     fprintf(stderr, "NXDN config: RAN %u id %u selfOnly %d remoteGateway %d rx %u tx %u txDelay %u ms "
             "modeHang %u s timeout %u s jitterMs %u\n", cfg.ran, cfg.id, cfg.selfOnly, cfg.remoteGateway,
@@ -426,8 +448,14 @@ static void loadConfig(void)
 
 /*
  * isActiveMode()
- *   True when the modem host's active mode is NXDN or idle, i.e. when this
- *   host is allowed to handle frames. The answer is cached for 200 ms.
+ *
+ * True when the modem host's active mode is NXDN or idle, i.e. when this
+ * host is allowed to handle frames. The answer is cached for 200 ms.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the active mode is NXDN or idle, false if another
+ *   protocol owns the modem.
  */
 static bool isActiveMode(void)
 {
@@ -460,7 +488,12 @@ static bool isActiveMode(void)
 
 /*
  * touchActivity()
- *   Restarts the mode hang time.
+ *
+ * Restarts the mode hang time.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void touchActivity(void)
 {
@@ -469,8 +502,13 @@ static void touchActivity(void)
 
 /*
  * requestMode()
- *   Asks the modem host to switch to NXDN. Only works while the modem host
- *   is idle, which is also the case while this host holds the mode.
+ *
+ * Asks the modem host to switch to NXDN. Only works while the modem host is
+ * idle, which is also the case while this host holds the mode.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void requestMode(void)
 {
@@ -481,7 +519,12 @@ static void requestMode(void)
 
 /*
  * releaseMode()
- *   Hands the modem back to the idle state.
+ *
+ * Hands the modem back to the idle state.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void releaseMode(void)
 {
@@ -499,10 +542,18 @@ static void releaseMode(void)
 
 /*
  * onNet()
- *   Control callback: an NXDN message for the gateway. Queued for the gateway
- *   thread; dropped when no gateway is connected. The gateway decides about
- *   linking (a call to a talk group links to it), so frames are passed on
- *   whether or not a reflector is linked yet.
+ *
+ * Control callback: an NXDN message for the gateway. Queued for the gateway
+ * thread; dropped when no gateway is connected. The gateway decides about
+ * linking (a call to a talk group links to it), so frames are passed on
+ * whether or not a reflector is linked yet.
+ *
+ * Parameters:
+ *   c       - Callback context; not used.
+ *   netData - The NXDN message for the gateway.
+ *   type    - Message type.
+ *
+ * Returns: nothing.
  */
 static void onNet(void* c, const uint8_t* netData, uint8_t type)
 {
@@ -539,7 +590,15 @@ static void onNet(void* c, const uint8_t* netData, uint8_t type)
 
 /*
  * onRf()
- *   Control callback: a frame to transmit. Queued for the transmit thread.
+ *
+ * Control callback: a frame to transmit. Queued for the transmit thread.
+ *
+ * Parameters:
+ *   c     - Callback context; not used.
+ *   frame - The frame to transmit.
+ *   eot   - true if this is the last frame of the transmission.
+ *
+ * Returns: nothing.
  */
 static void onRf(void* c, const uint8_t* frame, bool eot)
 {
@@ -568,9 +627,17 @@ static void onRf(void* c, const uint8_t* frame, bool eot)
 
 /*
  * onEvent()
- *   Control callback: a call started, ended or was lost. The dashboard work
- *   is queued so the receive thread is not held up by the database. The
- *   modem is switched to NXDN here, before the first frame goes out.
+ *
+ * Control callback: a call started, ended or was lost. The dashboard work is
+ * queued so the receive thread is not held up by the database. The modem is
+ * switched to NXDN here, before the first frame goes out.
+ *
+ * Parameters:
+ *   c    - Callback context; not used.
+ *   call - Description of the call event (start, end or lost, RF or
+ *          network).
+ *
+ * Returns: nothing.
  */
 static void onEvent(void* c, const NxdnCall* call)
 {
@@ -599,9 +666,17 @@ static void onEvent(void* c, const NxdnCall* call)
 
 /*
  * onRxFrame()
- *   DSP callback and firmware frame entry: one received frame, or the loss of
- *   the signal. While the control is listening the frame is only used when
- *   this host may take the modem. The caller holds ctrlMutex.
+ *
+ * DSP callback and firmware frame entry: one received frame, or the loss of
+ * the signal. While the control is listening the frame is only used when
+ * this host may take the modem. The caller holds ctrlMutex.
+ *
+ * Parameters:
+ *   c     - Callback context; not used.
+ *   frame - The received frame.
+ *   lost  - true if the signal was lost instead of a frame arriving.
+ *
+ * Returns: nothing.
  */
 static void onRxFrame(void* c, const uint8_t* frame, bool lost)
 {
@@ -619,8 +694,19 @@ static void onRxFrame(void* c, const uint8_t* frame, bool lost)
 
 /*
  * findNxdnId()
- *   Looks an NXDN radio id up in modem_host.nxdn_ids (kept across the DMR id
- *   updates, which empty dmr_ids), then in dmr_ids. Returns the callsign and name.
+ *
+ * Looks an NXDN radio id up in modem_host.nxdn_ids (kept across the DMR id
+ * updates, which empty dmr_ids), then in dmr_ids. Returns the callsign and
+ * name.
+ *
+ * Parameters:
+ *   id           - NXDN radio id to look up.
+ *   callsign     - Receives the callsign.
+ *   callsignSize - Size of the callsign buffer.
+ *   name         - Receives the name.
+ *   nameSize     - Size of the name buffer.
+ *
+ * Returns: true if the id was found, false if not.
  */
 static bool findNxdnId(unsigned int id, char* callsign, size_t callsignSize, char* name, size_t nameSize)
 {
@@ -680,7 +766,7 @@ static bool findNxdnId(unsigned int id, char* callsign, size_t callsignSize, cha
         return true;
     }
 
-    if (findDMRId(id, callsign, name))
+    if (findDMRId(id, callsign, callsignSize, name, nameSize))
     {
         fprintf(stderr, "NXDN: id %u found in dmr_ids: %s\n", id, callsign);
         return true;
@@ -691,8 +777,13 @@ static bool findNxdnId(unsigned int id, char* callsign, size_t callsignSize, cha
 
 /*
  * serviceEvents()
- *   Writes the queued call events to the dashboard database: the live record
- *   when a call starts, the finished record and a history entry when it ends.
+ *
+ * Writes the queued call events to the dashboard database: the live record
+ * when a call starts, the finished record and a history entry when it ends.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void serviceEvents(void)
 {
@@ -790,7 +881,13 @@ typedef struct
 
 /*
  * sampStart()
- *   Starts a new burst of transmit samples with a fresh pulse shaping filter.
+ *
+ * Starts a new burst of transmit samples with a fresh pulse shaping filter.
+ *
+ * Parameters:
+ *   w - The sample writer.
+ *
+ * Returns: nothing.
  */
 static void sampStart(SampWriter* w)
 {
@@ -803,9 +900,16 @@ static void sampStart(SampWriter* w)
 
 /*
  * sampSend()
- *   Sends the packet being assembled to the modem host and waits when more
- *   than TX_AHEAD_MS of samples are already queued, so the modem host's
- *   buffer cannot overflow.
+ *
+ * Sends the packet being assembled to the modem host and waits when more
+ * than TX_AHEAD_MS of samples are already queued, so the modem host's buffer
+ * cannot overflow.
+ *
+ * Parameters:
+ *   w    - The sample writer.
+ *   type - Four character packet type to send.
+ *
+ * Returns: nothing.
  */
 static void sampSend(SampWriter* w, const char* type)
 {
@@ -837,7 +941,15 @@ static void sampSend(SampWriter* w, const char* type)
 
 /*
  * sampAdd()
- *   Appends samples to the packet being assembled.
+ *
+ * Appends samples to the packet being assembled.
+ *
+ * Parameters:
+ *   w       - The sample writer.
+ *   samples - Samples to add.
+ *   length  - Number of samples.
+ *
+ * Returns: nothing.
  */
 static void sampAdd(SampWriter* w, const int16_t* samples, unsigned int length)
 {
@@ -856,8 +968,14 @@ static void sampAdd(SampWriter* w, const int16_t* samples, unsigned int length)
 
 /*
  * sampEnd()
- *   Flushes the filter, sends the last partly filled packet and the end of
- *   transmission packet.
+ *
+ * Flushes the filter, sends the last partly filled packet and the end of
+ * transmission packet.
+ *
+ * Parameters:
+ *   w - The sample writer.
+ *
+ * Returns: nothing.
  */
 static void sampEnd(SampWriter* w)
 {
@@ -883,7 +1001,13 @@ typedef struct
 
 /*
  * bitStart()
- *   Starts a new burst of transmit bits.
+ *
+ * Starts a new burst of transmit bits.
+ *
+ * Parameters:
+ *   w - The bit writer.
+ *
+ * Returns: nothing.
  */
 static void bitStart(BitWriter* w)
 {
@@ -895,8 +1019,14 @@ static void bitStart(BitWriter* w)
 
 /*
  * bitSend()
- *   Sends the BITS packet being assembled (unused bytes are zero) and waits when
- *   more than TX_AHEAD_MS of bits are already queued.
+ *
+ * Sends the BITS packet being assembled (unused bytes are zero) and waits
+ * when more than TX_AHEAD_MS of bits are already queued.
+ *
+ * Parameters:
+ *   w - The bit writer.
+ *
+ * Returns: nothing.
  */
 static void bitSend(BitWriter* w)
 {
@@ -926,7 +1056,15 @@ static void bitSend(BitWriter* w)
 
 /*
  * bitAdd()
- *   Appends bytes of the bit stream, most significant bit first.
+ *
+ * Appends bytes of the bit stream, most significant bit first.
+ *
+ * Parameters:
+ *   w      - The bit writer.
+ *   data   - Bytes to add.
+ *   length - Number of bytes.
+ *
+ * Returns: nothing.
  */
 static void bitAdd(BitWriter* w, const uint8_t* data, unsigned int length)
 {
@@ -942,8 +1080,14 @@ static void bitAdd(BitWriter* w, const uint8_t* data, unsigned int length)
 
 /*
  * bitEnd()
- *   Sends the last partly filled packet; its unused bytes are zero, as in the
- *   other OpenMT hosts' end of transmission.
+ *
+ * Sends the last partly filled packet; its unused bytes are zero, as in the
+ * other OpenMT hosts' end of transmission.
+ *
+ * Parameters:
+ *   w - The bit writer.
+ *
+ * Returns: nothing.
  */
 static void bitEnd(BitWriter* w)
 {
@@ -955,10 +1099,17 @@ static void bitEnd(BitWriter* w)
 
 /*
  * txThread()
- *   Takes the frames queued by the control logic and sends them to the modem
- *   host: modulated as samples for the SAMP modem, as bits for an
- *   OpenMT_HS modem, as frames for an MMDVM modem. A transmission starts with a preamble, ends with the frame marked
- *   end of transmission, or after TX_UNDERRUN_MS without a frame.
+ *
+ * Takes the frames queued by the control logic and sends them to the modem
+ * host: modulated as samples for the SAMP modem, as bits for an OpenMT_HS
+ * modem, as frames for an MMDVM modem. A transmission starts with a
+ * preamble, ends with the frame marked end of transmission, or after
+ * TX_UNDERRUN_MS without a frame.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL.
  */
 static void* txThread(void* arg)
 {
@@ -1170,9 +1321,16 @@ static void* txThread(void* arg)
 /* ------------------------------------------------------------------------ */
 
 /*
- * gwQueueCommand()
- *   Queues a small control packet (connect, disconnect, update configuration)
- *   for the gateway.
+ * gwQueue()
+ *
+ * Queues a small control packet (connect, disconnect, update configuration)
+ * for the gateway.  Packets longer than GW_PACKET_MAX are dropped.
+ *
+ * Parameters:
+ *   data   - The packet.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
  */
 static void gwQueue(const uint8_t* data, unsigned int length)
 {
@@ -1195,9 +1353,16 @@ static void gwQueue(const uint8_t* data, unsigned int length)
 
 /*
  * gwHandle()
- *   Handles one packet from the gateway: reflector replies update the link
- *   status on the dashboard, commands are acknowledged and NXDN messages
- *   from the network go to the control logic.
+ *
+ * Handles one packet from the gateway: reflector replies update the link
+ * status on the dashboard, commands are acknowledged and NXDN messages from
+ * the network go to the control logic.
+ *
+ * Parameters:
+ *   buffer  - The packet from the gateway.
+ *   respLen - Length of the packet.
+ *
+ * Returns: nothing.
  */
 static void gwHandle(const uint8_t* buffer, uint16_t respLen)
 {
@@ -1252,9 +1417,16 @@ static void gwHandle(const uint8_t* buffer, uint16_t respLen)
 
 /*
  * gatewayThread()
- *   Serves the connected NXDN gateway: sends what the control logic and the
- *   dashboard queued for it and reads what it sends. Registers the gateway
- *   with the dashboard while it is connected.
+ *
+ * Serves the connected NXDN gateway: sends what the control logic and the
+ * dashboard queued for it and reads what it sends. Registers the gateway
+ * with the dashboard while it is connected.
+ *
+ * Parameters:
+ *   arg - Socket of the gateway connection, passed as a pointer sized
+ *         integer.
+ *
+ * Returns: NULL.
  */
 static void* gatewayThread(void* arg)
 {
@@ -1333,7 +1505,7 @@ static void* gatewayThread(void* arg)
 
             if (!writeAll(fd, pkt, len))
             {
-                fprintf(stderr, "NXDN: gateway write failed.\n");
+                reportError(modemName, "NXDN", "NXDN: gateway write failed.");
                 r = -1;
                 break;
             }
@@ -1361,8 +1533,14 @@ static void* gatewayThread(void* arg)
 
 /*
  * serverThread()
- *   Listens for the NXDN gateway on the server port. A new connection
- *   replaces an earlier one.
+ *
+ * Listens for the NXDN gateway on the server port. A new connection replaces
+ * an earlier one.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL.
  */
 static void* serverThread(void* arg)
 {
@@ -1375,7 +1553,7 @@ static void* serverThread(void* arg)
 
     if (lfd < 0)
     {
-        fprintf(stderr, "NXDN: error creating the gateway socket: %s\n", strerror(errno));
+        reportError(modemName, "NXDN", "NXDN: error creating the gateway socket: %s", strerror(errno));
         exit(1);
     }
 
@@ -1388,13 +1566,13 @@ static void* serverThread(void* arg)
 
     if (bind(lfd, (struct sockaddr*)&addr, sizeof(addr)) < 0)
     {
-        fprintf(stderr, "NXDN: error binding port %u: %s\n", serverPort, strerror(errno));
+        reportError(modemName, "NXDN", "NXDN: error binding port %u: %s", serverPort, strerror(errno));
         exit(1);
     }
 
     if (listen(lfd, 4) < 0)
     {
-        perror("listen");
+        reportError(modemName, "NXDN", "listen: %s", strerror(errno));
         exit(1);
     }
 
@@ -1406,7 +1584,7 @@ static void* serverThread(void* arg)
         {
             if (errno == EINTR)
                 continue;
-            perror("accept");
+            reportError(modemName, "NXDN", "accept: %s", strerror(errno));
             break;
         }
 
@@ -1417,7 +1595,7 @@ static void* serverThread(void* arg)
 
         if (pthread_create(&id, NULL, gatewayThread, (void*)(intptr_t)cfd) != 0)
         {
-            fprintf(stderr, "NXDN: can't create gateway thread\n");
+            reportError(modemName, "NXDN", "NXDN: can't create gateway thread");
             close(cfd);
             continue;
         }
@@ -1436,8 +1614,13 @@ static void* serverThread(void* arg)
 
 /*
  * registerMode()
- *   Sends the MODE packet that registers this host with the modem host. The
- *   radio settings of the packet are not used with a SAMP or MMDVM modem.
+ *
+ * Sends the MODE packet that registers this host with the modem host. The
+ * radio settings of the packet are not used with a SAMP or MMDVM modem.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void registerMode(void)
 {
@@ -1501,8 +1684,16 @@ static void registerMode(void)
 
 /*
  * rxSamples()
- *   Applies the receive level to a packet of demodulated samples and feeds
- *   them to the receiver.
+ *
+ * Applies the receive level to a packet of demodulated samples and feeds
+ * them to the receiver.
+ *
+ * Parameters:
+ *   data   - Demodulated samples, two bytes each, least significant byte
+ *            first.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
  */
 static void rxSamples(const uint8_t* data, unsigned int length)
 {
@@ -1533,9 +1724,15 @@ static void rxSamples(const uint8_t* data, unsigned int length)
 
 /*
  * clientThread()
- *   Thread that reads the modem host connection. Demodulated samples go to the
- *   receiver, frames from the MMDVM firmware go to the control logic and
- *   command packets update the duplex flag.
+ *
+ * Thread that reads the modem host connection. Demodulated samples go to the
+ * receiver, frames from the MMDVM firmware go to the control logic and
+ * command packets update the duplex flag.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL.
  */
 static void* clientThread(void* arg)
 {
@@ -1619,9 +1816,15 @@ static void* clientThread(void* arg)
 
 /*
  * timerThread()
- *   Runs the control timers every 10 ms, releases the modem once the mode
- *   hang time has passed without activity and prints receiver statistics when
- *   debugging.
+ *
+ * Runs the control timers every 10 ms, releases the modem once the mode hang
+ * time has passed without activity and prints receiver statistics when
+ * debugging.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL.
  */
 static void* timerThread(void* arg)
 {
@@ -1664,7 +1867,13 @@ static void* timerThread(void* arg)
 
 /*
  * connectModemHost()
- *   Connects to the modem host and registers the NXDN mode.
+ *
+ * Connects to the modem host and registers the NXDN mode.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the connection was made and the mode registered, false if
+ *   not.
  */
 static bool connectModemHost(void)
 {
@@ -1674,7 +1883,7 @@ static bool connectModemHost(void)
 
     if (sockfd < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "NXDN", "Socket creation error: %s", strerror(errno));
         return false;
     }
 
@@ -1686,15 +1895,15 @@ static bool connectModemHost(void)
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port   = htons(clientPort);
 
-    if (inet_pton(AF_INET, modemHost, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(modemHost, &serv_addr.sin_addr))
     {
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "NXDN", "Invalid address/ Address not supported");
         return false;
     }
 
     if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0)
     {
-        perror("connection failed");
+        reportError(modemName, "NXDN", "connection failed: %s", strerror(errno));
         return false;
     }
 
@@ -1705,9 +1914,14 @@ static bool connectModemHost(void)
 
 /*
  * pollDashboard()
- *   Checks the dashboard for configuration and reflector link commands.
- *   Commands go to the gateway when one is connected, otherwise they are
- *   answered at once.
+ *
+ * Checks the dashboard for configuration and reflector link commands.
+ * Commands go to the gateway when one is connected, otherwise they are
+ * answered at once.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void pollDashboard(void)
 {
@@ -1753,7 +1967,7 @@ static void pollDashboard(void)
             char tmp[31];
             char* token;
 
-            strcpy(tmp, parameter);
+            snprintf(tmp, sizeof(tmp), "%s", parameter);
             token = strtok(tmp, ",");
 
             if (token != NULL && strcasecmp(token, "link") == 0 && (token = strtok(NULL, ",")) != NULL)
@@ -1765,7 +1979,7 @@ static void pollDashboard(void)
                 memset(name, 0x00, sizeof(name));
                 memset(callsign, 0x00, sizeof(callsign));
                 strncpy(name, token, 6);
-                readHostConfig(modemName, "main", "callsign", callsign);
+                readHostConfigN(modemName, "main", "callsign", callsign, sizeof(callsign));
 
                 buf[0] = 0x61;
                 buf[1] = 0x00;
@@ -1799,17 +2013,24 @@ static void pollDashboard(void)
 
 /*
  * main()
- *   Program entry. Parses the command line (-m modem number 1-10, which also
- *   selects the TCP ports, -d daemon, -v version, -x debug), reads the
- *   configuration, connects to the modem host and runs until the connection
- *   is lost.
+ *
+ * Program entry. Parses the command line (-m modem number 1-10, which also
+ * selects the TCP ports, -d daemon, -v version, -x debug), reads the
+ * configuration, connects to the modem host and runs until the connection is
+ * lost.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on exit, 1 on a bad argument.
  */
 int main(int argc, char** argv)
 {
     bool daemonize = false;
     int  c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1817,7 +2038,7 @@ int main(int argc, char** argv)
                 modemId = (uint8_t)atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "NXDN", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -1825,8 +2046,11 @@ int main(int argc, char** argv)
                 serverPort = 18500 + modemId - 1;
                 fprintf(stderr, "Modem name: %s\n", modemName);
                 break;
+            case 'a':
+                snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemonize = true;
@@ -1838,7 +2062,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: NXDN_Service [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: NXDN_Service [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1849,7 +2073,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "NXDN_Service: error in fork(), exiting\n");
+            reportError(modemName, "NXDN", "NXDN_Service: error in fork(), exiting");
             return 1;
         }
 
@@ -1862,7 +2086,7 @@ int main(int argc, char** argv)
 
     char tmp[15];
 
-    readHostConfig(modemName, "config", "modem", tmp);
+    readHostConfigN(modemName, "config", "modem", tmp, sizeof(tmp));
 
     if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
         packetType = PACKET_TYPE_SAMP;
@@ -1873,8 +2097,8 @@ int main(int argc, char** argv)
 
     loadConfig();
 
-    readHostConfig(modemName, "config", "rxFrequency", rxFrequency);
-    readHostConfig(modemName, "config", "txFrequency", txFrequency);
+    readHostConfigN(modemName, "config", "rxFrequency", rxFrequency, sizeof(rxFrequency));
+    readHostConfigN(modemName, "config", "txFrequency", txFrequency, sizeof(txFrequency));
 
     nxdnCtrlInit(&ctrl);
     ctrl.ran           = cfg.ran;
@@ -1904,7 +2128,7 @@ int main(int argc, char** argv)
         pthread_create(&id, NULL, timerThread, NULL) != 0 ||
         pthread_create(&id, NULL, clientThread, NULL) != 0)
     {
-        fprintf(stderr, "NXDN_Service: can't create threads\n");
+        reportError(modemName, "NXDN", "NXDN_Service: can't create threads");
         return 1;
     }
 

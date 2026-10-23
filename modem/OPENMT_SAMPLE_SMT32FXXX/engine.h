@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  engine.h - OpenMT SAMPLE-mode protocol and sample engine.
  */

@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <math.h>
 #include <netdb.h>
@@ -47,20 +48,9 @@
 #include <tools.h>
 #include <unistd.h>
 #include "dstar_gps.h"
+#include "dstar_slowdata.h"
 #include "dstar_fec.h"
 #include <netinet/tcp.h>
-
-/*
- * setNoDelay()
- *   Disables Nagle's algorithm (TCP_NODELAY) on the socket fd so small packets
- *   are sent immediately.
- */
-static void setNoDelay(int fd)
-{
-    int one = 1;
-
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-}
 
 extern RingBuffer modemCommandBuffer;
 
@@ -680,7 +670,6 @@ RingBuffer rxBuffer;
 RingBuffer gwTxBuffer;
 RingBuffer gwCommand;
 
-pthread_mutex_t timerMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;
@@ -696,17 +685,6 @@ pthread_t timerid;
 const uint8_t SETMODE[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_MODE};
 const uint8_t SETIDLE[] = {0x61, 0x00, 0x05, 0x01, COMM_SET_IDLE};
 
-typedef struct TIMERS
-{
-    char name[20];
-    bool valid;
-    bool enabled;
-    uint32_t duration;
-    uint32_t count;
-    bool triggered;
-} TIMERS;
-
-TIMERS timer[10];
 
 typedef union crc
 {
@@ -730,32 +708,27 @@ void viterbiDecode(int* data);
 void traceBack();
 bool checksum(const uint8_t* header);
 int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char* metaText);
-void slowSpeedDataEncode(char* cMessage, unsigned char* ucBytes, unsigned char ucMode);
 void processHeader(uint8_t* data, uint8_t length, bool isNet);
 void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet);
 void processEOT(bool isNet);
 
 /*
  * error()
- *   Prints msg with perror() and exits the process with status 1.
+ *
+ * Reports a message with reportError() and ends the program with exit status 1.
+ *
+ * Parameters:
+ *   msg - Text printed in front of the system error message.
+ *
+ * Returns: nothing.
  */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "DSTAR", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
-/*
- * delay()
- *   Sleeps for the given number of microseconds.
- */
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-};
+;
 
 /*
  * Transmit clock. Tracks how much audio has been written to the modem against
@@ -770,29 +743,54 @@ static bool     txClockRun     = false;
 static uint64_t txClockSamples = 0U;
 static uint64_t txClockStartMs = 0U;
 
-static uint64_t monoMs(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)(ts.tv_nsec / 1000000L);
-}
-
-/* Milliseconds of audio written to the modem that has not been played yet */
+/*
+ * txLeadMs()
+ *
+ * Works out how much audio has been written to the modem but has not yet
+ * been played, using the transmit clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: Lead in milliseconds (negative when the modem has run dry); 0
+ *   when the clock is not running.
+ */
 static int txLeadMs(void)
 {
     if (!txClockRun)
         return 0;
-    return (int)(txClockSamples * 1000U / 24000U) - (int)(monoMs() - txClockStartMs);
+    return (int)(txClockSamples * 1000U / 24000U) - (int)(nowMs() - txClockStartMs);
 }
 
 static uint64_t lastNetMs = 0U;      /* arrival time of the last net voice frame */
 static uint64_t netHandleMs = 0U;    /* time it took to handle the previous net voice frame */
 
+/*
+ * txClockStop()
+ *
+ * Stops the transmit clock, so the next call to txClockAdd() starts it again
+ * from zero.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void txClockStop(void)
 {
     txClockRun = false;
 }
 
+/*
+ * txClockAdd()
+ *
+ * Adds audio to the transmit clock.  If the clock is running and the modem
+ * has already run dry by more than TX_UNDERRUN_MS, an underrun is logged and
+ * the clock is restarted.  A stopped clock is started at the current time.
+ *
+ * Parameters:
+ *   samples - Number of 24000 Hz samples just written to the modem.
+ *
+ * Returns: nothing.
+ */
 static void txClockAdd(uint32_t samples)
 {
     if (txClockRun)
@@ -806,7 +804,7 @@ static void txClockAdd(uint32_t samples)
     }
     if (!txClockRun)
     {
-        txClockStartMs = monoMs();
+        txClockStartMs = nowMs();
         txClockSamples = 0U;
         txClockRun     = true;
     }
@@ -814,64 +812,15 @@ static void txClockAdd(uint32_t samples)
 }
 
 /*
- * dump()
- *   Debug helper. Prints text and a millisecond timestamp, then a hex and ASCII
- *   dump of length bytes of data, 16 bytes per line.
- */
-void dump(char* text, unsigned char* data, unsigned int length)
-{
-    struct timespec ts;
-    uint64_t milliseconds;
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("clock_gettime");
-        return;
-    }
-
-    milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-
-    fprintf(stdout, "%s: %llu\n", text, milliseconds);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++) fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++) fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            unsigned char c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-}
-
-/*
  * isActiveMode()
- *   Returns true when the modem host's active mode is DSTAR or idle, i.e. when
- *   this host is allowed to process frames.
+ *
+ * Tells whether this host may process frames: the modem host's active mode
+ * is D-Star or idle.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the active mode is DSTAR or IDLE, false if another
+ *   protocol owns the modem.
  */
 bool isActiveMode()
 {
@@ -887,8 +836,13 @@ bool isActiveMode()
 
 /*
  * reset()
- *   Resets the receive state machine, correlation state, sync pointers, buffers
- *   and counters to their start-up values.
+ *
+ * Resets the receive state machine, the correlation and sync pointers, the
+ * buffers and the counters to their start-up values.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 void reset()
 {
@@ -918,9 +872,15 @@ void reset()
 
 /*
  * agcProcess()
- *   Automatic gain control for the receive samples. Tracks the signal envelope
- *   and scales the sample toward a constant level. Returns the sample unchanged
- *   when AGC is disabled.
+ *
+ * Automatic gain control for the receive samples.  It follows the signal
+ * envelope and scales the sample toward a constant level.  The sample is
+ * passed on unchanged when AGC is turned off.
+ *
+ * Parameters:
+ *   sample - Receive sample.
+ *
+ * Returns: The sample after gain control.
  */
 q15_t agcProcess(q15_t sample)
 {
@@ -952,8 +912,14 @@ q15_t agcProcess(q15_t sample)
 
 /*
  * calcRawBERFromSync()
- *   Counts the bit errors between the 24 sync bits at rxBits and the D-Star data
- *   sync pattern. Returns the number of differing bits.
+ *
+ * Counts the bit errors between the 24 sync bits and the D-Star data sync
+ * pattern.
+ *
+ * Parameters:
+ *   rxBits - The 3 bytes of received sync bits.
+ *
+ * Returns: Number of differing bits.
  */
 uint32_t calcRawBERFromSync(const uint8_t *rxBits)
 {
@@ -970,8 +936,14 @@ uint32_t calcRawBERFromSync(const uint8_t *rxBits)
 
 /*
  * checkCCITT161()
- *   Checks the CCITT-16 CRC at the end of a buffer of length bytes. Returns true
- *   when the CRC matches.
+ *
+ * Checks the CCITT-16 CRC stored in the last two bytes of a buffer.
+ *
+ * Parameters:
+ *   in     - Data followed by its two byte CRC.
+ *   length - Length of in, CRC included.
+ *
+ * Returns: true if the CRC matches, false if not.
  */
 bool checkCCITT161(const unsigned char* in, unsigned int length)
 {
@@ -994,9 +966,15 @@ bool checkCCITT161(const unsigned char* in, unsigned int length)
 
 /*
  * txHeader()
- *   Encodes a 41 byte D-Star header into its transmitted form: CRC,
- *   convolutional coding, interleaving and scrambling. in is the header, out
- *   receives the encoded bytes.
+ *
+ * Encodes a 41 byte D-Star header into the form sent over the air: CRC
+ * added, convolutional coding, interleaving and scrambling.
+ *
+ * Parameters:
+ *   in  - The 41 byte header.
+ *   out - Receives the encoded bytes.
+ *
+ * Returns: nothing.
  */
 void txHeader(const uint8_t* in, uint8_t* out)
 {
@@ -1079,34 +1057,16 @@ void txHeader(const uint8_t* in, uint8_t* out)
 }
 
 /*
- * writeBits()
- *   Queues one byte of transmit bits for the modem host in 200 byte BITS
- *   packets. isEOT flushes the partly filled packet.
- */
-void writeBits(uint8_t c, bool isEOT)
-{
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'B', 'I', 'T', 'S'};
-    static uint8_t bytePos = 8;
-
-    bytes[bytePos++] = c;
-    if (bytePos == 200)
-    {
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
-
-    if (bytePos > 8 && isEOT)
-    {
-        memset(bytes+bytePos, 0, 200 - bytePos);
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
-}
-
-/*
  * processBits()
- *   BIT mode receive entry point. Feeds length bytes through the bit state
- *   machine, most significant bit first.
+ *
+ * Receive entry point for BIT mode.  Feeds the bytes through the bit state
+ * machine, most significant bit first.
+ *
+ * Parameters:
+ *   bytes  - Received bytes.
+ *   length - Number of bytes in bytes.
+ *
+ * Returns: nothing.
  */
 void processBits(uint8_t* bytes, uint8_t length)
 {
@@ -1144,8 +1104,14 @@ void processBits(uint8_t* bytes, uint8_t length)
 
 /*
  * processBitNone()
- *   BIT mode idle state. Shifts in one bit and starts a header when the D-Star
- *   frame sync matches; a preamble match is ignored.
+ *
+ * BIT mode idle state.  Shifts in one bit and starts a header when the
+ * D-Star frame sync matches; a preamble match is ignored.
+ *
+ * Parameters:
+ *   bit - The received bit.
+ *
+ * Returns: nothing.
  */
 void processBitNone(bool bit)
 {
@@ -1187,8 +1153,14 @@ void processBitNone(bool bit)
 
 /*
  * decodeBitHeader()
- *   BIT mode header state. Collects the bits of the FEC protected header and,
- *   when complete, decodes it and moves on to the data state.
+ *
+ * BIT mode header state.  Collects the bits of the error protected header
+ * and, when it is complete, decodes it and moves on to the data state.
+ *
+ * Parameters:
+ *   bit - The received bit.
+ *
+ * Returns: nothing.
  */
 void decodeBitHeader(bool bit)
 {
@@ -1228,8 +1200,15 @@ void decodeBitHeader(bool bit)
 
 /*
  * decodeBitData()
- *   BIT mode data state. Collects voice frame bits, delivers each completed
- *   frame, and ends the call on the end sync or when sync is lost.
+ *
+ * BIT mode data state.  Collects the bits of each voice frame, delivers
+ * every completed frame, and ends the call on the end sync or when sync is
+ * lost.
+ *
+ * Parameters:
+ *   bit - The received bit.
+ *
+ * Returns: nothing.
  */
 void decodeBitData(bool bit)
 {
@@ -1322,14 +1301,19 @@ void decodeBitData(bool bit)
 
 /*
  * writeSamples()
- *   Turns one byte of transmit bits into shaped transmit samples and queues them
- *   for the modem host in 200 byte SAMP packets. isEOT flushes the partly filled
- *   packet.
+ *
+ * Turns one byte of transmit bits into shaped transmit samples and queues
+ * them for the modem host.  The samples are collected in 200 byte SAMP
+ * packets.
+ *
+ * Parameters:
+ *   c     - Byte of transmit bits.
+ *   isEOT - true to send the partly filled packet now (end of transmission).
+ *
+ * Returns: nothing.
  */
 void writeSamples(uint8_t c, bool isEOT)
 {
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'};
-    static uint8_t bytePos = 8;
     q15_t          inBuffer[8U];
     q15_t          outBuffer[DSTAR_RADIO_SYMBOL_LENGTH * 8U];
 
@@ -1349,37 +1333,22 @@ void writeSamples(uint8_t c, bool isEOT)
 
     txClockAdd(DSTAR_RADIO_SYMBOL_LENGTH * 8U);
 
-    bytes[5] = 'A';
-    bytes[6] = 'M';
-    bytes[7] = 'P';
-
-    for (uint16_t i = 0U; i < DSTAR_RADIO_SYMBOL_LENGTH * 8U; i++)
-    {
-        bytes[bytePos++] = (outBuffer[i] & 0x00ff);
-        bytes[bytePos++] = (outBuffer[i] & 0xff00) >> 8;
-        if (bytePos == 200)
-        {
-            write(sockfd, bytes, 200);
-            bytePos = 8;
-        }
-    }
-
-    if (bytePos >= 8 && isEOT)
-    {
-        bytes[5] = 'E';
-        bytes[6] = 'O';
-        bytes[7] = 'T';
-        memset(bytes+bytePos, 0, 200 - bytePos);
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
+    /* 200 byte SAMP packets, no wait between them */
+    modemQueueSamples(sockfd, outBuffer, DSTAR_RADIO_SYMBOL_LENGTH * 8U, isEOT, 0U);
 }
 
 /*
  * samples()
- *   SAMPLE mode receive entry point. Feeds length demodulated samples (with
- *   their RSSI values) through the sync search and the header and data state
- *   machine.
+ *
+ * Receive entry point for SAMPLE mode.  Feeds the demodulated samples
+ * through the sync search and the header and data state machine.
+ *
+ * Parameters:
+ *   samples - Demodulated samples.
+ *   rssi    - RSSI value for each sample.
+ *   length  - Number of samples.
+ *
+ * Returns: nothing.
  */
 void samples(const q15_t* samples, const uint16_t* rssi, uint8_t length)
 {
@@ -1418,8 +1387,14 @@ void samples(const q15_t* samples, const uint16_t* rssi, uint8_t length)
 
 /*
  * processNone()
- *   Idle receive state. Looks for the frame sync in the incoming samples and,
- *   when found, starts collecting the header.
+ *
+ * Idle receive state.  Looks for the frame sync in the incoming samples and,
+ * when it is found, starts collecting the header.
+ *
+ * Parameters:
+ *   sample - The newest received sample.
+ *
+ * Returns: nothing.
  */
 void processNone(q15_t sample)
 {
@@ -1447,10 +1422,17 @@ void processNone(q15_t sample)
 
 /*
  * decodeHeader()
- *   Header receive state. Collects the header samples, converts them to bits and
- *   decodes them with rxHeader(). A bad header returns the receiver to idle; a
- *   good one is passed to processHeader() unless a network call owns the
- *   transmitter. Moves to the data state once the header has been read.
+ *
+ * Header receive state.  Collects the header samples, converts them to bits
+ * and decodes them with rxHeader().  A bad header returns the receiver to
+ * idle; a good one is passed to processHeader() unless a network call owns
+ * the transmitter.  Moves to the data state once the header has been
+ * handled.
+ *
+ * Parameters:
+ *   sample - The newest received sample.
+ *
+ * Returns: nothing.
  */
 void decodeHeader(q15_t sample)
 {
@@ -1501,10 +1483,15 @@ void decodeHeader(q15_t sample)
 
 /*
  * decodeData()
- *   Data receive state. Ends the call (processEOT) on the end sync or when too
- *   many frames pass without a terminator, follows the data sync, and at each
- *   frame time converts the frame's samples to bits and passes the voice frame
- *   to processData() unless a network call owns the transmitter.
+ *
+ * Data receive state.  Ends the call (processEOT) on the end sync or when
+ * too many frames pass without a terminator, follows the data sync, and at
+ * each frame time converts the frame's samples to bits and passes the voice
+ * frame to processData() unless a network call owns the transmitter.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 void decodeData()
 {
@@ -1567,9 +1554,14 @@ void decodeData()
 
 /*
  * correlateFrameSync()
- *   Correlates the received symbols against the D-Star frame sync pattern. When
- *   a match better than the stored one is found, remembers its position. Returns
- *   true when the sync is accepted.
+ *
+ * Correlates the received symbols against the D-Star frame sync pattern.
+ * When a match better than the stored one is found, its position is
+ * remembered.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the sync is accepted, false if not.
  */
 bool correlateFrameSync()
 {
@@ -1610,9 +1602,13 @@ bool correlateFrameSync()
 
 /*
  * correlateDataSync()
- *   Correlates the received symbols against the D-Star data sync pattern that
- *   marks every 21st voice frame, and keeps the sample timing aligned to it.
- *   Returns true when the sync is accepted.
+ *
+ * Correlates the received symbols against the D-Star data sync pattern that
+ * marks every 21st voice frame, and keeps the sample timing aligned to it.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the sync is accepted, false if not.
  */
 bool correlateDataSync()
 {
@@ -1671,8 +1667,18 @@ bool correlateDataSync()
 
 /*
  * samplesToBits()
- *   Converts count samples from inBuffer, starting at start and wrapping at
- *   limit, into bits (one per symbol) written to outBuffer.
+ *
+ * Converts samples to bits, one bit per symbol, taking every
+ * DSTAR_RADIO_SYMBOL_LENGTH-th sample.
+ *
+ * Parameters:
+ *   inBuffer  - Circular sample buffer.
+ *   start     - Index of the first sample to use.
+ *   count     - Number of bits to produce.
+ *   outBuffer - Receives the bits.
+ *   limit     - Size of inBuffer; the index wraps at this value.
+ *
+ * Returns: nothing.
  */
 void samplesToBits(const q15_t* inBuffer, uint16_t start, uint16_t count, uint8_t* outBuffer, uint16_t limit)
 {
@@ -1692,8 +1698,14 @@ void samplesToBits(const q15_t* inBuffer, uint16_t start, uint16_t count, uint8_
 
 /*
  * acs()
- *   Add-compare-select step of the Viterbi decoder. Updates the path metrics and
- *   the path memory for one received symbol pair from the branch metrics.
+ *
+ * Add-compare-select step of the Viterbi decoder.  Updates the path metrics
+ * and the path memory for one received symbol pair from the branch metrics.
+ *
+ * Parameters:
+ *   metric - The 8 branch metrics for the symbol pair.
+ *
+ * Returns: nothing.
  */
 void acs(int* metric)
 {
@@ -1758,8 +1770,14 @@ void acs(int* metric)
 
 /*
  * viterbiDecode()
- *   Runs one Viterbi decoding step for a pair of received coded bits: computes
- *   the branch metrics and calls acs().
+ *
+ * Runs one Viterbi decoding step for a pair of received coded bits: works
+ * out the branch metrics and calls acs().
+ *
+ * Parameters:
+ *   data - The two received coded bits.
+ *
+ * Returns: nothing.
  */
 void viterbiDecode(int* data)
 {
@@ -1779,8 +1797,13 @@ void viterbiDecode(int* data)
 
 /*
  * traceBack()
- *   Viterbi trace back. Follows the stored paths from the end of the header to
- *   recover the decoded bits.
+ *
+ * Viterbi trace back.  Follows the stored paths from the end of the header
+ * to recover the decoded bits.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 void traceBack()
 {
@@ -1831,8 +1854,14 @@ void traceBack()
 
 /*
  * checksum()
- *   Returns true when the CRC at the end of the 41 byte header matches the rest
- *   of the header.
+ *
+ * Checks the CRC at the end of a 41 byte header against the rest of the
+ * header.
+ *
+ * Parameters:
+ *   header - The 41 byte header.
+ *
+ * Returns: true if the CRC matches, false if not.
  */
 bool checksum(const uint8_t* header)
 {
@@ -1854,9 +1883,15 @@ bool checksum(const uint8_t* header)
 
 /*
  * rxHeader()
- *   Decodes a received D-Star header: descrambles and deinterleaves in, runs the
- *   Viterbi decoder and trace back, and checks the CRC. out receives the 41 byte
- *   header. Returns true when the header is valid.
+ *
+ * Decodes a received D-Star header: descrambles and deinterleaves the input,
+ * runs the Viterbi decoder and trace back, and checks the CRC.
+ *
+ * Parameters:
+ *   in  - The received, encoded header.
+ *   out - Receives the 41 byte header.
+ *
+ * Returns: true if the header is valid, false if not.
  */
 bool rxHeader(uint8_t* in, uint8_t* out)
 {
@@ -1959,9 +1994,14 @@ extern bool dstar_parse_gps(unsigned char c,
 
 /*
  * decodeGPS()
- *   Feeds one slow data byte to the GPS sentence parser and keeps the position,
- *   altitude and call sign found in it. Returns true when a complete sentence
- *   has been decoded.
+ *
+ * Feeds one slow data byte to the GPS sentence parser, which keeps the
+ * position, altitude and call sign it finds.
+ *
+ * Parameters:
+ *   c - Slow data byte.
+ *
+ * Returns: true when a complete sentence has been decoded, false if not.
  */
 bool decodeGPS(unsigned char c)
 {
@@ -1973,10 +2013,21 @@ bool decodeGPS(unsigned char c)
 
 /*
  * slowSpeedDataDecode()
- *   Decodes the three slow data bytes a, b and c of a voice frame. Follows the
- *   slow data state across frames and collects text messages into metaText and
- *   GPS sentences into the GPS parser. Returns a status code for the slow data
- *   frame type.
+ *
+ * Decodes the three slow data bytes of a voice frame.  It follows the slow
+ * data state from frame to frame, collects text messages into metaText and
+ * passes GPS sentences to the GPS parser.
+ *
+ * Parameters:
+ *   a        - First slow data byte (still scrambled).
+ *   b        - Second slow data byte (still scrambled).
+ *   c        - Third slow data byte (still scrambled).
+ *   metaText - Receives the 20 character text message when one is complete
+ *              and has changed.
+ *
+ * Returns: 20 for the slow data sync pattern, 1 when a slow data header was
+ *   received, 2 when a GPS sentence was completed, 3 when a text message was
+ *   completed, 0 otherwise.
  */
 int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char* metaText)
 {
@@ -2077,7 +2128,7 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
                     memcpy(header + ptr, hBuffer, 5U);
                     ptr += 5U;
 
-                    if (ptr >= 45 && (hBuffer[0U] & DSTAR_SLOW_DATA_TYPE_MASK) == DSTAR_SLOW_DATA_TYPE_HEADER)
+                    if (ptr >= 45 && ucType == DSTAR_SLOW_DATA_TYPE_HEADER)
                     {
                         header[0U] &= (DSTAR_INTERRUPTED_MASK | DSTAR_URGENT_MASK | DSTAR_REPEATER_MASK);
                         header[1U] = 0x00U;
@@ -2143,202 +2194,18 @@ int slowSpeedDataDecode(unsigned char a, unsigned char b, unsigned char c, char*
 }
 
 /*
- * slowSpeedDataEncode()
- *   Builds the slow data bytes for the next voice frame from cMessage and writes
- *   them to ucBytes (three bytes). ucMode 10 restarts the frame counter.
- */
-void slowSpeedDataEncode(char* cMessage, unsigned char* ucBytes, unsigned char ucMode)
-{
-    static int iIndex;
-    static unsigned char ucFrameCount;
-
-    if (ucMode == 10)
-    {
-        ucFrameCount = 0;
-        return;
-    }
-
-    int iSyncfrm = ucFrameCount % 21;
-
-    if (ucFrameCount > 251)
-        ucFrameCount = 0;
-    else
-        ucFrameCount++;
-
-    if (iSyncfrm == 0)
-    {
-        ucBytes[0] = 0x25 ^ 0x70;
-        ucBytes[1] = 0x62 ^ 0x4f;
-        ucBytes[2] = 0x85 ^ 0x93;
-        iIndex     = 0;
-        return;
-    }
-
-    if (ucMode == 0)
-    {
-        char slowMessage[40];
-        memset(slowMessage, 0x20, 39);
-
-        if (iIndex <= 36)
-        {
-            int iSection = iIndex % 5;
-            if (iSection == 0)
-            {
-                if (iIndex == 36)
-                    ucBytes[0] = 0x51;
-                else
-                    ucBytes[0] = 0x55;
-                ucBytes[1] = (unsigned char)slowMessage[iIndex++];
-                ucBytes[2] = (unsigned char)slowMessage[iIndex++];
-            }
-            else
-            {
-                ucBytes[0] = (unsigned char)slowMessage[iIndex++];
-                ucBytes[1] = (unsigned char)slowMessage[iIndex++];
-                ucBytes[2] = (unsigned char)slowMessage[iIndex++];
-            }
-        }
-        else
-        {
-            ucBytes[0] = 0x66;
-            ucBytes[1] = 0x66;
-            ucBytes[2] = 0x66;
-        }
-    }
-
-    if (ucMode == 1)
-    {
-        if (iIndex <= 17)
-        {
-            int iSection = iIndex % 5;
-            if (iSection == 0)
-            {
-                ucBytes[0] = (unsigned char)((0x40 + iIndex / 5) ^ 0x70);
-                ucBytes[1] = (unsigned char)cMessage[iIndex++] ^ 0x4f;
-                ucBytes[2] = (unsigned char)cMessage[iIndex++] ^ 0x93;
-            }
-            else
-            {
-                ucBytes[0] = (unsigned char)cMessage[iIndex++] ^ 0x70;
-                ucBytes[1] = (unsigned char)cMessage[iIndex++] ^ 0x4f;
-                ucBytes[2] = (unsigned char)cMessage[iIndex++] ^ 0x93;
-            }
-        }
-        else
-        {
-            ucBytes[0] = 0x66 ^ 0x70;
-            ucBytes[1] = 0x66 ^ 0x4f;
-            ucBytes[2] = 0x66 ^ 0x93;
-        }
-    }
-}
-
-/*
- * initTimers()
- *   Clears the table of software timers so every slot is free.
- */
-void initTimers()
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        bzero(timer[i].name, 20);
-        timer[i].valid     = false;
-        timer[i].duration  = 0;
-        timer[i].count     = 0;
-        timer[i].enabled   = false;
-        timer[i].triggered = false;
-    }
-}
-
-/*
- * getTimer()
- *   Claims a free timer slot named name with the given duration (in timer thread
- *   ticks of 1 ms). Returns the slot index, or -1 when all slots are in use.
- */
-int8_t getTimer(const char* name, uint32_t duration)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (!timer[i].valid)
-        {
-            strcpy(timer[i].name, name);
-            timer[i].valid     = true;
-            timer[i].enabled   = true;
-            timer[i].triggered = false;
-            timer[i].count     = 0;
-            timer[i].duration  = duration;
-            pthread_mutex_unlock(&timerMutex);
-            return i;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-    return -1;
-}
-
-/*
- * isTimerTriggered()
- *   Returns true when the timer called name exists and has reached its duration.
- */
-bool isTimerTriggered(const char* name)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (timer[i].valid && timer[i].triggered && strcasecmp(timer[i].name, name) == 0)
-        {
-            pthread_mutex_unlock(&timerMutex);
-            return true;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-    return false;
-}
-
-/*
- * resetTimer()
- *   Restarts the timer called name: its count goes back to zero and its
- *   triggered flag is cleared.
- */
-void resetTimer(const char* name)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (timer[i].valid && strcasecmp(timer[i].name, name) == 0)
-        {
-            timer[i].count     = 0;
-            timer[i].triggered = false;
-            pthread_mutex_unlock(&timerMutex);
-            return;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-}
-
-/*
- * disableTimer()
- *   Frees timer slot id so it no longer counts or triggers.
- */
-void disableTimer(uint8_t id)
-{
-    pthread_mutex_lock(&timerMutex);
-    bzero(timer[id].name, 20);
-    timer[id].valid     = false;
-    timer[id].enabled   = false;
-    timer[id].triggered = false;
-    timer[id].duration  = 0;
-    timer[id].count     = 0;
-    pthread_mutex_unlock(&timerMutex);
-}
-
-/*
  * timerThread()
- *   Timer thread. Counts every enabled timer once per millisecond and sets its
- *   triggered flag when the duration is reached. Also owns the modeHang timer:
- *   while the mode is busy the timer is held at zero, and once it has been quiet
- *   for the hang time it queues a SETIDLE command to hand the modem back to
- *   idle.
+ *
+ * Timer thread.  Counts every enabled timer once per millisecond and sets
+ * its triggered flag when the duration is reached.  It also owns the
+ * modeHang timer: while the mode is busy the timer is held at zero, and once
+ * it has been quiet for the hang time a SETIDLE command is queued to hand
+ * the modem back.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
  */
 void* timerThread(void* arg)
 {
@@ -2347,35 +2214,24 @@ void* timerThread(void* arg)
     if (getTimer("modeHang", modeHang) < 0)
     {
         fprintf(stderr, "Timer thread exited.\n");
-        int iRet = 600;
-        pthread_exit(&iRet);
+        pthread_exit(NULL);
         return NULL;
     }
 
+    uint64_t lastTick = 0;      /* timers are advanced by the real time that passed, so a longer sleep loses nothing */
+
     while (connected)
     {
-        delay(1000);
+        delay(HOST_TIMER_PERIOD_US);
+        uint32_t elapsed = timerElapsedMs(&lastTick);
 
         for (uint8_t i = 0; i < 10; i++)
         {
-            pthread_mutex_lock(&timerMutex);
-            if (timer[i].valid && timer[i].enabled)
-            {
-                if (timer[i].count >= timer[i].duration)
-                {
-                    timer[i].triggered = true;
-                    timer[i].count     = 0;
-                }
-                else if (!timer[i].triggered)
-                {
-                    timer[i].count++;
-                }
-            }
-            pthread_mutex_unlock(&timerMutex);
+            timerTickN(i, elapsed);
             if (txOn && strcasecmp(timer[i].name, "modeHang") == 0)
             {
                 idle = false;
-                resetTimer("modeHang");
+                resetTimer("modeHang", 0);
             }
             else if (!txOn && strcasecmp(timer[i].name, "modeHang") == 0)
             {
@@ -2387,7 +2243,7 @@ void* timerThread(void* arg)
                         RingBuffer_addData(&rxBuffer, SETIDLE, 5);
                         pthread_mutex_unlock(&rxBufMutex);
                         idle = true;
-                        resetTimer("modeHang");
+                        resetTimer("modeHang", 0);
                         fprintf(stderr, "Sending set IDLE mode.\n");
                     }
                 }
@@ -2396,18 +2252,26 @@ void* timerThread(void* arg)
     }
 
     fprintf(stderr, "Timer thread exited.\n");
-    int iRet = 600;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
 /*
  * processHeader()
- *   Handles a received or network header. Splits out MY, UR, RPT1, RPT2 and
- *   suffix, and if RPT1 matches this station starts the call: sets the modem
- *   mode, records the call on the dashboard and queues the header for the
- *   gateway and, for duplex or network traffic, the modem. isNet marks network
- *   originated headers.
+ *
+ * Handles a header received from the radio or the network.  It splits out
+ * MY, UR, RPT1, RPT2 and the suffix and, if RPT1 matches this station,
+ * starts the call: the modem mode is set, the call is recorded on the
+ * dashboard and the header is queued for the gateway and, for duplex or
+ * network traffic, for the modem.
+ *
+ * Parameters:
+ *   data   - The header bytes.
+ *   length - Number of bytes in data.
+ *   isNet  - true if the header came from the network, false if from the
+ *            radio.
+ *
+ * Returns: nothing.
  */
 void processHeader(uint8_t* data, uint8_t length, bool isNet)
 {
@@ -2493,10 +2357,18 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet)
 
 /*
  * processData()
- *   Handles one voice data frame. Counts FEC errors for the BER, checks or
- *   generates the data sync, decodes the slow data text, refreshes the dashboard
- *   record and queues the frame for the gateway and the modem. genSync says
- *   whether this host supplies the frame sync, isNet marks network frames.
+ *
+ * Handles one voice data frame.  It counts the error bits for the BER,
+ * checks or generates the data sync, decodes the slow data text, updates the
+ * dashboard record and queues the frame for the gateway and the modem.
+ *
+ * Parameters:
+ *   data    - The voice frame.
+ *   length  - Number of bytes in data.
+ *   genSync - true if this host supplies the frame sync.
+ *   isNet   - true if the frame came from the network.
+ *
+ * Returns: nothing.
  */
 void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
 {
@@ -2563,7 +2435,7 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
 
             saveLastCall(1, modemName, "DSTAR", type, myCall, suffix, urCall, metaText, NULL, gps, true);
         }
-        resetTimer("status");
+        resetTimer("status", 0);
     }
 
     if (!validFrame && validSSHeader)
@@ -2615,7 +2487,7 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
                     else
                     {
                         pthread_mutex_lock(&rxBufMutex);
-                        RingBuffer_addData(&rxBuffer, buffer, length + 8);
+                        RingBuffer_addData(&rxBuffer, buf, 49);
                         pthread_mutex_unlock(&rxBufMutex);
                     }
                 }
@@ -2659,10 +2531,15 @@ void processData(uint8_t* data, uint8_t length, bool genSync, bool isNet)
 
 /*
  * processEOT()
- *   Ends the current call. Calculates the BER, saves the last call and the
- *   history record, sends the end of transmission to the gateway and, when
- *   needed, to the modem, and resets the call state. isNet marks network
- *   originated calls.
+ *
+ * Ends the current call.  It calculates the BER, saves the last call and the
+ * history record, sends the end of transmission to the gateway and, when
+ * needed, to the modem, and resets the call state.
+ *
+ * Parameters:
+ *   isNet - true if the call came from the network.
+ *
+ * Returns: nothing.
  */
 void processEOT(bool isNet)
 {
@@ -2822,9 +2699,17 @@ void processEOT(bool isNet)
 
 /*
  * processTx()
- *   Converts a header, voice frame or end of transmission from the gateway into
- *   the transmit symbol stream and writes it out as BITS or SAMP packets. type
- *   selects the item, m_tx is true when the transmission is already running.
+ *
+ * Converts a header, voice frame or end of transmission from the gateway
+ * into the transmit symbol stream and writes it out as BITS or SAMP packets.
+ *
+ * Parameters:
+ *   data   - The data to send.
+ *   length - Number of bytes in data.
+ *   type   - Kind of item: header, voice frame or end of transmission.
+ *   m_tx   - true if a transmission is already running.
+ *
+ * Returns: nothing.
  */
 void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_tx)
 {
@@ -2891,9 +2776,9 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
         else if (packetType == PACKET_TYPE_BIT)
         {
             if (type == DSTAR_EOT2 && symPtr >= symLen)
-                writeBits(c, true);
+                modemWriteBits(sockfd, c, true);
             else
-                writeBits(c, false);
+                modemWriteBits(sockfd, c, false);
         }
 
         if (symPtr >= symLen)
@@ -2909,20 +2794,25 @@ void processTx(uint8_t* data, const uint8_t length, const uint8_t type, bool m_t
 
 /*
  * rxThread()
- *   Thread that drains the receive ring buffer. Five byte commands are passed on
- *   to the modem host connection; headers, voice frames and end of transmission
- *   are passed to processTx() for transmission.
+ *
+ * Thread that empties the receive ring buffer.  Five byte commands are
+ * passed on to the modem host connection; headers, voice frames and end of
+ * transmission are passed to processTx() for transmission.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
  */
 void* rxThread(void* arg)
 {
-    uint8_t loop = 0;
+    bool fast = false;       /* true: look again soon (more data may be waiting) */
 
     while (connected)
     {
-        delay(100);
-        loop++;
+        delay(fast ? 100 : HOST_PACE_US);
+        fast = false;
 
-        if (loop > 10)
         {
             pthread_mutex_lock(&rxBufMutex);
             if (RingBuffer_dataSize(&rxBuffer) >= 5)
@@ -2933,6 +2823,7 @@ void* rxThread(void* arg)
                 {
                     fprintf(stderr, "RX invalid header.\n");
                     pthread_mutex_unlock(&rxBufMutex);
+                    fast = true;
                     continue;
                 }
                 uint8_t byte[3];
@@ -2946,6 +2837,7 @@ void* rxThread(void* arg)
                     {
                         pthread_mutex_unlock(&rxBufMutex);
                         delay(2000);
+                        fast = true;
                         continue;
                     }
                     uint8_t buf[len];
@@ -2954,11 +2846,12 @@ void* rxThread(void* arg)
                     {
                         if (write(sockfd, buf, len) < 0)
                         {
-                            fprintf(stderr, "ERROR: remote disconnect\n");
+                            reportError(modemName, "DSTAR", "remote disconnect");
                             pthread_mutex_unlock(&rxBufMutex);
                             break;
                         }
                         pthread_mutex_unlock(&rxBufMutex);
+                        fast = true;
                         continue;
                     }
                     uint8_t type[4];
@@ -2977,35 +2870,39 @@ void* rxThread(void* arg)
                     }
                 }
             }
-            loop = 0;
             pthread_mutex_unlock(&rxBufMutex);
         }
     }
 
     fprintf(stderr, "RX thread exited.\n");
-    int iRet         = 500;
     dstarGWConnected = false;
     connected        = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
 /*
  * txThread()
- *   Thread that sends the bytes queued for the gateway (gwTxBuffer) to the
- *   gateway socket.
+ *
+ * Thread that sends the bytes queued for the gateway (gwTxBuffer) to the
+ * gateway socket.
+ *
+ * Parameters:
+ *   arg - Socket of the gateway connection, passed as a pointer sized
+ *         integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
  */
 void* txThread(void* arg)
 {
     int     sockfd = (intptr_t)arg;
-    uint8_t loop   = 0;
+    bool fast = false;       /* true: look again soon (more data may be waiting) */
 
     while (connected && dstarGWConnected)
     {
-        delay(100);
-        loop++;
+        delay(fast ? 100 : HOST_PACE_US);
+        fast = false;
 
-        if (loop > 10)
         {
             pthread_mutex_lock(&gwTxBufMutex);
             if (RingBuffer_dataSize(&gwTxBuffer) >= 5)
@@ -3016,6 +2913,7 @@ void* txThread(void* arg)
                 {
                     fprintf(stderr, "TX invalid header.\n");
                     pthread_mutex_unlock(&gwTxBufMutex);
+                    fast = true;
                     continue;
                 }
                 uint8_t byte[3];
@@ -3033,7 +2931,7 @@ void* txThread(void* arg)
                     }
                     if (write(sockfd, buf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        reportError(modemName, "DSTAR", "remote disconnect");
                         RingBuffer_clear(&gwTxBuffer);
                         pthread_mutex_unlock(&gwTxBufMutex);
                         pthread_mutex_lock(&gwCmdMutex);
@@ -3043,7 +2941,6 @@ void* txThread(void* arg)
                     }
                 }
             }
-            loop = 0;
             pthread_mutex_unlock(&gwTxBufMutex);
         }
 
@@ -3069,7 +2966,7 @@ void* txThread(void* arg)
                     RingBuffer_getData(&gwCommand, buf, len);
                     if (write(sockfd, buf, len) < 0)
                     {
-                        fprintf(stderr, "Command ERROR: remote disconnect\n");
+                        reportError(modemName, "DSTAR", "Command remote disconnect");
                         pthread_mutex_unlock(&gwCmdMutex);
                         pthread_mutex_lock(&gwTxBufMutex);
                         RingBuffer_clear(&gwTxBuffer);
@@ -3086,19 +2983,53 @@ void* txThread(void* arg)
     }
 
     fprintf(stderr, "TX thread exited.\n");
-    int iRet         = 500;
     dstarGWConnected = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
+}
+
+/* Arrival time of the last header or voice frame from the network.  The
+ * gateway can be unlinked, or stop, without sending the end frame; the host
+ * would then stay keyed (and the dashboard in TX) for ever. */
+static uint64_t dstarNetMs = 0U;
+
+/*
+ * dstarNetEnd()
+ *
+ * Ends a network call that has no end frame, the normal way (processEOT():
+ * modem told to stop, last call and history saved, state idle).
+ *
+ * Parameters:
+ *   force - true to end the call now, false to end it only when no frame has
+ *           come from the gateway for 1.5 seconds.
+ *
+ * Returns: nothing.
+ */
+static void dstarNetEnd(bool force)
+{
+    pthread_mutex_lock(&txSourceMutex);
+    if (currentTxSource == TX_NET && (force || nowMs() - dstarNetMs > 1500U))
+    {
+        fprintf(stderr, "DSTAR: network call ended, no end frame from the gateway\n");
+        lastNetMs = 0U;
+        processEOT(true);
+    }
+    pthread_mutex_unlock(&txSourceMutex);
 }
 
 /*
  * processGatewaySocket()
- *   Thread serving the connected D-Star gateway. Registers the gateway, then
- *   reads its packets: reflector replies update the link status on the
- *   dashboard, commands are acknowledged, and headers, voice frames and end of
- *   transmission from the network are decoded as network traffic. Unregisters
- *   the gateway when the connection closes.
+ *
+ * Thread that serves the connected D-Star gateway.  It registers the gateway
+ * and then reads its packets: reflector replies update the link status on
+ * the dashboard, commands are acknowledged, and headers, voice frames and
+ * end of transmission from the network are decoded as network traffic.
+ *
+ * Parameters:
+ *   arg - Socket of the gateway connection, passed as a pointer sized
+ *         integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
  */
 void* processGatewaySocket(void* arg)
 {
@@ -3121,6 +3052,19 @@ void* processGatewaySocket(void* arg)
 
     while (dstarGWConnected)
     {
+        /* Wait for the gateway; when it is quiet, see whether a network call
+         * has gone silent (the gateway was unlinked or stopped sending). */
+        struct pollfd gwPoll = {childfd, POLLIN, 0};
+        int           gwWait = poll(&gwPoll, 1, 200);
+
+        if (gwWait == 0)
+        {
+            dstarNetEnd(false);
+            continue;
+        }
+        if (gwWait < 0 && errno == EINTR)
+            continue;
+
         int len = read(childfd, buffer, 1);
         if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
@@ -3135,7 +3079,7 @@ void* processGatewaySocket(void* arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "DSTAR_Service: error when reading from DSTAR gateway, errno=%d\n", errno);
+            reportError(modemName, "DSTAR", "DSTAR_Service: error when reading from DSTAR gateway, errno=%d", errno);
             close(childfd);
             break;
         }
@@ -3186,8 +3130,11 @@ void* processGatewaySocket(void* arg)
         uint8_t type[typeLen];
         memcpy(type, buffer + 4, typeLen);
 
+        if (typeLen == 4 && (memcmp(type, TYPE_HEADER, 4) == 0 || memcmp(type, TYPE_DATA, 4) == 0))
+            dstarNetMs = nowMs();
+
         if (debugM)
-            dump((char*)"DSTAR Gateway data:", (unsigned char*)buffer, respLen);
+            hexDump((char*)"DSTAR Gateway data:", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_NACK, typeLen) == 0)
         {
@@ -3213,6 +3160,7 @@ void* processGatewaySocket(void* arg)
         else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
         {
             dstarReflConnected = false;
+            dstarNetEnd(true);
             char tmp[10];
             bzero(tmp, 10);
             memcpy(tmp, buffer + 4 + typeLen, 7);
@@ -3256,7 +3204,7 @@ void* processGatewaySocket(void* arg)
         }
         else if (memcmp(type, TYPE_DATA, typeLen) == 0 && isActiveMode())
         {
-            uint64_t arrived = monoMs();
+            uint64_t arrived = nowMs();
             {
                 /* A long gap is either a gap in what the gateway sent (nothing waiting in the socket, the previous
                    frame handled quickly) or a stall in this thread (previous frame slow, frames queued in the socket). */
@@ -3271,7 +3219,7 @@ void* processGatewaySocket(void* arg)
                 lastNetMs = arrived;
             }
             pthread_mutex_lock(&txSourceMutex);
-            uint64_t gotLock = monoMs();
+            uint64_t gotLock = nowMs();
             if (currentTxSource == TX_RF)
             {
                 pthread_mutex_unlock(&txSourceMutex);
@@ -3281,7 +3229,7 @@ void* processGatewaySocket(void* arg)
                 processData(buffer + 8, respLen - 8, false, true);
                 pthread_mutex_unlock(&txSourceMutex);
             }
-            netHandleMs = monoMs() - arrived;
+            netHandleMs = nowMs() - arrived;
             if (netHandleMs > 100U)
                 fprintf(stderr, "NET: handling one voice frame took %u ms (%u ms of it waiting for the TX lock)\n",
                         (unsigned int)netHandleMs, (unsigned int)(gotLock - arrived));
@@ -3303,6 +3251,7 @@ void* processGatewaySocket(void* arg)
     }
 
     fprintf(stderr, "Gateway disconnected.\n");
+    dstarNetEnd(true);
     dstarGWConnected   = false;
     dstarReflConnected = false;
     setReflectorStatus(modemName, "DSTAR", (const char*)linkedReflector, false);
@@ -3320,16 +3269,21 @@ void* processGatewaySocket(void* arg)
     RingBuffer_clear(&rxBuffer);
     pthread_mutex_unlock(&rxBufMutex);
 
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
 /*
  * startTCPServer()
- *   Thread that listens for the D-Star gateway on the server port. For each
- *   accepted connection it starts txThread() to send data to the gateway and
- *   processGatewaySocket() to read from it.
+ *
+ * Thread that listens for the D-Star gateway on the server port.  For each
+ * accepted connection it starts txThread() to send data to the gateway and
+ * processGatewaySocket() to read from it.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
  */
 void* startTCPServer(void* arg)
 {
@@ -3342,7 +3296,7 @@ void* startTCPServer(void* arg)
     setNoDelay(sockFd);
     if (sockFd < 0)
     {
-        fprintf(stderr, "DSTAR_Service: error when creating the socket: %s\n", strerror(errno));
+        reportError(modemName, "DSTAR", "DSTAR_Service: error when creating the socket: %s", strerror(errno));
         exit(1);
     }
 
@@ -3359,7 +3313,7 @@ void* startTCPServer(void* arg)
 
     if (bind(sockFd, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) < 0)
     {
-        fprintf(stderr, "DSTAR_Service: error when binding the socket to port %u: %s\n", serverPort, strerror(errno));
+        reportError(modemName, "DSTAR", "DSTAR_Service: error when binding the socket to port %u: %s", serverPort, strerror(errno));
         exit(1);
     }
 
@@ -3384,34 +3338,33 @@ void* startTCPServer(void* arg)
             setNoDelay(childfd);
         if (childfd < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
-            perror("accept failed");
+            reportError(modemName, "DSTAR", "accept failed: %s", strerror(errno));
             break;
         }
 
         if (childfd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
 
-        hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
-        if (hostp == NULL)
-        {
-            error((char*)"ERROR on gethostbyaddr");
-            break;
-        }
-
         hostaddrp = inet_ntoa(clientaddr.sin_addr);
         if (hostaddrp == NULL)
         {
-            error((char*)"ERROR on inet_ntoa\n");
-            break;
+            reportError(modemName, "DSTAR", "Can't get the address of the client.");
+            close(childfd);
+            continue;
         }
 
         if (debugM)
-            fprintf(stderr, "Server established connection with %s (%s)\n", hostp->h_name, hostaddrp);
+        {
+            /* The name is only logged, so a client with no reverse DNS entry is still accepted */
+            hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
+            fprintf(stderr, "Server established connection with %s (%s)\n",
+                    hostp != NULL ? hostp->h_name : "unknown", hostaddrp);
+        }
 
         pthread_t procid;
         int err = pthread_create(&(procid), NULL, &processGatewaySocket, (void*)(intptr_t)childfd);
         if (err != 0)
         {
-            fprintf(stderr, "Can't create gateway process thread :[%s]", strerror(err));
+            reportError(modemName, "DSTAR", "Can't create gateway process thread :[%s]", strerror(err));
             continue;
         }
         else
@@ -3424,23 +3377,28 @@ void* startTCPServer(void* arg)
         pthread_t txid;
         err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)childfd);
         if (err != 0)
-            fprintf(stderr, "Can't create tx thread :[%s]", strerror(err));
+            reportError(modemName, "DSTAR", "Can't create tx thread :[%s]", strerror(err));
         else
         {
             if (debugM) fprintf(stderr, "TX thread created successfully\n");
         }
         delay(1000);
     }
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
 /*
  * startClient()
- *   Thread that connects to the modem host socket at the address in arg, starts
- *   the receive thread, sends the mode and radio configuration packet to the
- *   modem host and then processes the packets it returns.
+ *
+ * Thread that connects to the modem host socket, starts the receive thread,
+ * sends the mode and radio configuration packet to the modem host and then
+ * processes the packets it returns.
+ *
+ * Parameters:
+ *   arg - Address of the modem host, as a text string.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
  */
 void* startClient(void* arg)
 {
@@ -3450,14 +3408,14 @@ void* startClient(void* arg)
     strcpy(hostAddress, (char*)arg);
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "DSTAR", "Socket creation error: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags == -1)
     {
-        perror("fcntl F_GETFL");
+        reportError(modemName, "DSTAR", "fcntl F_GETFL: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -3467,9 +3425,9 @@ void* startClient(void* arg)
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port   = htons(clientPort);
 
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(hostAddress, &serv_addr.sin_addr))
     {
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "DSTAR", "Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
 
@@ -3478,7 +3436,7 @@ void* startClient(void* arg)
     {
         if (errno != EINPROGRESS)
         {
-            perror("connection failed");
+            reportError(modemName, "DSTAR", "connection failed: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
     }
@@ -3486,7 +3444,7 @@ void* startClient(void* arg)
     pthread_t rxid;
     int err = pthread_create(&(rxid), NULL, &rxThread, NULL);
     if (err != 0)
-        fprintf(stderr, "Can't create rx thread :[%s]", strerror(err));
+        reportError(modemName, "DSTAR", "Can't create rx thread :[%s]", strerror(err));
     else
     {
         if (debugM) fprintf(stderr, "RX thread created successfully\n");
@@ -3538,7 +3496,7 @@ void* startClient(void* arg)
     buffer[82] = 0x8a;
     buffer[83] = 0x01;
     write(sockfd, buffer, configLen);
-    dump((char*)"MODE", buffer, configLen);
+    hexDump((char*)"MODE", buffer, configLen);
     sleep(1);
 
     while (connected)
@@ -3601,7 +3559,7 @@ void* startClient(void* arg)
         memcpy(type, buffer + 4, typeLen);
 
         if (debugM)
-            dump((char*)"DSTAR host data:", (unsigned char*)buffer, respLen);
+            hexDump((char*)"DSTAR host data:", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -3702,18 +3660,24 @@ void* startClient(void* arg)
     fprintf(stderr, "Disconnected from host.\n");
     close(sockfd);
     connected = false;
-    int iRet  = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
 /*
  * main()
- *   Program entry. Parses the command line (-m modem number 1-10, which also
- *   selects the TCP ports, -d daemon, -v version, -x debug), reads the modem and
- *   radio configuration, initialises the ring buffers, filters and timers, then
- *   starts the modem host client, gateway server and timer threads and waits for
- *   them.
+ *
+ * Program entry.  Parses the command line (-m modem number 1 to 10, which
+ * also selects the TCP ports; -d daemon; -v version; -x debug), reads the
+ * modem and radio configuration, initialises the ring buffers, filters and
+ * timers, then starts the modem host client, the gateway server and the
+ * timer thread, and waits until the program is told to stop.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on exit.
  */
 int main(int argc, char** argv)
 {
@@ -3721,7 +3685,7 @@ int main(int argc, char** argv)
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -3730,7 +3694,7 @@ int main(int argc, char** argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "DSTAR", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -3739,8 +3703,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
                 break;
+            case 'a':
+                snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -3752,7 +3719,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: DSTAR_Service [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: DSTAR_Service [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -3763,7 +3730,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "DSTAR_Service: error in fork(), exiting\n");
+            reportError(modemName, "DSTAR", "DSTAR_Service: error in fork(), exiting");
             return 1;
         }
 
@@ -3879,7 +3846,7 @@ int main(int argc, char** argv)
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create modem host thread :[%s]", strerror(err));
+        reportError(modemName, "DSTAR", "Can't create modem host thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -3890,7 +3857,7 @@ int main(int argc, char** argv)
     err = pthread_create(&(gwHostid), NULL, &startTCPServer, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create gateway host thread :[%s]", strerror(err));
+        reportError(modemName, "DSTAR", "Can't create gateway host thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -3901,7 +3868,7 @@ int main(int argc, char** argv)
     err = pthread_create(&(timerid), NULL, &timerThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create timer thread :[%s]", strerror(err));
+        reportError(modemName, "DSTAR", "Can't create timer thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -3946,7 +3913,7 @@ int main(int argc, char** argv)
                 readDashbCommand(modemName, "reflLinkDSTAR", parameter);
                 if (strlen(parameter) == 0)
                 {
-                    resetTimer("dbComm");
+                    resetTimer("dbComm", 0);
                     continue;
                 }
                 if (strcasecmp(parameter, "unlink") == 0)
@@ -3961,7 +3928,7 @@ int main(int argc, char** argv)
                     RingBuffer_addData(&gwCommand, buf, 8);
                     pthread_mutex_unlock(&gwCmdMutex);
                     sleep(3);
-                    resetTimer("dbComm");
+                    resetTimer("dbComm", 0);
                     continue;
                 }
                 else if (!dstarReflConnected)
@@ -4016,7 +3983,7 @@ int main(int argc, char** argv)
                     ackDashbCommand(modemName, "reflLinkDSTAR", "No gateway");
                 }
             }
-            resetTimer("dbComm");
+            resetTimer("dbComm", 0);
         }
         delay(500000);
     }

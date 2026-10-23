@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -18,14 +19,14 @@
  * Scenario tests of the YSF control: RF to network, late entry, access
  * control, network to RF, the network watchdog and signal loss.
  *
- *   gcc -I.. -I../.. ysf_test.c ../ysf_func.c ../../dsp_tools.c -lm -o ysf_test
+ *   gcc -I.. -I../.. ysf_test.c ../ysf_func.c ../../fec_tools.c -lm -o ysf_test
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <dsp_tools.h>
+#include <fec_tools.h>
 
 #include "ysf_func.h"
 
@@ -47,6 +48,18 @@ typedef struct
     int nEv;
 } Sink;
 
+/*
+ * onNet()
+ *
+ * Control callback: stores each frame that would go to the network.
+ *
+ * Parameters:
+ *   ctx  - The result structure (Sink).
+ *   body - The body of the frame.
+ *   end  - true for the last frame of the call.
+ *
+ * Returns: nothing.
+ */
 static void onNet(void* ctx, const uint8_t* body, bool end)
 {
     Sink* s = (Sink*)ctx;
@@ -54,6 +67,18 @@ static void onNet(void* ctx, const uint8_t* body, bool end)
     if (end) s->netEnd++;
 }
 
+/*
+ * onRf()
+ *
+ * Control callback: stores each frame that would be transmitted.
+ *
+ * Parameters:
+ *   ctx   - The result structure (Sink).
+ *   frame - The frame.
+ *   eot   - true for the last frame.
+ *
+ * Returns: nothing.
+ */
 static void onRf(void* ctx, const uint8_t* frame, bool eot)
 {
     Sink* s = (Sink*)ctx;
@@ -61,12 +86,36 @@ static void onRf(void* ctx, const uint8_t* frame, bool eot)
     if (eot) s->rfEot++;
 }
 
+/*
+ * onEvent()
+ *
+ * Control callback: stores each call event.
+ *
+ * Parameters:
+ *   ctx - The result structure (Sink).
+ *   c   - The call event.
+ *
+ * Returns: nothing.
+ */
 static void onEvent(void* ctx, const YsfCall* c)
 {
     Sink* s = (Sink*)ctx;
     s->ev[s->nEv++] = *c;
 }
 
+/*
+ * setup()
+ *
+ * Prepares a control for a test: clears the results, sets the callsign and
+ * the callbacks, and turns local repeat off.
+ *
+ * Parameters:
+ *   c    - The control.
+ *   s    - The results.
+ *   call - The callsign of the gateway.
+ *
+ * Returns: nothing.
+ */
 static void setup(YsfCtrl* c, Sink* s, const char* call)
 {
     memset(s, 0, sizeof(*s));
@@ -79,13 +128,39 @@ static void setup(YsfCtrl* c, Sink* s, const char* call)
     c->localRepeat = false;
 }
 
+/*
+ * pad()
+ *
+ * Copies a callsign into a 10 byte field, padded with spaces.
+ *
+ * Parameters:
+ *   d - The field.
+ *   s - The callsign as a string.
+ *
+ * Returns: nothing.
+ */
 static void pad(uint8_t* d, const char* s)
 {
     memset(d, ' ', 10);
     memcpy(d, s, strlen(s));
 }
 
-/* header / terminator frame */
+/*
+ * mkHeader()
+ *
+ * Makes a header or terminator frame with the callsigns in the first half of
+ * the header.
+ *
+ * Parameters:
+ *   f    - Receives the frame.
+ *   fi   - The frame information, YSF_FI_HEADER or YSF_FI_TERMINATOR.
+ *   cm   - The call mode.
+ *   dt   - The data type.
+ *   dest - The destination callsign.
+ *   src  - The source callsign.
+ *
+ * Returns: nothing.
+ */
 static void mkHeader(uint8_t* f, uint8_t fi, uint8_t cm, uint8_t dt, const char* dest, const char* src)
 {
     uint8_t csd1[20], csd2[20];
@@ -107,7 +182,18 @@ static void mkHeader(uint8_t* f, uint8_t fi, uint8_t cm, uint8_t dt, const char*
     ysfPayloadWriteHeader(f, csd1, csd2);
 }
 
-/* V/D mode 2 data channel: 10 bytes, same code as the payload code uses */
+/*
+ * mkShort()
+ *
+ * The V/D mode 2 data channel: 10 bytes, with the same code as the payload
+ * code uses.
+ *
+ * Parameters:
+ *   frame - The frame that receives the channel.
+ *   ten   - The 10 bytes.
+ *
+ * Returns: nothing.
+ */
 static void mkShort(uint8_t* frame, const uint8_t* ten)
 {
     uint8_t out[13] = {0}, conv[25], bytes[25];
@@ -131,7 +217,22 @@ static void mkShort(uint8_t* frame, const uint8_t* ten)
     for (int i = 0; i < 5; i++) memcpy(frame + 30 + i * 18, bytes + i * 5, 5);
 }
 
-/* A V/D mode 2 frame carrying the callsign for frame number fn */
+/*
+ * mkVd2()
+ *
+ * Makes a V/D mode 2 frame that carries the callsign for its frame number
+ * (the destination in frame 0, the source in frame 1), with every voice bit
+ * sent three times, so the vote finds no errors.
+ *
+ * Parameters:
+ *   f    - Receives the frame.
+ *   fn   - The frame number.
+ *   cm   - The call mode.
+ *   dest - The destination callsign.
+ *   src  - The source callsign.
+ *
+ * Returns: nothing.
+ */
 static void mkVd2(uint8_t* f, uint8_t fn, uint8_t cm, const char* dest, const char* src)
 {
     YsfFich h;
@@ -175,6 +276,21 @@ static void mkVd2(uint8_t* f, uint8_t fn, uint8_t cm, const char* dest, const ch
     }
 }
 
+/*
+ * rfCall()
+ *
+ * Feeds a call from RF to the control: optionally a header first and a
+ * terminator last, and the voice frames between.
+ *
+ * Parameters:
+ *   c       - The control.
+ *   dest    - The destination callsign.
+ *   src     - The source callsign.
+ *   nFrames - Number of voice frames.
+ *   header  - true to send the header and the terminator.
+ *
+ * Returns: nothing.
+ */
 static void rfCall(YsfCtrl* c, const char* dest, const char* src, int nFrames, bool header)
 {
     uint8_t f[YSF_FRAME_LENGTH_BYTES];
@@ -196,6 +312,16 @@ static void rfCall(YsfCtrl* c, const char* dest, const char* src, int nFrames, b
     }
 }
 
+/*
+ * testRfToNet()
+ *
+ * Tests a call from RF: the frames, end flag, events, callsigns, counters,
+ * duration, and that every frame has the sync word and a valid FICH.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testRfToNet(void)
 {
     YsfCtrl c;
@@ -223,6 +349,16 @@ static void testRfToNet(void)
     }
 }
 
+/*
+ * testLocalRepeat()
+ *
+ * Tests local repeat: the frames go to the transmitter with the routing and
+ * deviation flags set.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testLocalRepeat(void)
 {
     YsfCtrl c;
@@ -240,6 +376,16 @@ static void testLocalRepeat(void)
     CHECK(ysfFichGetMR(&f) == YSF_MR_BUSY && ysfFichGetDev(&f), "MR %u dev %d", ysfFichGetMR(&f), ysfFichGetDev(&f));
 }
 
+/*
+ * testSelfOnly()
+ *
+ * Tests that with only the own callsign allowed another callsign is refused
+ * and the own one passes.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testSelfOnly(void)
 {
     YsfCtrl c;
@@ -259,6 +405,16 @@ static void testSelfOnly(void)
     CHECK(s.nNet == 7, "own call passes, got %d", s.nNet);
 }
 
+/*
+ * testLateEntry()
+ *
+ * Tests that a call that starts in the middle waits for both callsigns, then
+ * starts with a made up header, and that the loss of the signal is reported.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testLateEntry(void)
 {
     YsfCtrl c;
@@ -287,6 +443,16 @@ static void testLateEntry(void)
     CHECK(c.rfState == YSF_RF_LISTENING, "ready again");
 }
 
+/*
+ * testNetToRf()
+ *
+ * Tests a call from the network: frames to the transmitter, one terminator,
+ * events, callsigns, and the routing flag.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testNetToRf(void)
 {
     YsfCtrl a, b;
@@ -317,6 +483,17 @@ static void testNetToRf(void)
     CHECK(ysfFichGetMR(&f) == YSF_MR_BUSY, "MR busy for a hotspot");
 }
 
+/*
+ * testWatchdog()
+ *
+ * Tests that a network call ends when the packets stop, that a duplicate
+ * frame is dropped, and that the network is blocked while an RF call is
+ * going on.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void testWatchdog(void)
 {
     YsfCtrl c;
@@ -352,6 +529,15 @@ static void testWatchdog(void)
     CHECK(s.nRf == 0, "network blocked while RF is active");
 }
 
+/*
+ * main()
+ *
+ * Runs the tests.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 if all tests pass, 1 if any failed.
+ */
 int main(void)
 {
     srand(5);

@@ -135,122 +135,31 @@ static uint16_t callSrc     = 0;
 static uint16_t callDst     = 0;
 
 /*
- * logMsg()
- *   Prints a time stamped status line to standard output.
- */
-static void logMsg(const char* fmt, ...)
-{
-    char stamp[32];
-    time_t t = time(NULL);
-    struct tm tmv;
-    va_list ap;
-
-    localtime_r(&t, &tmv);
-    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
-
-    printf("%s ", stamp);
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    va_end(ap);
-    printf("\n");
-    fflush(stdout);
-}
-
-/*
  * error()
- *   Wrapper for perror that ends the program.
+ *
+ * Wrapper for perror that ends the program.
+ *
+ * Parameters:
+ *   msg - Text printed in front of the system error message.
+ *
+ * Returns: nothing.
  */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "NXDN gateway", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
 /*
- * delay()
- *   Sleeps for the given number of microseconds.
- */
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-}
-
-/*
- * nowMs()
- *   Monotonic time in milliseconds.
- */
-static uint64_t nowMs(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)(ts.tv_nsec / 1000000L);
-}
-
-/*
- * dump()
- *   Debug helper. Prints text and a millisecond timestamp, then a hex and ASCII
- *   dump of length bytes of data, 16 bytes per line.
- */
-void dump(const char* text, const uint8_t* data, unsigned int length)
-{
-    struct timespec ts;
-    uint64_t milliseconds;
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("clock_gettime");
-        return;
-    }
-
-    milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-
-    fprintf(stdout, "%s: %llu (ms)\n", text, (unsigned long long)milliseconds);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++)
-            fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++)
-            fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            uint8_t c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-
-    fflush(stdout);
-}
-
-/*
  * hostSend()
- *   Writes one packet to nxdn_host. Safe to call from both threads.
+ *
+ * Writes one packet to nxdn_host. Safe to call from both threads.
+ *
+ * Parameters:
+ *   buf - The packet.
+ *   len - Number of bytes in buf.
+ *
+ * Returns: nothing.
  */
 static void hostSend(const uint8_t* buf, uint16_t len)
 {
@@ -259,10 +168,10 @@ static void hostSend(const uint8_t* buf, uint16_t len)
     if (hostFd >= 0)
     {
         if (debugM)
-            dump("To NXDN host", buf, len);
+            hexDump("To NXDN host", buf, len);
 
         if (write(hostFd, buf, len) < 0)
-            fprintf(stderr, "NXDN_Gateway: write to NXDN host failed: %s\n", strerror(errno));
+            reportError(modemName, "NXDN gateway", "NXDN_Gateway: write to NXDN host failed: %s", strerror(errno));
     }
 
     pthread_mutex_unlock(&hostMutex);
@@ -270,7 +179,14 @@ static void hostSend(const uint8_t* buf, uint16_t len)
 
 /*
  * hostReply()
- *   Sends a link status packet (CONN, NACK or DISC) with the reflector name.
+ *
+ * Sends a link status packet (CONN, NACK or DISC) with the reflector name.
+ *
+ * Parameters:
+ *   type - Four character packet type: CONN, NACK or DISC.
+ *   name - Name of the reflector.
+ *
+ * Returns: nothing.
  */
 static void hostReply(const char* type, const char* name)
 {
@@ -289,8 +205,15 @@ static void hostReply(const char* type, const char* name)
 
 /*
  * loadCallsign()
- *   Reads the station callsign for the reflector polls from the host
- *   configuration and pads it to 10 characters.
+ *
+ * Reads the station callsign for the reflector polls from the host
+ * configuration and pads it to 10 characters.
+ *
+ * Parameters:
+ *   fallback - Callsign to use when none is configured (may be NULL); N0CALL
+ *              is used if there is still none.
+ *
+ * Returns: nothing.
  */
 static void loadCallsign(const char* fallback)
 {
@@ -311,32 +234,19 @@ static void loadCallsign(const char* fallback)
 }
 
 /*
- * resolveAddress()
- *   Fills addr with an IPv4 address given as dotted decimal or a host name.
- */
-static bool resolveAddress(const char* host, uint16_t port, struct sockaddr_in* addr)
-{
-    struct hostent* server;
-
-    memset(addr, 0x00, sizeof(*addr));
-    addr->sin_family = AF_INET;
-    addr->sin_port   = htons(port);
-
-    if (inet_pton(AF_INET, host, &addr->sin_addr) == 1)
-        return true;
-
-    server = gethostbyname(host);
-    if (server == NULL || server->h_addrtype != AF_INET)
-        return false;
-
-    memcpy(&addr->sin_addr, server->h_addr_list[0], sizeof(addr->sin_addr));
-    return true;
-}
-
-/*
  * findInHostsFile()
- *   Looks reflector 'id' up in an NXDNHosts.txt file ("id address port" per
- *   line, # starts a comment).
+ *
+ * Looks reflector 'id' up in an NXDNHosts.txt file ("id address port" per
+ * line, # starts a comment).
+ *
+ * Parameters:
+ *   path    - Path of the hosts file.
+ *   id      - Reflector id to find.
+ *   address - Receives the reflector's address (up to 54 characters).
+ *   port    - Receives the reflector's port.
+ *
+ * Returns: true if the reflector was found, false if the file could not be
+ *   opened or the id is not in it.
  */
 static bool findInHostsFile(const char* path, unsigned int id, char* address, uint16_t* port)
 {
@@ -374,9 +284,17 @@ static bool findInHostsFile(const char* path, unsigned int id, char* address, ui
 
 /*
  * lookupReflector()
- *   Finds a reflector by name. The dashboard database is tried first, then the
- *   hosts file (NXDN/hostsFile in the host configuration, then NXDNHosts.txt in
- *   the working directory and the OpenMT install directory).
+ *
+ * Finds a reflector by name. The dashboard database is tried first, then the
+ * hosts file (NXDN/hostsFile in the host configuration, then NXDNHosts.txt
+ * in the working directory and the OpenMT install directory).
+ *
+ * Parameters:
+ *   name - Reflector name; it is a number, which is also used as the id in
+ *          the hosts files.
+ *   addr - Receives the address and port of the reflector.
+ *
+ * Returns: true if the reflector was found, false if not.
  */
 static bool lookupReflector(const char* name, struct sockaddr_in* addr)
 {
@@ -407,7 +325,16 @@ static bool lookupReflector(const char* name, struct sockaddr_in* addr)
 
 /*
  * reflWritePoll()
- *   Sends a poll or an unlink to the reflector. 'kind' is 'P' or 'U'.
+ *
+ * Sends a poll or an unlink to the reflector. 'kind' is 'P' or 'U'.
+ *
+ * Parameters:
+ *   fd   - UDP socket to the reflector.
+ *   addr - Address of the reflector.
+ *   kind - 'P' for a poll or 'U' for an unlink.
+ *   tg   - Talk group that is linked.
+ *
+ * Returns: nothing.
  */
 static void reflWritePoll(int fd, const struct sockaddr_in* addr, char kind, uint16_t tg)
 {
@@ -420,17 +347,24 @@ static void reflWritePoll(int fd, const struct sockaddr_in* addr, char kind, uin
     data[16] = (tg >> 0) & 0xFFU;
 
     if (debugM)
-        dump(kind == 'P' ? "NXDN poll sent" : "NXDN unlink sent", data, sizeof(data));
+        hexDump(kind == 'P' ? "NXDN poll sent" : "NXDN unlink sent", data, sizeof(data));
 
     sendto(fd, data, sizeof(data), 0, (const struct sockaddr*)addr, sizeof(*addr));
 }
 
 /*
  * isGroupOption()
- *   The call type is the top three bits of the option byte of the layer 3
- *   message.  Conference (1) is a talk group call; some radios send 0 (broadcast)
- *   for the same thing, and nxdn_host treats both as a talk group.  Individual
- *   calls are 4 and above.
+ *
+ * The call type is the top three bits of the option byte of the layer 3
+ * message.  Conference (1) is a talk group call; some radios send 0
+ * (broadcast) for the same thing, and nxdn_host treats both as a talk group.
+ * Individual calls are 4 and above.
+ *
+ * Parameters:
+ *   option - Option byte of the layer 3 message.
+ *
+ * Returns: true for a talk group call (call type 0 or 1), false for an
+ *   individual call.
  */
 static bool isGroupOption(uint8_t option)
 {
@@ -439,9 +373,15 @@ static bool isGroupOption(uint8_t option)
 
 /*
  * trackCall()
- *   Follows the call information in the frames from the radio so that the
- *   reflector packets can carry the source, destination and group flag. The
- *   rules are those of NXDNGateway.
+ *
+ * Follows the call information in the frames from the radio so that the
+ * reflector packets can carry the source, destination and group flag. The
+ * rules are those of NXDNGateway.
+ *
+ * Parameters:
+ *   d - The frame from the radio.
+ *
+ * Returns: nothing.
  */
 static void trackCall(const uint8_t* d)
 {
@@ -461,7 +401,13 @@ static void trackCall(const uint8_t* d)
 
 /*
  * reflectorFlags()
- *   The flag byte of an NXDND packet for the frame d.
+ *
+ * The flag byte of an NXDND packet for the frame d.
+ *
+ * Parameters:
+ *   d - The frame from the radio.
+ *
+ * Returns: The flag byte (group, start, end and data bits).
  */
 static uint8_t reflectorFlags(const uint8_t* d)
 {
@@ -492,10 +438,16 @@ static uint8_t reflectorFlags(const uint8_t* d)
 
 /*
  * sendToReflector()
- *   Sends one frame from the radio to the linked reflector. The destination in
- *   the packet header is the linked talk group so that the call is accepted by
- *   the other gateways on that reflector; the call information inside the
- *   frame is left alone.
+ *
+ * Sends one frame from the radio to the linked reflector. The destination in
+ * the packet header is the linked talk group so that the call is accepted by
+ * the other gateways on that reflector; the call information inside the
+ * frame is left alone.
+ *
+ * Parameters:
+ *   netData - The frame from the radio.
+ *
+ * Returns: nothing.
  */
 static void sendToReflector(const uint8_t* netData)
 {
@@ -533,14 +485,20 @@ static void sendToReflector(const uint8_t* netData)
     pthread_mutex_unlock(&reflMutex);
 
     if (debugM)
-        dump("NXDN data sent", buffer, sizeof(buffer));
+        hexDump("NXDN data sent", buffer, sizeof(buffer));
 
     sendto(fd, buffer, sizeof(buffer), 0, (struct sockaddr*)&addr, sizeof(addr));
 }
 
 /*
  * sendToHost()
- *   Passes one NXDND packet from the reflector on to nxdn_host.
+ *
+ * Passes one NXDND packet from the reflector on to nxdn_host.
+ *
+ * Parameters:
+ *   packet - The NXDND packet from the reflector.
+ *
+ * Returns: nothing.
  */
 static void sendToHost(const uint8_t* packet)
 {
@@ -581,9 +539,15 @@ static void sendToHost(const uint8_t* packet)
 
 /*
  * reflectorThread()
- *   Links to the reflector in reflAddr, polls it every five seconds and passes
- *   its group calls to nxdn_host until the link is stopped, lost or the host
- *   goes away.
+ *
+ * Links to the reflector in reflAddr, polls it every five seconds and passes
+ * its group calls to nxdn_host until the link is stopped, lost or the host
+ * goes away.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL.
  */
 void* reflectorThread(void* arg)
 {
@@ -635,7 +599,7 @@ void* reflectorThread(void* arg)
             if (n == (ssize_t)NXDN_REFL_POLL_LENGTH && memcmp(buf, "NXDNP", 5) == 0)
             {
                 if (debugM)
-                    dump("NXDN poll received", buf, (unsigned int)n);
+                    hexDump("NXDN poll received", buf, (unsigned int)n);
 
                 lastRx = now;
 
@@ -657,7 +621,7 @@ void* reflectorThread(void* arg)
                 bool grp     = (buf[9] & NXDN_FLAG_GROUP) != 0U;
 
                 if (debugM)
-                    dump("NXDN data received", buf, (unsigned int)n);
+                    hexDump("NXDN data received", buf, (unsigned int)n);
 
                 lastRx = now;
 
@@ -730,8 +694,13 @@ void* reflectorThread(void* arg)
 
 /*
  * stopLink()
- *   Asks the reflector thread to unlink and waits (up to two seconds) for it
- *   to finish.
+ *
+ * Asks the reflector thread to unlink and waits (up to two seconds) for it
+ * to finish.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void stopLink(void)
 {
@@ -757,9 +726,17 @@ static void stopLink(void)
 }
 
 /*
- * startLink()
- *   Looks the reflector up, opens the UDP socket and starts reflectorThread().
- *   Replies NACK to the host if the reflector is unknown.
+ * startLinkLocked()
+ *
+ * Looks the reflector up, opens the UDP socket and starts reflectorThread().
+ * A NACK is sent to the host if the reflector is unknown.  The caller holds
+ * linkOpMutex.
+ *
+ * Parameters:
+ *   hostCallsign - Callsign of the station, for the polls.
+ *   name         - Name of the reflector to link to.
+ *
+ * Returns: nothing.
  */
 static void startLinkLocked(const char* hostCallsign, const char* name)
 {
@@ -786,7 +763,7 @@ static void startLinkLocked(const char* hostCallsign, const char* name)
     fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0)
     {
-        fprintf(stderr, "Cannot open the reflector socket: %s\n", strerror(errno));
+        reportError(modemName, "NXDN gateway", "Cannot open the reflector socket: %s", strerror(errno));
         hostReply("NACK", cleanName);
         return;
     }
@@ -810,7 +787,7 @@ static void startLinkLocked(const char* hostCallsign, const char* name)
         local.sin_port        = htons(port);
 
         if (bind(fd, (struct sockaddr*)&local, sizeof(local)) < 0)
-            fprintf(stderr, "Cannot bind UDP port %u (%s), using any port.\n", port, strerror(errno));
+            reportError(modemName, "NXDN gateway", "Cannot bind UDP port %u (%s), using any port.", port, strerror(errno));
     }
 
     timeout.tv_sec  = 0;
@@ -839,7 +816,7 @@ static void startLinkLocked(const char* hostCallsign, const char* name)
     }
     else
     {
-        fprintf(stderr, "Can't create NXDN reflector thread\n");
+        reportError(modemName, "NXDN gateway", "Can't create NXDN reflector thread");
         pthread_mutex_lock(&reflMutex);
         reflRunning = false;
         linkState   = LINK_IDLE;
@@ -853,8 +830,16 @@ static void startLinkLocked(const char* hostCallsign, const char* name)
 
 /*
  * startLink()
- *   Links to a reflector. 'automatic' marks a link made from the radio, which
- *   is dropped again after the hang time.
+ *
+ * Links to a reflector. 'automatic' marks a link made from the radio, which
+ * is dropped again after the hang time.
+ *
+ * Parameters:
+ *   hostCallsign - Callsign of the station, for the polls.
+ *   name         - Name of the reflector to link to.
+ *   automatic    - true if the link was made from the radio.
+ *
+ * Returns: nothing.
  */
 static void startLink(const char* hostCallsign, const char* name, bool automatic)
 {
@@ -866,7 +851,12 @@ static void startLink(const char* hostCallsign, const char* name, bool automatic
 
 /*
  * dropLink()
- *   Unlinks from the current reflector.
+ *
+ * Unlinks from the current reflector.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void dropLink(void)
 {
@@ -878,7 +868,12 @@ static void dropLink(void)
 
 /*
  * loadLinkConfig()
- *   Reads NXDN/staticTG and NXDN/hangTime from the host configuration.
+ *
+ * Reads NXDN/staticTG and NXDN/hangTime from the host configuration.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void loadLinkConfig(void)
 {
@@ -895,7 +890,12 @@ static void loadLinkConfig(void)
 
 /*
  * linkStatic()
- *   Links to the static talk group, if one is configured.
+ *
+ * Links to the static talk group, if one is configured.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void linkStatic(void)
 {
@@ -911,9 +911,15 @@ static void linkStatic(void)
 
 /*
  * rfLinkCheck()
- *   Same rule as NXDNGateway: a group call header or trailer from the radio
- *   to a talk group other than the linked one links to that talk group (and
- *   unlinks the old one). A talk group with no reflector just unlinks.
+ *
+ * Same rule as NXDNGateway: a group call header or trailer from the radio to
+ * a talk group other than the linked one links to that talk group (and
+ * unlinks the old one). A talk group with no reflector just unlinks.
+ *
+ * Parameters:
+ *   d - The frame from the radio.
+ *
+ * Returns: nothing.
  */
 static void rfLinkCheck(const uint8_t* d)
 {
@@ -957,9 +963,14 @@ static void rfLinkCheck(const uint8_t* d)
 
 /*
  * hangCheck()
- *   Drops a link that was made from the radio when nothing has been heard in
- *   either direction for the hang time, then goes back to the static talk
- *   group.
+ *
+ * Drops a link that was made from the radio when nothing has been heard in
+ * either direction for the hang time, then goes back to the static talk
+ * group.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void hangCheck(void)
 {
@@ -982,7 +993,15 @@ static void hangCheck(void)
 
 /*
  * readFull()
- *   Reads exactly len bytes from fd. Returns false when the connection closed.
+ *
+ * Reads exactly len bytes from fd. Returns false when the connection closed.
+ *
+ * Parameters:
+ *   fd  - Socket to read from.
+ *   buf - Receives the bytes.
+ *   len - Number of bytes to read.
+ *
+ * Returns: true if all the bytes were read, false if the connection closed.
  */
 static bool readFull(int fd, uint8_t* buf, size_t len)
 {
@@ -1007,7 +1026,14 @@ static bool readFull(int fd, uint8_t* buf, size_t len)
 
 /*
  * handleHostPacket()
- *   One complete packet from nxdn_host.
+ *
+ * One complete packet from nxdn_host.
+ *
+ * Parameters:
+ *   buffer  - The packet.
+ *   respLen - Length of the packet.
+ *
+ * Returns: nothing.
  */
 static void handleHostPacket(const uint8_t* buffer, uint16_t respLen)
 {
@@ -1017,7 +1043,7 @@ static void handleHostPacket(const uint8_t* buffer, uint16_t respLen)
         return;
 
     if (debugM && memcmp(buffer + 4, "NXDN", 4) != 0)
-        dump("NXDN host data", buffer, respLen);
+        hexDump("NXDN host data", buffer, respLen);
 
     if (memcmp(buffer + 4, "COMM", 4) == 0)
     {
@@ -1067,7 +1093,13 @@ static void handleHostPacket(const uint8_t* buffer, uint16_t respLen)
 
 /*
  * connectHost()
- *   Opens the TCP connection to nxdn_host, retrying until it is up.
+ *
+ * Opens the TCP connection to nxdn_host, retrying until it is up.
+ *
+ * Parameters: none.
+ *
+ * Returns: The connected socket, or -1 if the program was stopped before it
+ *   connected.
  */
 static int connectHost(void)
 {
@@ -1078,7 +1110,7 @@ static int connectHost(void)
 
         if (fd < 0)
         {
-            perror("Socket creation error");
+            reportError(modemName, "NXDN gateway", "Socket creation error: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
 
@@ -1086,9 +1118,9 @@ static int connectHost(void)
         serv_addr.sin_family = AF_INET;
         serv_addr.sin_port   = htons(clientPort);
 
-        if (inet_pton(AF_INET, nxdnHost, &serv_addr.sin_addr) <= 0)
+        if (!hostToAddress(nxdnHost, &serv_addr.sin_addr))
         {
-            perror("Invalid address/ Address not supported");
+            reportError(modemName, "NXDN gateway", "Invalid address/ Address not supported");
             exit(EXIT_FAILURE);
         }
 
@@ -1108,8 +1140,14 @@ static int connectHost(void)
 
 /*
  * startClient()
- *   Thread that connects to nxdn_host and handles its packets. When the host
- *   goes away the reflector is unlinked and the connection is made again.
+ *
+ * Thread that connects to nxdn_host and handles its packets. When the host
+ * goes away the reflector is unlinked and the connection is made again.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL.
  */
 void* startClient(void* arg)
 {
@@ -1183,15 +1221,22 @@ void* startClient(void* arg)
 
 /*
  * main()
- *   Program entry. Parses the command line (-m modem number 1-10, -d daemon,
- *   -v version, -x debug), starts the host client and waits.
+ *
+ * Program entry. Parses the command line (-m modem number 1-10, -d daemon,
+ * -v version, -x debug), starts the host client and waits.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on exit, 1 on a bad argument.
  */
 int main(int argc, char** argv)
 {
     bool daemon = false;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1200,7 +1245,7 @@ int main(int argc, char** argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "NXDN gateway", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -1208,8 +1253,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(nxdnHost, sizeof(nxdnHost), "%s", optarg);   /* where the protocol service runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -1221,7 +1269,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: NXDN_Gateway [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: NXDN_Gateway [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1232,7 +1280,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "NXDN_Gateway: error in fork(), exiting\n");
+            reportError(modemName, "NXDN gateway", "NXDN_Gateway: error in fork(), exiting");
             return 1;
         }
 
@@ -1247,7 +1295,7 @@ int main(int argc, char** argv)
 
     if (pthread_create(&clientid, NULL, &startClient, NULL) != 0)
     {
-        fprintf(stderr, "Can't create NXDN host thread\n");
+        reportError(modemName, "NXDN gateway", "Can't create NXDN host thread");
         return 1;
     }
 

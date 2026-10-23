@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  * p25_fec.h -- P25 IMBE voice frame error count and regeneration,
  * MMDVMHost style.
@@ -19,7 +20,7 @@
  * 137 protected bits of the frame, which is also what MMDVMHost reports for
  * its P25 BER (1233 bits per LDU of nine frames).
  *
- * All the coding is done by dsp_tools: golay24128_decode23127() /
+ * All the coding is done by fec_tools: golay24128_decode23127() /
  * golay24128_encode23127() for c0 to c3 and hamming_decode15113_1() for c4 to
  * c6, the same functions the transmit side uses, so the bit conventions
  * can not differ.  The only thing added here is the frame layout and the
@@ -34,7 +35,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <dsp_tools.h>
+#include <fec_tools.h>
 
 #define P25_FEC_BITS_PER_FRAME 137U
 

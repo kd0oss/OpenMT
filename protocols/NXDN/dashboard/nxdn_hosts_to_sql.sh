@@ -1,4 +1,5 @@
 #!/bin/sh
+# Created by Rick KD0OSS
 # Turns an NXDNHosts.txt ("talkgroup address port" per line) into SQL for the
 # dashboard reflector list. Usage:
 #   ./nxdn_hosts_to_sql.sh NXDNHosts.txt | mysql -u root -p modem_host

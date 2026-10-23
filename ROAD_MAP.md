@@ -15,6 +15,8 @@ Description and status:
 - [ ] Fusion gateway for Fusion service. **(TODO)**
 - [ ] NXDN service to work with modem host. **(TODO)**
 - [ ] NXDN gateway for NXDN service. **(TODO)**
+- [x] FM repeater service to work with modem host. **(beta)**
+- [x] EchoLink gateway for FM service, outgoing and incoming, DTMF control. **(beta, not tried on the live EchoLink network)**
 - [x] HTML based Dashboard for status and configuration. **(beta)**
 - [x] SQL database for logging, status and configuration. **(beta)**
 - [ ] Update IRCDDBGateway to use database instead of config file. **(TODO)**

@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -19,12 +20,38 @@
 #include "nxdn_func.h"
 #include "nxdn_gen.h"
 
+/*
+ * rngNext()
+ *
+ * Simple linear congruential random number generator, used to make the test
+ * voice data.
+ *
+ * Parameters:
+ *   s - Generator state, updated by each call.
+ *
+ * Returns: The next random number (24 bits).
+ */
 static uint32_t rngNext(uint32_t* s)
 {
     *s = *s * 1664525U + 1013904223U;
     return *s >> 8;
 }
 
+/*
+ * l3Call()
+ *
+ * Builds a 22 byte layer 3 message for a call: message type, no encryption,
+ * call type (group or unit to unit), source and destination ids.
+ *
+ * Parameters:
+ *   l3    - Receives the layer 3 message.
+ *   type  - Message type.
+ *   src   - Source unit id.
+ *   dst   - Destination id.
+ *   group - true for a group call, false for a unit to unit call.
+ *
+ * Returns: nothing.
+ */
 static void l3Call(uint8_t* l3, uint8_t type, uint16_t src, uint16_t dst, bool group)
 {
     memset(l3, 0x00, 22U);
@@ -38,6 +65,19 @@ static void l3Call(uint8_t* l3, uint8_t type, uint16_t src, uint16_t dst, bool g
     l3[6] = dst & 0xFFU;
 }
 
+/*
+ * facchFrame()
+ *
+ * Builds a frame that carries a layer 3 message in both FACCH1 slots: sync,
+ * LICH, an idle SACCH with the RAN, and the message twice.
+ *
+ * Parameters:
+ *   ran   - Radio access number.
+ *   l3    - The layer 3 message.
+ *   frame - Receives the 48 byte frame.
+ *
+ * Returns: nothing.
+ */
 static void facchFrame(uint8_t ran, const uint8_t* l3, uint8_t* frame)
 {
     uint8_t sacch[5];
@@ -59,6 +99,27 @@ static void facchFrame(uint8_t ran, const uint8_t* l3, uint8_t* frame)
     nxdnScramble(frame);
 }
 
+/*
+ * nxdnGenVoiceCall()
+ *
+ * Makes the frames of a complete test voice call: a header, the voice frames
+ * (SACCH superblock parts with call information and four test voice blocks
+ * each) and a transmission release.
+ *
+ * Parameters:
+ *   ran         - Radio access number.
+ *   src         - Source unit id.
+ *   dst         - Destination id.
+ *   group       - true for a group call, false for a unit to unit call.
+ *   voiceFrames - Number of voice frames in the call.
+ *   frames      - Receives the frames, 48 bytes each.
+ *   max         - Space for frames in the frames array.
+ *   seed        - Seed of the random generator that makes the test voice
+ *                 data.
+ *
+ * Returns: The number of frames made, or 0 if max is too small (voiceFrames
+ *   + 2 are needed).
+ */
 unsigned int nxdnGenVoiceCall(uint8_t ran, uint16_t src, uint16_t dst, bool group, unsigned int voiceFrames,
                               uint8_t frames[][48], unsigned int max, uint32_t seed)
 {
@@ -118,6 +179,25 @@ unsigned int nxdnGenVoiceCall(uint8_t ran, uint16_t src, uint16_t dst, bool grou
     return n;
 }
 
+/*
+ * nxdnGenDataCall()
+ *
+ * Makes the frames of a complete test data call: a header, the data blocks
+ * and a transmission release, all as UDCH frames.
+ *
+ * Parameters:
+ *   ran    - Radio access number.
+ *   src    - Source unit id.
+ *   dst    - Destination id.
+ *   group  - true for a group call, false for a unit to unit call.
+ *   blocks - Number of data blocks in the call.
+ *   frames - Receives the frames, 48 bytes each.
+ *   max    - Space for frames in the frames array.
+ *   seed   - Seed of the random generator that makes the test data.
+ *
+ * Returns: The number of frames made, or 0 if max is too small (blocks + 2
+ *   are needed).
+ */
 unsigned int nxdnGenDataCall(uint8_t ran, uint16_t src, uint16_t dst, bool group, unsigned int blocks,
                              uint8_t frames[][48], unsigned int max, uint32_t seed)
 {

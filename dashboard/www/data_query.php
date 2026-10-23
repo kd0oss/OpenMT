@@ -54,6 +54,79 @@ function connect_db()
     return mysqli_connect($mysql_host, $mysql_username, $mysql_password);
 }  /** end connect_db **/
 
+/*
+ * db_select()
+ *
+ * Runs a SELECT as a prepared statement, so values from the web request can
+ * never change the query.  Every value goes in as a ? marker and is bound
+ * here.
+ *
+ * $mysql  - Open database connection.
+ * $sql    - The query, with ? where a value goes.
+ * $types  - mysqli bind types, one letter per value ("s" text, "i" integer),
+ *           or "" when there are no values.
+ * $params - The values, in order.
+ *
+ * Returns an array of rows; each row is an array indexed by column number.
+ * It is empty if the query fails or finds nothing.
+ */
+function db_select($mysql, $sql, $types, $params)
+{
+    $rows = array();
+    $stmt = mysqli_prepare($mysql, $sql);
+
+    if (!$stmt)
+        return $rows;
+    if ($types !== "")
+        mysqli_stmt_bind_param($stmt, $types, ...$params);
+    if (!mysqli_stmt_execute($stmt))
+    {
+        mysqli_stmt_close($stmt);
+        return $rows;
+    }
+
+    $meta = mysqli_stmt_result_metadata($stmt);
+    if ($meta)
+    {
+        $count = mysqli_num_fields($meta);
+        $cols = array_fill(0, $count, null);
+        $refs = array();
+        for ($i = 0; $i < $count; $i++)
+            $refs[$i] = &$cols[$i];
+        mysqli_stmt_bind_result($stmt, ...$refs);
+        while (mysqli_stmt_fetch($stmt))
+        {
+            $row = array();
+            for ($i = 0; $i < $count; $i++)
+                $row[$i] = $cols[$i];
+            $rows[] = $row;
+        }
+        mysqli_free_result($meta);
+    }
+    mysqli_stmt_close($stmt);
+    return $rows;
+}
+
+/*
+ * db_exec()
+ *
+ * Runs an INSERT, UPDATE or DELETE as a prepared statement (see db_select()).
+ *
+ * Returns true if the statement ran, false if it failed.
+ */
+function db_exec($mysql, $sql, $types, $params)
+{
+    $stmt = mysqli_prepare($mysql, $sql);
+
+    if (!$stmt)
+        return false;
+    if ($types !== "")
+        mysqli_stmt_bind_param($stmt, $types, ...$params);
+    $ok = mysqli_stmt_execute($stmt);
+    mysqli_stmt_close($stmt);
+    return $ok;
+}
+
 /* ---- Manage Data helpers: only these tables can be viewed or trimmed ---- */
 function manage_table($name)
 {
@@ -152,8 +225,8 @@ if ($command == "getModemConfig")
     {
         $modem_name = $_GET['modem_name'];
         $params = "";
-        $result = mysqli_query($mysql, "SELECT * FROM modem_host.config WHERE modem_name = '$modem_name' AND module = 'config' ORDER BY id");
-        while ($row = mysqli_fetch_row($result))
+        $rows = db_select($mysql, "SELECT * FROM modem_host.config WHERE modem_name = ? AND module = 'config' ORDER BY id", "s", array($modem_name));
+        foreach ($rows as $row)
         {
             if ($params != "") $params .= "\x1E";
             $params .= $row[3]."\x1D".$row[5];
@@ -175,8 +248,8 @@ if ($command == "getProtocolConfig")
     {
         $modem_name = $_GET['modem_name'];
         $params = "";
-        $result = mysqli_query($mysql, "SELECT * FROM modem_host.config WHERE modem_name = '$modem_name' AND module != 'config' ORDER BY id");
-        while ($row = mysqli_fetch_row($result))
+        $rows = db_select($mysql, "SELECT * FROM modem_host.config WHERE modem_name = ? AND module != 'config' ORDER BY id", "s", array($modem_name));
+        foreach ($rows as $row)
         {
             if ($params != "") $params .= "\x1E";
             $params .= $row[2]."\x1D".$row[3]."\x1D".$row[5];
@@ -198,8 +271,8 @@ if ($command == "getDashConfig")
     {
         $modem_name = $_GET['modem_name'];
         $params = "";
-        $result = mysqli_query($mysql, "SELECT parameter, value FROM modem_host.config WHERE modem_name = '$modem_name' AND module = 'main' ORDER BY id");
-        while ($row = mysqli_fetch_row($result))
+        $rows = db_select($mysql, "SELECT parameter, value FROM modem_host.config WHERE modem_name = ? AND module = 'main' ORDER BY id", "s", array($modem_name));
+        foreach ($rows as $row)
         {
             if ($params != "") $params .= "\x1E";
             $params .= $row[0]."\x1D".$row[1];
@@ -222,6 +295,11 @@ if ($command == "saveGeneral")
         $safeKey   = htmlspecialchars($key);
         $safeValue = htmlspecialchars($value);
 
+        /* Free text sent on to the DMR master: keep it as typed (the
+           statement below is prepared, and the page shows it as plain text). */
+        if ($safeKey == "location" || $safeKey == "description")
+            $safeValue = $value;
+
         if ($safeKey == "command")
             continue;
 
@@ -237,9 +315,8 @@ if ($command == "saveGeneral")
             continue;
         }
 
-        $query = "UPDATE modem_host.config SET value = '".$safeValue."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = '".$module_name."' AND parameter = '".$safeKey."'";
-        if (mysqli_query($mysql, $query) == false)
+        if (!db_exec($mysql, "UPDATE modem_host.config SET value = ? WHERE modem_name = ? AND module = ? AND parameter = ?",
+                     "ssss", array($safeValue, $modem_name, $module_name, $safeKey)))
         {
             mysqli_close($mysql);
             exit("failed ".$safeKey);
@@ -268,9 +345,8 @@ if ($command == "saveModem")
         }
 
 //        echo "Parameter: " . $safeKey . " | Value: " . $safeValue . "<br>\n";
-        $query = "UPDATE modem_host.config SET value = '".$safeValue."' WHERE modem_name = '".$modem_name."' ";
-        $query .= "AND module = 'config' AND parameter = '".$safeKey."'";
-        if (mysqli_query($mysql, $query) == false)
+        if (!db_exec($mysql, "UPDATE modem_host.config SET value = ? WHERE modem_name = ? AND module = 'config' AND parameter = ?",
+                     "sss", array($safeValue, $modem_name, $safeKey)))
         {
             mysqli_close($mysql);
             exit("failed ".$safeKey);
@@ -289,8 +365,8 @@ if ($command == "getStatus")
         $modem_name = $_GET['modem_name'];
         $data = "";
         $id = 0;
-        $result = mysqli_query($mysql, "SELECT * FROM modem_host.last_call WHERE modem_name = '".$modem_name."' ORDER BY pos LIMIT 2");
-        while ($row = mysqli_fetch_row($result))
+        $rows = db_select($mysql, "SELECT * FROM modem_host.last_call WHERE modem_name = ? ORDER BY pos LIMIT 2", "s", array($modem_name));
+        foreach ($rows as $row)
         {
             if ($data != "") $data .= "\x1E";
             if ($row[9] == 1)
@@ -298,16 +374,16 @@ if ($command == "getStatus")
             else
                 $tx = "off";
             $data .= "Id\x1D".$row[0]."\x1Crow\x1D".$row[1]."\x1Ctx_state\x1D".$tx."\x1Cmode\x1D".$row[3]."\x1Ctype\x1D".$row[4]."\x1CsrcCall\x1D".$row[5]."\x1Csuffix\x1D".$row[6]."\x1CdstCall\x1D".$row[7]."\x1CmetaText\x1D".$row[8];
-            $id = $row[0];
+            $id = (int)$row[0];
 
-            $result2 = mysqli_query($mysql, "SELECT * FROM modem_host.sms_messages WHERE id = ".$id);
-            while ($row2 = mysqli_fetch_row($result2))
+            $rows2 = db_select($mysql, "SELECT * FROM modem_host.sms_messages WHERE id = ?", "i", array($id));
+            foreach ($rows2 as $row2)
             {
                 $data .= "\x1CsmsText\x1D".$row2[2];
             }
 
-            $result2 = mysqli_query($mysql, "SELECT * FROM modem_host.gps WHERE id = ".$id);
-            while ($row2 = mysqli_fetch_row($result2))
+            $rows2 = db_select($mysql, "SELECT * FROM modem_host.gps WHERE id = ?", "i", array($id));
+            foreach ($rows2 as $row2)
             {
                 $data .= "\x1Clatitude\x1D".$row2[1];
                 $data .= "\x1Clongitude\x1D".$row2[2];
@@ -316,8 +392,8 @@ if ($command == "getStatus")
                 $data .= "\x1Cspeed\x1D".$row2[5];
             }
 
-            $result2 = mysqli_query($mysql, "SELECT property, value FROM modem_host.host_status WHERE modem_name = '".$modem_name."' AND module = 'main'");
-            while ($row2 = mysqli_fetch_row($result2))
+            $rows2 = db_select($mysql, "SELECT property, value FROM modem_host.host_status WHERE modem_name = ? AND module = 'main'", "s", array($modem_name));
+            foreach ($rows2 as $row2)
             {
                 $data .= "\x1Cproperty\x1D".$row2[0];
                 $data .= "\x1Cvalue\x1D".$row2[1];
@@ -340,17 +416,16 @@ if ($command == "getHistory")
     {
         $modem_name = $_GET['modem_name'];
         $data = "";
-        $result = mysqli_query($mysql, "SELECT MAX(id) AS id FROM modem_host.history WHERE modem_name = '".$modem_name."' GROUP BY Source, suffix, mode ORDER BY id DESC LIMIT 25");
-        while ($row1 = mysqli_fetch_row($result))
+        $rows1 = db_select($mysql, "SELECT MAX(id) AS id FROM modem_host.history WHERE modem_name = ? GROUP BY Source, suffix, mode ORDER BY id DESC LIMIT 25", "s", array($modem_name));
+        foreach ($rows1 as $row1)
         {
-            $result2 = mysqli_query($mysql, "SELECT id, type, mode, Source, suffix, Destination, Loss_BER, ss_message, MAX(DATE_FORMAT(datetime, '%Y-%m-%d  %H:%i')) AS datetime, duration FROM modem_host.history WHERE id = ".$row1[0]);
-            while ($row = mysqli_fetch_row($result2))
+            $rows2 = db_select($mysql, "SELECT id, type, mode, Source, suffix, Destination, Loss_BER, ss_message, MAX(DATE_FORMAT(datetime, '%Y-%m-%d  %H:%i')) AS datetime, duration FROM modem_host.history WHERE id = ?", "i", array((int)$row1[0]));
+            foreach ($rows2 as $row)
             {
                 if ($data != "") $data .= "\x1E";
                 $data .= "type\x1D".$row[1]."\x1Cmode\x1D".$row[2]."\x1Csource\x1D".$row[3]."\x1Csuffix\x1D".$row[4]."\x1Cdest\x1D".$row[5]."\x1Closs_ber\x1D".$row[6]."\x1Css_message\x1D".$row[7];
                 $data .= "\x1Cdatetime\x1D".$row[8]."\x1Cduration\x1D".$row[9];
             }
-            mysqli_free_result($result2);
         }
         if ($data != "")
             echo htmlentities($data);
@@ -369,8 +444,8 @@ if ($command == "getReflectors")
     {
         $refl_type = htmlspecialchars($_GET['refl_type']);
         $data = "";
-        $result = mysqli_query($mysql, "SELECT * FROM modem_host.reflectors WHERE refl_type = '".$refl_type."' ORDER BY Nick");
-        while ($row = mysqli_fetch_row($result))
+        $rows = db_select($mysql, "SELECT * FROM modem_host.reflectors WHERE refl_type = ? ORDER BY Nick", "s", array($refl_type));
+        foreach ($rows as $row)
         {
             if ($data != "") $data .= "\x1E";
             $data .= "nick\x1D".$row[2]."\x1Cip4\x1D".$row[3]."\x1Cip6\x1D".$row[4]."\x1Cport\x1D".$row[5]."\x1Cdash\x1D".$row[6];
@@ -378,6 +453,35 @@ if ($command == "getReflectors")
         }
         if ($data != "")
             echo htmlentities($data);
+        else
+            echo "none";
+    }
+    else
+        echo "failed";
+}
+else
+if ($command == "getLinkInput")
+{
+    global $mysql;
+
+    /* A mode that links to a typed target (not a reflector list) describes it with two config rows, display_type
+       'linkinput': linkLabel (text beside the box) and linkPattern (regular expression the target must match). */
+    if (isset($_GET['modem_name']) && isset($_GET['mode']))
+    {
+        $modem_name = $_GET['modem_name'];
+        $mode = htmlspecialchars($_GET['mode']);
+        $label = "";
+        $pattern = "";
+        $found = false;
+        $rows = db_select($mysql, "SELECT parameter, value FROM modem_host.config WHERE modem_name = ? AND module = ? AND display_type = 'linkinput'", "ss", array($modem_name, $mode));
+        foreach ($rows as $row)
+        {
+            $found = true;
+            if ($row[0] == "linkLabel") $label = $row[1];
+            if ($row[0] == "linkPattern") $pattern = $row[1];
+        }
+        if ($found)
+            echo str_replace("\x1D", "", $label)."\x1D".$pattern;
         else
             echo "none";
     }
@@ -393,8 +497,8 @@ if ($command == "getLinkedReflectors")
     {
         $modem_name = $_GET['modem_name'];
         $data = "";
-        $result = mysqli_query($mysql, "SELECT module, value FROM modem_host.host_status WHERE modem_name = '".$modem_name."' AND property = 'reflector' ORDER BY module");
-        while ($row = mysqli_fetch_row($result))
+        $rows = db_select($mysql, "SELECT module, value FROM modem_host.host_status WHERE modem_name = ? AND property = 'reflector' ORDER BY module", "s", array($modem_name));
+        foreach ($rows as $row)
         {
             if ($data != "") $data .= "\x1E";
             $tmp = explode(' ', $row[1]);
@@ -424,7 +528,7 @@ if ($command == "dashbCom")
         if (isset($_GET['parameter']))
             $parameter = htmlspecialchars($_GET['parameter']);
 
-        mysqli_query($mysql, "INSERT INTO modem_host.dashb_commands SET modem_name = '".$modem_name."', command = '".$action."', parameter = '".$parameter."'");
+        db_exec($mysql, "INSERT INTO modem_host.dashb_commands SET modem_name = ?, command = ?, parameter = ?", "sss", array($modem_name, $action, $parameter));
 
         $id = mysqli_insert_id($mysql);
         if ($id < 1)
@@ -436,8 +540,8 @@ if ($command == "dashbCom")
             $timeout = 10;
             while ($timeout)
             {
-                $result = mysqli_query($mysql, "SELECT result FROM modem_host.dashb_commands WHERE id = $id");
-                $row = mysqli_fetch_row($result);
+                $rows = db_select($mysql, "SELECT result FROM modem_host.dashb_commands WHERE id = ?", "i", array((int)$id));
+                $row = isset($rows[0]) ? $rows[0] : array(NULL);
                 if ($row[0] != NULL)
                 {
                     echo $row[0];
@@ -446,7 +550,7 @@ if ($command == "dashbCom")
                 sleep(1);
                 $timeout--;
             }
-            mysqli_query($mysql, "DELETE FROM modem_host.dashb_commands WHERE id = $id");
+            db_exec($mysql, "DELETE FROM modem_host.dashb_commands WHERE id = ?", "i", array((int)$id));
             if ($timeout == 0)
                 echo "failed";
         }
@@ -466,9 +570,8 @@ if ($command == "getModeOptions")
         $modem_name = $_GET['modem_name'];
         $mode = htmlspecialchars($_GET['mode']);
         $data = "";
-        $query = "SELECT parameter, display_type, value FROM modem_host.config WHERE modem_name = '".$modem_name."' AND module = '".$mode."' AND display_type != 'misc'";
-        $result = mysqli_query($mysql, $query);
-        while ($row = mysqli_fetch_row($result))
+        $rows = db_select($mysql, "SELECT parameter, display_type, value FROM modem_host.config WHERE modem_name = ? AND module = ? AND display_type NOT IN ('misc', 'linkinput')", "ss", array($modem_name, $mode));
+        foreach ($rows as $row)
         {
             if ($data != "") $data .= "\x1E";
             $data .= "parameter\x1D".$row[0]."\x1Cdtype\x1D".$row[1]."\x1Cvalue\x1D".$row[2];
@@ -494,8 +597,8 @@ if ($command == "saveModeOption")
         $mode = htmlspecialchars($_GET['mode']);
         $parameter = htmlspecialchars($_GET['parameter']);
         $value = htmlspecialchars($_GET['value']);
-        $query = "UPDATE modem_host.config SET value = '$value' WHERE modem_name = '".$modem_name."' AND module = '".$mode."' AND parameter = '".$parameter."'";
-        if (mysqli_query($mysql, $query) == false)
+        if (!db_exec($mysql, "UPDATE modem_host.config SET value = ? WHERE modem_name = ? AND module = ? AND parameter = ?",
+                     "ssss", array($value, $modem_name, $mode, $parameter)))
         {
             mysqli_close($mysql);
             exit("failed");
@@ -672,6 +775,249 @@ if ($command == "deleteOlder")
             else
                 echo json_encode(array('error' => 'Delete failed: '.mysqli_stmt_error($stmt)));
             mysqli_stmt_close($stmt);
+        }
+    }
+}
+
+else
+if ($command == "getServices")
+{
+    /* The list of units the dashboard may control comes from modem_host.services, so the page needs no
+       knowledge of any RF mode. Only a logged in session may see it. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    $rows = array();
+    $alive = false;
+    $res = mysqli_query($mysql, "SELECT unit, label, description, active, enabled, UNIX_TIMESTAMP(NOW()) - UNIX_TIMESTAMP(updated) AS age FROM modem_host.services ORDER BY sort_order, label");
+    if ($res)
+    {
+        while ($r = mysqli_fetch_assoc($res))
+        {
+            if ($r['age'] !== null && (int)$r['age'] <= 15)
+                $alive = true;
+            unset($r['age']);
+            $rows[] = $r;
+        }
+    }
+    echo json_encode(array('services' => $rows, 'managerAlive' => $alive), JSON_INVALID_UTF8_SUBSTITUTE);
+}
+else
+if ($command == "serviceAction")
+{
+    /* Writes a request into modem_host.service_commands. The service manager (running as root) carries it out
+       after checking it again. A custom header is required so that another web site cannot send this request
+       for a logged in person. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    $action = $_POST['action'] ?? '';
+    $unit = $_POST['unit'] ?? '';
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || ($_SERVER['HTTP_X_OPENMT'] ?? '') !== '1')
+    {
+        echo json_encode(array('error' => 'Invalid request'));
+    }
+    else
+    if (in_array($action, array('reboot', 'poweroff'), true))
+    {
+        /* Power actions of the Pi: only when listed in modem_host.system_actions, and always for the unit "system" */
+        $stmt = mysqli_prepare($mysql, "SELECT COUNT(*) FROM modem_host.system_actions WHERE action = ?");
+        mysqli_stmt_bind_param($stmt, "s", $action);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_bind_result($stmt, $found);
+        mysqli_stmt_fetch($stmt);
+        mysqli_stmt_close($stmt);
+        if ((int)$found == 0 || $unit !== 'system')
+        {
+            echo json_encode(array('error' => 'Unknown action'));
+        }
+        else
+        {
+            $stmt = mysqli_prepare($mysql, "INSERT INTO modem_host.service_commands (unit, action) VALUES ('system', ?)");
+            mysqli_stmt_bind_param($stmt, "s", $action);
+            if (mysqli_stmt_execute($stmt))
+                echo json_encode(array('id' => (int)mysqli_insert_id($mysql)));
+            else
+                echo json_encode(array('error' => 'Could not store the request'));
+            mysqli_stmt_close($stmt);
+        }
+    }
+    else
+    if (!in_array($action, array('start', 'stop', 'restart', 'enable', 'disable'), true))
+    {
+        echo json_encode(array('error' => 'Unknown action'));
+    }
+    else
+    {
+        $stmt = mysqli_prepare($mysql, "SELECT COUNT(*) FROM modem_host.services WHERE unit = ?");
+        mysqli_stmt_bind_param($stmt, "s", $unit);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_bind_result($stmt, $found);
+        mysqli_stmt_fetch($stmt);
+        mysqli_stmt_close($stmt);
+        if ((int)$found == 0)
+        {
+            echo json_encode(array('error' => 'Unknown service'));
+        }
+        else
+        {
+            $stmt = mysqli_prepare($mysql, "INSERT INTO modem_host.service_commands (unit, action) VALUES (?, ?)");
+            mysqli_stmt_bind_param($stmt, "ss", $unit, $action);
+            if (mysqli_stmt_execute($stmt))
+                echo json_encode(array('id' => (int)mysqli_insert_id($mysql)));
+            else
+                echo json_encode(array('error' => 'Could not store the request'));
+            mysqli_stmt_close($stmt);
+        }
+    }
+}
+else
+if ($command == "getSystemActions")
+{
+    /* The power actions listed in the database; the dashboard builds its buttons from them. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    $rows = array();
+    $res = mysqli_query($mysql, "SELECT action, label, description, confirm FROM modem_host.system_actions ORDER BY sort_order, label");
+    if ($res)
+    {
+        while ($r = mysqli_fetch_assoc($res))
+            $rows[] = $r;
+    }
+    echo json_encode(array('actions' => $rows), JSON_INVALID_UTF8_SUBSTITUTE);
+}
+else
+if ($command == "getServiceResult")
+{
+    /* Result of one request: null while the service manager has not finished it. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    $id = (int)($_GET['id'] ?? 0);
+    $stmt = mysqli_prepare($mysql, "SELECT result FROM modem_host.service_commands WHERE id = ?");
+    mysqli_stmt_bind_param($stmt, "i", $id);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_bind_result($stmt, $result);
+    $got = mysqli_stmt_fetch($stmt);
+    mysqli_stmt_close($stmt);
+    echo json_encode(array('result' => $got ? $result : 'unknown request'));
+}
+else
+if ($command == "getHostUpdates")
+{
+    /* The host lists that can be updated come from modem_host.host_update_sections, so the page needs no
+       knowledge of any RF mode.  The answer also holds the latest run (state and log) so that the page can
+       show the progress of an update.  An update whose heartbeat stopped for 90 seconds is marked failed. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    mysqli_query($mysql, "UPDATE modem_host.host_update_runs SET state = 'failed', finished = NOW(), log = CONCAT(IFNULL(log, ''), 'The update stopped without finishing.\\n') " .
+                         "WHERE state IN ('queued', 'running') AND TIMESTAMPDIFF(SECOND, updated, NOW()) > 90");
+    $sections = array();
+    $res = mysqli_query($mysql, "SELECT section, label, description, last_run, last_result FROM modem_host.host_update_sections ORDER BY sort_order, label");
+    if ($res)
+    {
+        while ($r = mysqli_fetch_assoc($res))
+            $sections[] = $r;
+    }
+    $run = null;
+    $res = mysqli_query($mysql, "SELECT id, sections, state, started, finished, log FROM modem_host.host_update_runs ORDER BY id DESC LIMIT 1");
+    if ($res)
+        $run = mysqli_fetch_assoc($res);
+    echo json_encode(array('sections' => $sections, 'run' => $run ? $run : null), JSON_INVALID_UTF8_SUBSTITUTE);
+}
+else
+if ($command == "startHostUpdate")
+{
+    /* Stores a request in modem_host.host_update_runs and starts updateHostsRun.php in the background.  Only
+       names listed in host_update_sections are accepted ("all" means every listed section) and one update
+       runs at a time.  A custom header is required so that another web site cannot send this request for a
+       logged in person. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || ($_SERVER['HTTP_X_OPENMT'] ?? '') !== '1')
+    {
+        echo json_encode(array('error' => 'Invalid request'));
+    }
+    else
+    {
+        $listed = array();
+        $res = mysqli_query($mysql, "SELECT section FROM modem_host.host_update_sections ORDER BY sort_order, label");
+        if ($res)
+        {
+            while ($r = mysqli_fetch_row($res))
+                $listed[] = $r[0];
+        }
+        $asked = trim($_POST['sections'] ?? '');
+        $chosen = array();
+        if ($asked === 'all')
+            $chosen = $listed;
+        else
+        {
+            foreach (explode(',', $asked) as $name)
+            {
+                $name = trim($name);
+                if ($name !== '' && in_array($name, $listed, true) && !in_array($name, $chosen, true))
+                    $chosen[] = $name;
+            }
+        }
+        $php = '';
+        foreach (array(PHP_BINDIR . '/php', '/usr/bin/php', '/usr/local/bin/php') as $candidate)
+        {
+            if (@is_executable($candidate))
+            {
+                $php = $candidate;
+                break;
+            }
+        }
+        $disabled = array_map('trim', explode(',', (string)ini_get('disable_functions')));
+
+        if (count($chosen) == 0)
+            echo json_encode(array('error' => 'No host list was chosen'));
+        else
+        if ($php === '' || in_array('exec', $disabled, true) || !function_exists('exec'))
+            echo json_encode(array('error' => 'The web server cannot start the update (php command line or exec() is not available)'));
+        else
+        {
+            /* the lock keeps two requests from starting two updates */
+            $lock = mysqli_query($mysql, "SELECT GET_LOCK('openmt_host_update', 5)");
+            $got = $lock ? mysqli_fetch_row($lock) : null;
+            if (!$got || (int)$got[0] != 1)
+                echo json_encode(array('error' => 'The database is busy, try again'));
+            else
+            {
+                $busy = mysqli_query($mysql, "SELECT COUNT(*) FROM modem_host.host_update_runs WHERE state IN ('queued', 'running') AND TIMESTAMPDIFF(SECOND, IFNULL(updated, started), NOW()) <= 90");
+                $count = $busy ? mysqli_fetch_row($busy) : array(0);
+                if ((int)$count[0] > 0)
+                    echo json_encode(array('error' => 'An update is already running'));
+                else
+                {
+                    mysqli_query($mysql, "DELETE FROM modem_host.host_update_runs WHERE started < DATE_SUB(NOW(), INTERVAL 30 DAY)");
+                    $csv = implode(',', $chosen);
+                    $stmt = mysqli_prepare($mysql, "INSERT INTO modem_host.host_update_runs (sections, state, started, updated) VALUES (?, 'queued', NOW(), NOW())");
+                    mysqli_stmt_bind_param($stmt, "s", $csv);
+                    if (!mysqli_stmt_execute($stmt))
+                        echo json_encode(array('error' => 'Could not store the request'));
+                    else
+                    {
+                        $id = (int)mysqli_insert_id($mysql);
+                        $cmd = 'nohup ' . escapeshellarg($php) . ' ' . escapeshellarg(__DIR__ . '/updateHostsRun.php') . ' ' . $id .
+                               ' > /dev/null 2>&1 &';
+                        exec($cmd);
+                        echo json_encode(array('id' => $id));
+                    }
+                    mysqli_stmt_close($stmt);
+                }
+                mysqli_query($mysql, "SELECT RELEASE_LOCK('openmt_host_update')");
+            }
         }
     }
 }

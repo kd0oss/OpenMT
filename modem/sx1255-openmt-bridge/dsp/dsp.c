@@ -32,7 +32,23 @@
  * ALSA rate passed into dsp_rx_pipeline_create()/dsp_tx_pipeline_create(),
  * not assumed to be exactly 125000 -- see the comments there for why. */
 
-/* ---- FIR design: windowed-sinc lowpass, Blackman window --------------- */
+/*
+ * design_lowpass_fir()
+ *
+ * Designs a windowed-sinc low-pass FIR filter with a Blackman window.  The
+ * tap count is rounded up to a multiple of interpFactor and the taps are
+ * scaled by interpFactor so an interpolator keeps its gain.
+ *
+ * Parameters:
+ *   numTaps      - Requested number of taps.
+ *   cutoffNorm   - Cutoff as a fraction of the Nyquist frequency.
+ *   interpFactor - Interpolation factor the filter will be used with (1 for
+ *                  none).
+ *   out_len      - Receives the actual number of taps (numTaps rounded up
+ *                  to a multiple of interpFactor).
+ *
+ * Returns: Newly allocated tap array (caller frees).
+ */
 static double *design_lowpass_fir(int numTaps, double cutoffNorm, int interpFactor, int *out_len)
 {
     double *taps;
@@ -70,6 +86,20 @@ static double *design_lowpass_fir(int numTaps, double cutoffNorm, int interpFact
     return taps;
 }
 
+/*
+ * design_channel_filter()
+ *
+ * Designs the receive channel filter: a low-pass filter whose cutoff is the
+ * channel bandwidth.
+ *
+ * Parameters:
+ *   channelBWHz - Channel bandwidth in Hz, used as the cutoff.
+ *   sampleRate  - Sample rate of the data to be filtered, in Hz.
+ *   numTaps     - Requested number of taps.
+ *   out_len     - Receives the actual number of taps.
+ *
+ * Returns: Newly allocated tap array (caller frees).
+ */
 static double *design_channel_filter(double channelBWHz, double sampleRate, int numTaps, int *out_len)
 {
     return design_lowpass_fir(numTaps, channelBWHz / sampleRate, 1, out_len);
@@ -81,6 +111,18 @@ typedef struct
     double avgI, avgQ, alpha;
 } dc_removal_c_t;
 
+/*
+ * dc_removal_c_process()
+ *
+ * Removes the DC offset from one complex sample using a slow running average
+ * on each of I and Q.
+ *
+ * Parameters:
+ *   f      - Filter state.
+ *   sample - Input sample.
+ *
+ * Returns: The sample with the running average subtracted.
+ */
 static dsp_cplx_t dc_removal_c_process(dc_removal_c_t *f, dsp_cplx_t sample)
 {
     double i = crealf(sample), q = cimagf(sample);
@@ -96,6 +138,18 @@ typedef struct
     dsp_cplx_t prev;
 } fm_demod_t;
 
+/*
+ * fm_demod_process()
+ *
+ * FM-demodulates one complex sample: the phase difference between this
+ * sample and the previous one.
+ *
+ * Parameters:
+ *   f      - Demodulator state holding the previous sample.
+ *   sample - Next complex sample.
+ *
+ * Returns: Phase change in radians (-pi to +pi).
+ */
 static double fm_demod_process(fm_demod_t *f, dsp_cplx_t sample)
 {
     dsp_cplx_t product = sample * conjf(f->prev);
@@ -110,6 +164,17 @@ typedef struct
     double avgCnt, movingAvg;
 } dc_filter_r_t;
 
+/*
+ * dc_filter_r_process()
+ *
+ * Removes the DC offset from one real sample using a moving average.
+ *
+ * Parameters:
+ *   f      - Filter state.
+ *   sample - Input sample.
+ *
+ * Returns: The sample minus the current average.
+ */
 static double dc_filter_r_process(dc_filter_r_t *f, double sample)
 {
     double ret = sample - f->movingAvg;
@@ -130,6 +195,21 @@ typedef struct
     int count;
 } poly_decim_c_t;
 
+/*
+ * poly_decim_c_init()
+ *
+ * Sets up a polyphase decimating FIR filter: splits the taps into
+ * decimFactor phases (padding the taps with zeros to a multiple of
+ * decimFactor) and allocates the sample history.
+ *
+ * Parameters:
+ *   d           - Decimator to initialise.
+ *   taps        - Filter taps.
+ *   taps_len    - Number of taps.
+ *   decimFactor - Decimation factor.
+ *
+ * Returns: nothing.
+ */
 static void poly_decim_c_init(poly_decim_c_t *d, const double *taps, int taps_len, int decimFactor)
 {
     int padded_len = taps_len;
@@ -162,6 +242,16 @@ static void poly_decim_c_init(poly_decim_c_t *d, const double *taps, int taps_le
     d->count = 0;
 }
 
+/*
+ * poly_decim_c_free()
+ *
+ * Frees the memory held by a decimator.
+ *
+ * Parameters:
+ *   d - Decimator to free.
+ *
+ * Returns: nothing.
+ */
 static void poly_decim_c_free(poly_decim_c_t *d)
 {
     int p;
@@ -174,18 +264,19 @@ static void poly_decim_c_free(poly_decim_c_t *d)
     free(d->buffer);
 }
 
-/* Returns true if an output sample was produced (every decimFactor-th
- * input).
+/*
+ * poly_decim_c_process()
  *
- * The most-recently-stored sample corresponds to phase M-1 (the last sample
- * in the current decimation block); phase p's starting position in the
- * buffer is bufIdx-M+p, and each subsequent tap for that phase walks
- * back by another M samples. This must stay bit-for-bit identical to
- * the reference implementation, which has real on-air use behind it --
- * a from-scratch re-derivation of this indexing scheme is easy to get
- * subtly wrong in ways that still pass a simple direct-convolution
- * check while producing a badly non-monotonic frequency response on
- * real hardware. */
+ * Feeds one complex sample into the decimator.  Every decimFactor-th input
+ * produces one filtered output.
+ *
+ * Parameters:
+ *   d      - Decimator state.
+ *   sample - Next input sample.
+ *   out    - Receives the output sample when one is produced.
+ *
+ * Returns: true if an output sample was produced, false otherwise.
+ */
 static bool poly_decim_c_process(poly_decim_c_t *d, dsp_cplx_t sample, dsp_cplx_t *out)
 {
     int M = d->decimFactor;
@@ -238,6 +329,20 @@ typedef struct
     int outPhase;
 } poly_resampler_t;
 
+/*
+ * poly_resampler_init()
+ *
+ * Sets up a polyphase rational resampler (interpolate by interpFactor,
+ * decimate by decimFactor).  The low-pass filter is designed for the larger
+ * of the two factors with 24 taps per phase.
+ *
+ * Parameters:
+ *   r            - Resampler to initialise.
+ *   interpFactor - Interpolation factor.
+ *   decimFactor  - Decimation factor.
+ *
+ * Returns: nothing.
+ */
 static void poly_resampler_init(poly_resampler_t *r, int interpFactor, int decimFactor)
 {
     int max_id = interpFactor > decimFactor ? interpFactor : decimFactor;
@@ -266,6 +371,16 @@ static void poly_resampler_init(poly_resampler_t *r, int interpFactor, int decim
     r->outPhase = 0;
 }
 
+/*
+ * poly_resampler_free()
+ *
+ * Frees the memory held by a resampler.
+ *
+ * Parameters:
+ *   r - Resampler to free.
+ *
+ * Returns: nothing.
+ */
 static void poly_resampler_free(poly_resampler_t *r)
 {
     int p;
@@ -278,6 +393,17 @@ static void poly_resampler_free(poly_resampler_t *r)
     free(r->buffer);
 }
 
+/*
+ * poly_resampler_reset()
+ *
+ * Clears the resampler history and output phase so the next stream starts
+ * clean.
+ *
+ * Parameters:
+ *   r - Resampler to reset.
+ *
+ * Returns: nothing.
+ */
 static void poly_resampler_reset(poly_resampler_t *r)
 {
     memset(r->buffer, 0, (size_t)r->tapsPerPhase * sizeof(double));
@@ -285,22 +411,21 @@ static void poly_resampler_reset(poly_resampler_t *r)
     r->outPhase = 0;
 }
 
-/* Feed one input sample; writes up to ceil(interpFactor/decimFactor)+1
- * outputs to "out" (caller must size for at least that many; for our two
- * ratios, 2 is always sufficient in the streaming RX case, and the TX
- * batch case sizes its own output buffer). Returns count written.
+/*
+ * poly_resampler_process()
  *
- * "max_out" bounds the write defensively: with interp/decim ratios now
- * derived at runtime from whatever rate ALSA actually negotiates (see
- * dsp_rx_pipeline_create_tuned()/dsp_tx_pipeline_create()) rather than a
- * fixed textbook 48:25 or 125:24, an unusual rate could in principle
- * reduce to a much larger ratio than either of those -- silently writing
- * past a small fixed-size caller buffer would be a real, serious bug
- * rather than a theoretical one. If interpFactor/decimFactor ever implies
- * more outputs than max_out for one input sample, later ones are dropped
- * (logged once) rather than overflowing -- this would show up as
- * corrupted/missing audio, not a crash, and is a sign the caller's buffer
- * needs to grow, not silent memory corruption. */
+ * Feeds one real sample into the resampler and produces the output samples
+ * that fall due.  If more outputs fall due than max_out allows, the extra
+ * ones are dropped and a message is logged.
+ *
+ * Parameters:
+ *   r       - Resampler state.
+ *   sample  - Next input sample.
+ *   out     - Receives the output samples.
+ *   max_out - Size of out in samples.
+ *
+ * Returns: Number of output samples produced (counts dropped ones too).
+ */
 static int poly_resampler_process(poly_resampler_t *r, double sample, double *out, int max_out)
 {
     int n = 0;
@@ -344,10 +469,18 @@ static int poly_resampler_process(poly_resampler_t *r, double sample, double *ou
 }
 
 /* ---- RX pipeline ----------------------------------------------------------*/
-/* Greatest common divisor, for reducing a rational sample-rate-conversion
- * ratio (interp:decim) to lowest terms from two actual integer rates,
- * rather than assuming a fixed textbook ratio that's only exactly right
- * when the true rate happens to land on exactly 125000 Hz. */
+/*
+ * gcd_ll()
+ *
+ * Calculates the greatest common divisor, used to reduce a sample rate ratio
+ * to lowest terms.
+ *
+ * Parameters:
+ *   a - First value.
+ *   b - Second value.
+ *
+ * Returns: The greatest common divisor, never negative.
+ */
 static long gcd_ll(long a, long b)
 {
     while (b != 0)
@@ -381,11 +514,40 @@ struct dsp_rx_pipeline
  */
 #define DSP_DEFAULT_SCALING_COEFF 1.24f
 
+/*
+ * dsp_rx_pipeline_create()
+ *
+ * Creates the receive pipeline with the default DC averaging count (2000)
+ * and the default scaling coefficient.
+ *
+ * Parameters:
+ *   actual_sample_rate_hz - Real sample rate of the I/Q input in Hz; 0 means
+ *                           assume 125000.
+ *
+ * Returns: New pipeline, to be freed with dsp_rx_pipeline_destroy().
+ */
 dsp_rx_pipeline_t *dsp_rx_pipeline_create(unsigned int actual_sample_rate_hz)
 {
     return dsp_rx_pipeline_create_tuned(actual_sample_rate_hz, 2000, DSP_DEFAULT_SCALING_COEFF);
 }
 
+/*
+ * dsp_rx_pipeline_create_tuned()
+ *
+ * Creates the receive pipeline: DC removal, decimation with channel filter
+ * to about 12.5 kHz, FM demodulation, optional baseband DC removal and
+ * resampling to 24 kHz.  The decimation factor, demodulator gain correction
+ * and resampler ratio are derived from the actual input rate.
+ *
+ * Parameters:
+ *   actual_sample_rate_hz - Real sample rate of the I/Q input in Hz; 0 means
+ *                           assume 125000.
+ *   baseband_dc_avg_cnt   - Length of the baseband DC moving average; 1 or
+ *                           less turns baseband DC removal off.
+ *   scaling_coeff         - Gain applied to the final audio.
+ *
+ * Returns: New pipeline, to be freed with dsp_rx_pipeline_destroy().
+ */
 dsp_rx_pipeline_t *dsp_rx_pipeline_create_tuned(unsigned int actual_sample_rate_hz, int baseband_dc_avg_cnt, float scaling_coeff)
 {
     dsp_rx_pipeline_t *p = calloc(1, sizeof(*p));
@@ -469,6 +631,16 @@ dsp_rx_pipeline_t *dsp_rx_pipeline_create_tuned(unsigned int actual_sample_rate_
     return p;
 }
 
+/*
+ * dsp_rx_pipeline_destroy()
+ *
+ * Frees a receive pipeline.
+ *
+ * Parameters:
+ *   p - Pipeline, may be NULL.
+ *
+ * Returns: nothing.
+ */
 void dsp_rx_pipeline_destroy(dsp_rx_pipeline_t *p)
 {
     if (p == NULL)
@@ -480,6 +652,16 @@ void dsp_rx_pipeline_destroy(dsp_rx_pipeline_t *p)
     free(p);
 }
 
+/*
+ * dsp_rx_pipeline_get_dc_bias()
+ *
+ * Gets the DC offset the baseband filter has measured.
+ *
+ * Parameters:
+ *   p - Pipeline, may be NULL.
+ *
+ * Returns: Current average, or 0 if p is NULL or baseband DC removal is off.
+ */
 double dsp_rx_pipeline_get_dc_bias(const dsp_rx_pipeline_t *p)
 {
     if (p == NULL || !p->use_baseband_dc)
@@ -489,6 +671,21 @@ double dsp_rx_pipeline_get_dc_bias(const dsp_rx_pipeline_t *p)
     return p->basebandDC.movingAvg;
 }
 
+/*
+ * dsp_rx_pipeline_process_baseband()
+ *
+ * Runs one I/Q sample through the receive pipeline.  Most calls produce
+ * nothing because of the decimation; some produce one or two 24 kHz audio
+ * samples.
+ *
+ * Parameters:
+ *   p         - Pipeline.
+ *   iq_sample - Next I/Q sample from the SX1255.
+ *   out       - Receives the audio samples.
+ *   max_out   - Size of out in samples.
+ *
+ * Returns: Number of audio samples written to out.
+ */
 int dsp_rx_pipeline_process_baseband(dsp_rx_pipeline_t *p, dsp_cplx_t iq_sample, float *out, int max_out)
 {
     dsp_cplx_t dc_out, decim_out;
@@ -547,6 +744,18 @@ struct dsp_tx_pipeline
                                           * passes more samples in one
                                           * call than this. */
 
+/*
+ * dsp_tx_pipeline_create()
+ *
+ * Creates the transmit pipeline: a resampler from 24 kHz baseband audio to
+ * the actual I/Q rate and the output buffer for it.
+ *
+ * Parameters:
+ *   actual_sample_rate_hz - Real sample rate of the I/Q output in Hz; 0
+ *                           means assume 125000.
+ *
+ * Returns: New pipeline, to be freed with dsp_tx_pipeline_destroy().
+ */
 dsp_tx_pipeline_t *dsp_tx_pipeline_create(unsigned int actual_sample_rate_hz)
 {
     dsp_tx_pipeline_t *p = calloc(1, sizeof(*p));
@@ -582,6 +791,16 @@ dsp_tx_pipeline_t *dsp_tx_pipeline_create(unsigned int actual_sample_rate_hz)
     return p;
 }
 
+/*
+ * dsp_tx_pipeline_destroy()
+ *
+ * Frees a transmit pipeline.
+ *
+ * Parameters:
+ *   p - Pipeline, may be NULL.
+ *
+ * Returns: nothing.
+ */
 void dsp_tx_pipeline_destroy(dsp_tx_pipeline_t *p)
 {
     if (p == NULL)
@@ -593,12 +812,42 @@ void dsp_tx_pipeline_destroy(dsp_tx_pipeline_t *p)
     free(p);
 }
 
+/*
+ * dsp_tx_pipeline_reset()
+ *
+ * Clears the resampler history and the FM phase so a new transmission starts
+ * clean.
+ *
+ * Parameters:
+ *   p - Pipeline.
+ *
+ * Returns: nothing.
+ */
 void dsp_tx_pipeline_reset(dsp_tx_pipeline_t *p)
 {
     poly_resampler_reset(&p->resampler);
     p->phase = 0.0;
 }
 
+/*
+ * dsp_tx_pipeline_process_baseband()
+ *
+ * Turns 24 kHz baseband samples into FM-modulated I/Q at the actual sample
+ * rate: resample, integrate to a phase scaled by the deviation, and output
+ * cos and sin of the phase.  The output buffer is grown if needed.
+ *
+ * Parameters:
+ *   p                - Pipeline.
+ *   baseband_samples - Input audio samples.
+ *   n_samples        - Number of input samples.
+ *   deviation_hz     - FM deviation, in Hz, for an input value of 1.0.
+ *   out              - Pointer to the caller's output buffer; reallocated if
+ *                      too small.
+ *   out_cap          - Capacity of *out in samples; updated if the buffer
+ *                      grows.
+ *
+ * Returns: Number of I/Q samples written to *out.
+ */
 int dsp_tx_pipeline_process_baseband(dsp_tx_pipeline_t *p, const float *baseband_samples,
     int n_samples, double deviation_hz, dsp_cplx_t **out, int *out_cap)
 {

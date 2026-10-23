@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

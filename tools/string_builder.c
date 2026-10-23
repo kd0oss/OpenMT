@@ -23,6 +23,19 @@
 
 #define SB_MIN_CAPACITY 256
 
+/*
+ * sb_init()
+ *
+ * Allocates the initial buffer of a string builder and makes it an empty
+ * string.  Exits the program if the allocation fails.
+ *
+ * Parameters:
+ *   sb               - Builder to initialise.
+ *   initial_capacity - Requested buffer size in bytes; raised to
+ *                      SB_MIN_CAPACITY if smaller.
+ *
+ * Returns: nothing.
+ */
 void sb_init(StringBuilder *sb, size_t initial_capacity)
 {
     if (initial_capacity < SB_MIN_CAPACITY)
@@ -42,6 +55,19 @@ void sb_init(StringBuilder *sb, size_t initial_capacity)
     sb->capacity = initial_capacity;
 }
 
+/*
+ * sb_ensure_capacity()
+ *
+ * Grows the builder's buffer, doubling it, until it can hold the current
+ * text plus the extra bytes and a terminating NUL.  Exits the program if the
+ * reallocation fails.
+ *
+ * Parameters:
+ *   sb         - Builder to grow.
+ *   additional - Number of extra characters that are about to be appended.
+ *
+ * Returns: nothing.
+ */
 static void sb_ensure_capacity(StringBuilder *sb, size_t additional)
 {
     size_t required = sb->length + additional + 1; /* +1 for null terminator */
@@ -66,6 +92,18 @@ static void sb_ensure_capacity(StringBuilder *sb, size_t additional)
     }
 }
 
+/*
+ * sb_append()
+ *
+ * Appends a C string to the end of the builder.  A NULL or empty string is
+ * ignored.
+ *
+ * Parameters:
+ *   sb  - Builder to append to.
+ *   str - NUL terminated string to append.
+ *
+ * Returns: nothing.
+ */
 void sb_append(StringBuilder *sb, const char *str)
 {
     if (str == NULL)
@@ -86,6 +124,17 @@ void sb_append(StringBuilder *sb, const char *str)
     sb->data[sb->length] = '\0';
 }
 
+/*
+ * sb_append_char()
+ *
+ * Appends a single character to the end of the builder.
+ *
+ * Parameters:
+ *   sb - Builder to append to.
+ *   c  - Character to append.
+ *
+ * Returns: nothing.
+ */
 void sb_append_char(StringBuilder *sb, char c)
 {
     sb_ensure_capacity(sb, 1);
@@ -95,11 +144,32 @@ void sb_append_char(StringBuilder *sb, char c)
     sb->data[sb->length] = '\0';
 }
 
+/*
+ * sb_cstr()
+ *
+ * Gives access to the text collected so far.
+ *
+ * Parameters:
+ *   sb - Builder to read.
+ *
+ * Returns: Pointer to the builder's NUL terminated buffer.  It is owned by
+ *   the builder and is invalidated by the next append or free.
+ */
 const char* sb_cstr(const StringBuilder *sb)
 {
     return sb->data;
 }
 
+/*
+ * sb_clear()
+ *
+ * Empties the builder but keeps its allocated buffer for reuse.
+ *
+ * Parameters:
+ *   sb - Builder to clear.
+ *
+ * Returns: nothing.
+ */
 void sb_clear(StringBuilder *sb)
 {
     sb->length = 0;
@@ -109,6 +179,17 @@ void sb_clear(StringBuilder *sb)
     }
 }
 
+/*
+ * sb_free()
+ *
+ * Releases the builder's buffer and resets it to an empty, unallocated
+ * state.
+ *
+ * Parameters:
+ *   sb - Builder to free.
+ *
+ * Returns: nothing.
+ */
 void sb_free(StringBuilder *sb)
 {
     if (sb->data != NULL)
@@ -120,11 +201,31 @@ void sb_free(StringBuilder *sb)
     sb->capacity = 0;
 }
 
+/*
+ * sb_length()
+ *
+ * Reports how many characters the builder holds.
+ *
+ * Parameters:
+ *   sb - Builder to read.
+ *
+ * Returns: Length of the text in bytes, not counting the terminating NUL.
+ */
 size_t sb_length(const StringBuilder *sb)
 {
     return sb->length;
 }
 
+/*
+ * string_array_init()
+ *
+ * Prepares an empty string array.
+ *
+ * Parameters:
+ *   arr - Array to initialise.
+ *
+ * Returns: nothing.
+ */
 void string_array_init(StringArray *arr)
 {
     arr->tokens = NULL;
@@ -132,6 +233,17 @@ void string_array_init(StringArray *arr)
     arr->capacity = 0;
 }
 
+/*
+ * string_array_add()
+ *
+ * Appends a copy of a token to the array, growing the array as needed.
+ *
+ * Parameters:
+ *   arr   - Array to add to.
+ *   token - NUL terminated string to copy into the array.
+ *
+ * Returns: nothing.
+ */
 void string_array_add(StringArray *arr, const char *token)
 {
     if (arr->count >= arr->capacity)
@@ -157,6 +269,16 @@ void string_array_add(StringArray *arr, const char *token)
     arr->count++;
 }
 
+/*
+ * string_array_free()
+ *
+ * Frees every token and the array storage itself.
+ *
+ * Parameters:
+ *   arr - Array to free.
+ *
+ * Returns: nothing.
+ */
 void string_array_free(StringArray *arr)
 {
     size_t i;
@@ -176,6 +298,19 @@ void string_array_free(StringArray *arr)
     arr->capacity = 0;
 }
 
+/*
+ * split_string()
+ *
+ * Splits a string at every occurrence of a delimiter character and stores
+ * the pieces as tokens in a string array.
+ *
+ * Parameters:
+ *   input     - NUL terminated string to split.
+ *   delimiter - Character that separates the tokens.
+ *   result    - Initialised array that receives the tokens.
+ *
+ * Returns: nothing.
+ */
 void split_string(const char *input, char delimiter, StringArray *result)
 {
     char *input_copy;

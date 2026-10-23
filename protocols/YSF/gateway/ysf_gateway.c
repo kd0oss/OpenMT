@@ -169,122 +169,31 @@ static char staticReflector[YSF_NAME_LENGTH + 1] = "";   /* linked at start     
 static pthread_mutex_t linkOpMutex = PTHREAD_MUTEX_INITIALIZER;
 
 /*
- * logMsg()
- *   Prints a time stamped status line to standard output.
- */
-static void logMsg(const char* fmt, ...)
-{
-    char stamp[32];
-    time_t t = time(NULL);
-    struct tm tmv;
-    va_list ap;
-
-    localtime_r(&t, &tmv);
-    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
-
-    printf("%s ", stamp);
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    va_end(ap);
-    printf("\n");
-    fflush(stdout);
-}
-
-/*
  * error()
- *   Wrapper for perror that ends the program.
+ *
+ * Wrapper for perror that ends the program.
+ *
+ * Parameters:
+ *   msg - Text printed before the system error message.
+ *
+ * Returns: nothing.
  */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "YSF gateway", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
 /*
- * delay()
- *   Sleeps for the given number of microseconds.
- */
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-}
-
-/*
- * nowMs()
- *   Monotonic time in milliseconds.
- */
-static uint64_t nowMs(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000U + (uint64_t)(ts.tv_nsec / 1000000L);
-}
-
-/*
- * dump()
- *   Debug helper. Prints text and a millisecond timestamp, then a hex and ASCII
- *   dump of length bytes of data, 16 bytes per line.
- */
-void dump(const char* text, const uint8_t* data, unsigned int length)
-{
-    struct timespec ts;
-    uint64_t milliseconds;
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("clock_gettime");
-        return;
-    }
-
-    milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-
-    fprintf(stdout, "%s: %llu (ms)\n", text, (unsigned long long)milliseconds);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++)
-            fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++)
-            fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            uint8_t c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-
-    fflush(stdout);
-}
-
-/*
  * hostSend()
- *   Writes one packet to ysf_host. Safe to call from both threads.
+ *
+ * Writes one packet to ysf_host. Safe to call from both threads.
+ *
+ * Parameters:
+ *   buf - The packet.
+ *   len - Number of bytes in buf.
+ *
+ * Returns: nothing.
  */
 static void hostSend(const uint8_t* buf, uint16_t len)
 {
@@ -293,10 +202,10 @@ static void hostSend(const uint8_t* buf, uint16_t len)
     if (hostFd >= 0)
     {
         if (debugM)
-            dump("To YSF host", buf, len);
+            hexDump("To YSF host", buf, len);
 
         if (write(hostFd, buf, len) < 0)
-            fprintf(stderr, "YSF_Gateway: write to YSF host failed: %s\n", strerror(errno));
+            reportError(modemName, "YSF gateway", "YSF_Gateway: write to YSF host failed: %s", strerror(errno));
     }
 
     pthread_mutex_unlock(&hostMutex);
@@ -304,7 +213,15 @@ static void hostSend(const uint8_t* buf, uint16_t len)
 
 /*
  * hostReply()
- *   Sends a link status packet (CONN, NACK or DISC) with the reflector name.
+ *
+ * Sends a link status packet (CONN, NACK or DISC) with the reflector name to
+ * ysf_host.
+ *
+ * Parameters:
+ *   type - The four character status.
+ *   name - The name of the reflector.
+ *
+ * Returns: nothing.
  */
 static void hostReply(const char* type, const char* name)
 {
@@ -323,10 +240,16 @@ static void hostReply(const char* type, const char* name)
 
 /*
  * loadCallsign()
- *   Reads the station callsign for the reflector polls from the host
- *   configuration and pads it to 10 characters.  YSF/suffix, when set, is
- *   added with a dash (W1ABC-ND), which is how a node announces itself to a
- *   reflector.
+ *
+ * Reads the station callsign for the reflector polls from the host
+ * configuration and pads it to 10 characters.  YSF/suffix, when set, is
+ * added with a dash (W1ABC-ND), which is how a node announces itself to a
+ * reflector.
+ *
+ * Parameters:
+ *   fallback - Callsign used when none is configured, or NULL.
+ *
+ * Returns: nothing.
  */
 static void loadCallsign(const char* fallback)
 {
@@ -360,33 +283,21 @@ static void loadCallsign(const char* fallback)
     memcpy(nodeSuffix, suffix, strnlen(suffix, 10));
 }
 
-/*
- * resolveAddress()
- *   Fills addr with an IPv4 address given as dotted decimal or a host name.
- */
-static bool resolveAddress(const char* host, uint16_t port, struct sockaddr_in* addr)
-{
-    struct hostent* server;
-
-    memset(addr, 0x00, sizeof(*addr));
-    addr->sin_family = AF_INET;
-    addr->sin_port   = htons(port);
-
-    if (inet_pton(AF_INET, host, &addr->sin_addr) == 1)
-        return true;
-
-    server = gethostbyname(host);
-    if (server == NULL || server->h_addrtype != AF_INET)
-        return false;
-
-    memcpy(&addr->sin_addr, server->h_addr_list[0], sizeof(addr->sin_addr));
-    return true;
-}
-
 /* ------------------------------------------------------------------------ */
 /* Reflector kinds */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * isFcsName()
+ *
+ * Tells if a name is an FCS room name: 6 to 9 characters, starting with FCS,
+ * letters and digits only (a dash is allowed after the sixth).
+ *
+ * Parameters:
+ *   s - The name.
+ *
+ * Returns: true if s looks like an FCS room name.
+ */
 static bool isFcsName(const char* s)
 {
     size_t n = strlen(s);
@@ -403,9 +314,17 @@ static bool isFcsName(const char* s)
 
 /*
  * fcsNormalise()
- *   "FCS001", "FCS00101" or "FCS001-01" become the 8 character room name
- *   (FCS00101) and the printed form (FCS001-01); a short name is padded with
- *   zeroes, as YSFGateway does.
+ *
+ * "FCS001", "FCS00101" or "FCS001-01" become the 8 character room name
+ * (FCS00101) and the printed form (FCS001-01); a short name is padded with
+ * zeroes, as YSFGateway does.
+ *
+ * Parameters:
+ *   in    - The name as given.
+ *   name  - Receives the 8 character room name, as a string.
+ *   print - Receives the printed form, as a string of 9 characters.
+ *
+ * Returns: nothing.
  */
 static void fcsNormalise(const char* in, char* name, char* print)
 {
@@ -434,9 +353,15 @@ static void fcsNormalise(const char* in, char* name, char* print)
 /* ------------------------------------------------------------------------ */
 
 /*
- * wxSendCb()
- *   Called by Wires-X for every frame of a reply; the frames go to the host
- *   to be sent over the air.
+ * bodyToHost()
+ *
+ * Sends a frame of a call to ysf_host as a YSFG packet, to be transmitted.
+ *
+ * Parameters:
+ *   body - The body of the frame, YSF_BODY_LENGTH bytes.
+ *   end  - true for the last frame of the call.
+ *
+ * Returns: nothing.
  */
 static void bodyToHost(const uint8_t* body, bool end)
 {
@@ -454,6 +379,19 @@ static void bodyToHost(const uint8_t* body, bool end)
     hostSend(out, sizeof(out));
 }
 
+/*
+ * wxSendCb()
+ *
+ * Called by Wires-X for every frame of a reply; the frames go to the host to
+ * be sent over the air.
+ *
+ * Parameters:
+ *   ctx  - Not used.
+ *   body - The body of the frame.
+ *   end  - true for the last frame of the reply.
+ *
+ * Returns: nothing.
+ */
 static void wxSendCb(void* ctx, const uint8_t* body, bool end)
 {
     (void)ctx;
@@ -462,7 +400,15 @@ static void wxSendCb(void* ctx, const uint8_t* body, bool end)
 
 /*
  * calculateLocator()
- *   The six character Maidenhead locator of the station, as YSFGateway does.
+ *
+ * Works out the six character Maidenhead locator of the station from the
+ * configured latitude and longitude, as YSFGateway does.  AA00AA is used
+ * when the values are out of range.
+ *
+ * Parameters:
+ *   out - Receives the locator as a string; must hold 7 bytes.
+ *
+ * Returns: nothing.
  */
 static void calculateLocator(char* out)
 {
@@ -521,8 +467,13 @@ static void calculateLocator(char* out)
 
 /*
  * loadFcsConfig()
- *   YSF/enableFCS, YSF/options, YSF/fcsRoomsFile, YSF/fcsPort and the node
- *   information the FCS reflectors are given (frequencies, locator, id).
+ *
+ * YSF/enableFCS, YSF/options, YSF/fcsRoomsFile, YSF/fcsPort and the node
+ * information the FCS reflectors are given (frequencies, locator, id).
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void loadFcsConfig(void)
 {
@@ -567,10 +518,15 @@ static void loadFcsConfig(void)
 
 /*
  * loadReflectorList()
- *   Reads the reflector list for Wires-X and for linking by id: YSF/hostsFile,
- *   then YSFHosts.json and YSFHosts.txt in the working directory and the OpenMT
- *   install directory.  FCS rooms are added when FCS is enabled
- *   (YSF/fcsRoomsFile, ./FCSRooms.txt, the OpenMT install directory).
+ *
+ * Reads the reflector list for Wires-X and for linking by id: YSF/hostsFile,
+ * then YSFHosts.json and YSFHosts.txt in the working directory and the
+ * OpenMT install directory.  FCS rooms are added when FCS is enabled
+ * (YSF/fcsRoomsFile, ./FCSRooms.txt, the OpenMT install directory).
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void loadReflectorList(void)
 {
@@ -625,8 +581,16 @@ static void loadReflectorList(void)
 }
 
 /*
- * wxReflectorSet() / wxReflectorClear() / wxNotifyDisconnect()
- *   Keep the Wires-X view of the link in step with the gateway.
+ * wxReflectorSet()
+ *
+ * Tells Wires-X which reflector is linked, found by its id in the reflector
+ * list.
+ *
+ * Parameters:
+ *   id - The id of the reflector, or NULL or an empty string when there is
+ *        none.
+ *
+ * Returns: nothing.
  */
 static void wxReflectorSet(const char* id)
 {
@@ -635,6 +599,16 @@ static void wxReflectorSet(const char* id)
     pthread_mutex_unlock(&wxMutex);
 }
 
+/*
+ * wxNotifyDisconnect()
+ *
+ * Tells Wires-X that the link was lost or dropped.  Does nothing when
+ * Wires-X is off.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void wxNotifyDisconnect(void)
 {
     if (!wxEnabled)
@@ -645,6 +619,16 @@ static void wxNotifyDisconnect(void)
     pthread_mutex_unlock(&wxMutex);
 }
 
+/*
+ * wxBusyNow()
+ *
+ * Tells if Wires-X is busy sending a reply, in which case the reflector's
+ * frames are held back.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if a Wires-X answer is being sent.
+ */
 static bool wxBusyNow(void)
 {
     bool busy;
@@ -661,7 +645,12 @@ static bool wxBusyNow(void)
 
 /*
  * wxListRefresh()
- *   Re-reads the list when the file changed, between Wires-X requests.
+ *
+ * Re-reads the list when the file changed, between Wires-X requests.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void wxListRefresh(void)
 {
@@ -703,9 +692,16 @@ typedef struct
 
 /*
  * findInOtherFiles()
- *   A reflector that is not in the list loaded at start may be in one of the
- *   other hosts files (a text list next to a JSON one, say).  Each is read
- *   into a list of its own and searched.
+ *
+ * A reflector that is not in the list loaded at start may be in one of the
+ * other hosts files (a text list next to a JSON one, say).  Each is read
+ * into a list of its own and searched.
+ *
+ * Parameters:
+ *   key - The reflector id or name.
+ *   out - Receives the reflector.
+ *
+ * Returns: true if it was found in one of the other files.
  */
 static bool findInOtherFiles(const char* key, Reflector* out)
 {
@@ -750,10 +746,20 @@ static bool findInOtherFiles(const char* key, Reflector* out)
 
 /*
  * resolveTarget()
- *   Finds a reflector by id or name.  A name that starts with FCS is an FCS
- *   room.  Otherwise the dashboard database is tried first (the id is its
- *   Nick), then the reflector list.  'entry' is a reflector chosen from the list
- *   by Wires-X, which is used as it is.
+ *
+ * Finds a reflector by id or name.  A name that starts with FCS is an FCS
+ * room.  Otherwise the dashboard database is tried first (the id is its
+ * Nick), then the reflector list.  'entry' is a reflector chosen from the
+ * list by Wires-X, which is used as it is.
+ *
+ * Parameters:
+ *   key   - The reflector id or name.
+ *   entry - The reflector picked on the radio by Wires-X, or NULL.
+ *   t     - Receives the kind, address and names of the target.
+ *
+ * Returns: true if the target was found (and for a YSF reflector its address
+ *   resolved), false otherwise.  The address of an FCS room is worked out by
+ *   the caller.
  */
 static bool resolveTarget(const char* key, const Reflector* entry, Target* t)
 {
@@ -850,6 +856,19 @@ static bool resolveTarget(const char* key, const Reflector* entry, Target* t)
 /* Reflector link                                                            */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * reflWritePoll()
+ *
+ * Sends a poll or an unlink to a YSF reflector: "YSF", the kind and the node
+ * name.
+ *
+ * Parameters:
+ *   fd   - UDP socket to the reflector.
+ *   addr - Address of the reflector.
+ *   kind - 'P' for a poll or 'U' for an unlink.
+ *
+ * Returns: nothing.
+ */
 static void reflWritePoll(int fd, const struct sockaddr_in* addr, char kind)
 {
     uint8_t data[YSF_REFL_POLL_LENGTH];
@@ -859,12 +878,23 @@ static void reflWritePoll(int fd, const struct sockaddr_in* addr, char kind)
     memcpy(data + 4, callsign, 10);
 
     if (debugM)
-        dump(kind == 'P' ? "YSF poll sent" : "YSF unlink sent", data, sizeof(data));
+        hexDump(kind == 'P' ? "YSF poll sent" : "YSF unlink sent", data, sizeof(data));
 
     sendto(fd, data, sizeof(data), 0, (const struct sockaddr*)addr, sizeof(*addr));
 }
 
-/* FCS: PING (25), the node information (100), the options (50) and CLOSE (11) */
+/*
+ * fcsWritePing()
+ *
+ * Sends the FCS PING (25 bytes): the station callsign and the room.
+ *
+ * Parameters:
+ *   fd   - UDP socket to the FCS server.
+ *   addr - Address of the server.
+ *   room - The 8 character room name.
+ *
+ * Returns: nothing.
+ */
 static void fcsWritePing(int fd, const struct sockaddr_in* addr, const char* room)
 {
     uint8_t data[FCS_PING_LENGTH];
@@ -877,11 +907,23 @@ static void fcsWritePing(int fd, const struct sockaddr_in* addr, const char* roo
     memcpy(data + 10, room, 8);
 
     if (debugM)
-        dump("FCS ping sent", data, sizeof(data));
+        hexDump("FCS ping sent", data, sizeof(data));
 
     sendto(fd, data, sizeof(data), 0, (const struct sockaddr*)addr, sizeof(*addr));
 }
 
+/*
+ * fcsWriteInfo()
+ *
+ * Sends the node information to an FCS server (100 bytes): receive and
+ * transmit frequency, locator, "MMDVM" and the node id.
+ *
+ * Parameters:
+ *   fd   - UDP socket to the FCS server.
+ *   addr - Address of the server.
+ *
+ * Returns: nothing.
+ */
 static void fcsWriteInfo(int fd, const struct sockaddr_in* addr)
 {
     char data[FCS_INFO_LENGTH + 1];
@@ -891,11 +933,24 @@ static void fcsWriteInfo(int fd, const struct sockaddr_in* addr)
     memset(data + 43, ' ', 57);
 
     if (debugM)
-        dump("FCS info sent", (const uint8_t*)data, FCS_INFO_LENGTH);
+        hexDump("FCS info sent", (const uint8_t*)data, FCS_INFO_LENGTH);
 
     sendto(fd, data, FCS_INFO_LENGTH, 0, (const struct sockaddr*)addr, sizeof(*addr));
 }
 
+/*
+ * fcsWriteOptions()
+ *
+ * Sends the options to an FCS server (50 bytes, FCSO), when YSF/options is
+ * set.
+ *
+ * Parameters:
+ *   fd    - UDP socket to the FCS server.
+ *   addr  - Address of the server.
+ *   print - The printed room name (FCS001-01).
+ *
+ * Returns: nothing.
+ */
 static void fcsWriteOptions(int fd, const struct sockaddr_in* addr, const char* print)
 {
     uint8_t data[FCS_OPTIONS_LENGTH];
@@ -911,14 +966,20 @@ static void fcsWriteOptions(int fd, const struct sockaddr_in* addr, const char* 
     memcpy(data + 12, fcsOptions, n);
 
     if (debugM)
-        dump("FCS options sent", data, sizeof(data));
+        hexDump("FCS options sent", data, sizeof(data));
 
     sendto(fd, data, sizeof(data), 0, (const struct sockaddr*)addr, sizeof(*addr));
 }
 
 /*
  * sendToReflector()
- *   Sends one frame from the radio to the linked reflector.
+ *
+ * Sends one frame from the radio to the linked reflector.
+ *
+ * Parameters:
+ *   body - The body of the frame, YSF_BODY_LENGTH bytes.
+ *
+ * Returns: nothing.
  */
 static void sendToReflector(const uint8_t* body)
 {
@@ -954,7 +1015,7 @@ static void sendToReflector(const uint8_t* body)
         memcpy(data + 121, room, 8);
 
         if (debugM)
-            dump("FCS data sent", data, sizeof(data));
+            hexDump("FCS data sent", data, sizeof(data));
 
         sendto(fd, data, sizeof(data), 0, (struct sockaddr*)&addr, sizeof(addr));
         return;
@@ -964,14 +1025,20 @@ static void sendToReflector(const uint8_t* body)
     memcpy(buffer + 4, body, YSF_BODY_LENGTH);
 
     if (debugM)
-        dump("YSF data sent", buffer, sizeof(buffer));
+        hexDump("YSF data sent", buffer, sizeof(buffer));
 
     sendto(fd, buffer, sizeof(buffer), 0, (struct sockaddr*)&addr, sizeof(addr));
 }
 
 /*
  * sendToHost()
- *   Passes one YSFD packet from the reflector on to ysf_host.
+ *
+ * Passes one YSFD packet from the reflector on to ysf_host.
+ *
+ * Parameters:
+ *   packet - The YSFD packet received from the reflector.
+ *
+ * Returns: nothing.
  */
 static void sendToHost(const uint8_t* packet)
 {
@@ -983,9 +1050,15 @@ static void sendToHost(const uint8_t* packet)
 
 /*
  * reflectorThread()
- *   Links to the reflector in reflAddr, polls it (every five seconds for a YSF
- *   reflector, every 800 ms for an FCS room) and passes its calls to ysf_host
- *   until the link is stopped, lost or the host goes away.
+ *
+ * Links to the reflector in reflAddr, polls it (every five seconds for a YSF
+ * reflector, every 800 ms for an FCS room) and passes its calls to ysf_host
+ * until the link is stopped, lost or the host goes away.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 void* reflectorThread(void* arg)
 {
@@ -1056,7 +1129,7 @@ void* reflectorThread(void* arg)
                 if (isPoll || isData)
                 {
                     if (debugM)
-                        dump(isPoll ? "YSF poll received" : "YSF data received", buf, (unsigned int)n);
+                        hexDump(isPoll ? "YSF poll received" : "YSF data received", buf, (unsigned int)n);
 
                     lastRx = now;
 
@@ -1082,7 +1155,7 @@ void* reflectorThread(void* arg)
             else if (n == 7 || n == 10 || n == (ssize_t)FCS_DATA_LENGTH)
             {
                 if (debugM)
-                    dump("FCS received", buf, (unsigned int)n);
+                    hexDump("FCS received", buf, (unsigned int)n);
 
                 lastRx = now;
 
@@ -1193,8 +1266,13 @@ void* reflectorThread(void* arg)
 
 /*
  * stopLink()
- *   Asks the reflector thread to unlink and waits (up to two seconds) for it
- *   to finish.
+ *
+ * Asks the reflector thread to unlink and waits (up to two seconds) for it
+ * to finish.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void stopLink(void)
 {
@@ -1221,9 +1299,18 @@ static void stopLink(void)
 
 /*
  * startLink()
- *   Finds the reflector (or FCS room), opens the UDP socket and starts
- *   reflectorThread().  Replies NACK to the host if it is unknown.  'entry' is
- *   the list entry picked on the radio by Wires-X, or NULL.
+ *
+ * Finds the reflector (or FCS room), opens the UDP socket and starts
+ * reflectorThread().  Replies NACK to the host if it is unknown.  'entry' is
+ * the list entry picked on the radio by Wires-X, or NULL.
+ *
+ * Parameters:
+ *   hostCallsign - The callsign sent by the host for the polls, or NULL to
+ *                  use the configured one.
+ *   name         - The reflector name or id.
+ *   entry        - The list entry picked on the radio, or NULL.
+ *
+ * Returns: nothing.
  */
 static void startLink(const char* hostCallsign, const char* name, const Reflector* entry)
 {
@@ -1291,7 +1378,7 @@ static void startLink(const char* hostCallsign, const char* name, const Reflecto
     fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0)
     {
-        fprintf(stderr, "Cannot open the reflector socket: %s\n", strerror(errno));
+        reportError(modemName, "YSF gateway", "Cannot open the reflector socket: %s", strerror(errno));
         hostReply("NACK", cleanName);
         wxReflectorSet(NULL);
         pthread_mutex_unlock(&linkOpMutex);
@@ -1322,7 +1409,7 @@ static void startLink(const char* hostCallsign, const char* name, const Reflecto
             local.sin_port        = htons((uint16_t)port);
 
             if (bind(fd, (struct sockaddr*)&local, sizeof(local)) < 0)
-                fprintf(stderr, "Cannot bind UDP port %d (%s), using any port.\n", port, strerror(errno));
+                reportError(modemName, "YSF gateway", "Cannot bind UDP port %d (%s), using any port.", port, strerror(errno));
         }
     }
 
@@ -1345,10 +1432,7 @@ static void startLink(const char* hostCallsign, const char* name, const Reflecto
     lastActivity = nowMs();
     pthread_mutex_unlock(&reflMutex);
 
-    if (target.kind == KIND_FCS)
-        wxReflectorSet(target.listId);
-    else
-        wxReflectorSet(target.listId);
+    wxReflectorSet(target.listId);
 
     if (target.kind == KIND_FCS)
         logMsg("Linking to FCS room %s (%s:%u)", target.fcsPrint, inet_ntoa(target.addr.sin_addr), ntohs(target.addr.sin_port));
@@ -1361,7 +1445,7 @@ static void startLink(const char* hostCallsign, const char* name, const Reflecto
     }
     else
     {
-        fprintf(stderr, "Can't create YSF reflector thread\n");
+        reportError(modemName, "YSF gateway", "Can't create YSF reflector thread");
         pthread_mutex_lock(&reflMutex);
         reflRunning = false;
         linkState   = LINK_IDLE;
@@ -1377,9 +1461,15 @@ static void startLink(const char* hostCallsign, const char* name, const Reflecto
 
 /*
  * dropLink()
- *   Unlinks from the current reflector.  'user' is an unlink asked for by the
- *   dashboard or the radio: it also forgets the reflector for the Wires-X
- *   reconnect.
+ *
+ * Unlinks from the current reflector.  'user' is an unlink asked for by the
+ * dashboard or the radio: it also forgets the reflector for the Wires-X
+ * reconnect.
+ *
+ * Parameters:
+ *   user - true if the unlink was asked for.
+ *
+ * Returns: nothing.
  */
 static void dropLink(bool user)
 {
@@ -1399,8 +1489,13 @@ static void dropLink(bool user)
 
 /*
  * loadLinkConfig()
- *   Reads YSF/staticReflector and YSF/inactivityTime (minutes) from the host
- *   configuration.
+ *
+ * Reads YSF/staticReflector and YSF/inactivityTime (minutes) from the host
+ * configuration.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void loadLinkConfig(void)
 {
@@ -1418,7 +1513,12 @@ static void loadLinkConfig(void)
 
 /*
  * linkStatic()
- *   Links to the static reflector, if one is configured.
+ *
+ * Links to the static reflector, if one is configured.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void linkStatic(void)
 {
@@ -1431,8 +1531,13 @@ static void linkStatic(void)
 
 /*
  * inactivityCheck()
- *   Drops a link when nothing has been heard in either direction for the
- *   inactivity time, then goes back to the static reflector.
+ *
+ * Drops a link when nothing has been heard in either direction for the
+ * inactivity time, then goes back to the static reflector.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void inactivityCheck(void)
 {
@@ -1461,7 +1566,16 @@ static void inactivityCheck(void)
 
 /*
  * readFull()
- *   Reads exactly len bytes from fd. Returns false when the connection closed.
+ *
+ * Reads exactly len bytes from fd. Returns false when the connection closed.
+ *
+ * Parameters:
+ *   fd  - Socket to read from.
+ *   buf - Receives the bytes.
+ *   len - Number of bytes to read.
+ *
+ * Returns: true if len bytes were read, false when the connection closed or
+ *   failed.
  */
 static bool readFull(int fd, uint8_t* buf, size_t len)
 {
@@ -1486,9 +1600,15 @@ static bool readFull(int fd, uint8_t* buf, size_t len)
 
 /*
  * handleRadioFrame()
- *   One frame from the radio.  Wires-X requests are answered here; the
- *   frame goes on to the reflector except for the Wires-X data of a reflector
- *   that does Wires-X itself.
+ *
+ * One frame from the radio.  Wires-X requests are answered here; the frame
+ * goes on to the reflector except for the Wires-X data of a reflector that
+ * does Wires-X itself.
+ *
+ * Parameters:
+ *   body - The body of the frame, YSF_BODY_LENGTH bytes.
+ *
+ * Returns: nothing.
  */
 static void handleRadioFrame(const uint8_t* body)
 {
@@ -1575,7 +1695,14 @@ static void handleRadioFrame(const uint8_t* body)
 
 /*
  * handleHostPacket()
- *   One complete packet from ysf_host.
+ *
+ * One complete packet from ysf_host.
+ *
+ * Parameters:
+ *   buffer  - The packet.
+ *   respLen - Length of the packet, in bytes.
+ *
+ * Returns: nothing.
  */
 static void handleHostPacket(const uint8_t* buffer, uint16_t respLen)
 {
@@ -1585,7 +1712,7 @@ static void handleHostPacket(const uint8_t* buffer, uint16_t respLen)
         return;
 
     if (debugM && memcmp(buffer + 4, "YSFG", 4) != 0)
-        dump("YSF host data", buffer, respLen);
+        hexDump("YSF host data", buffer, respLen);
 
     if (memcmp(buffer + 4, "COMM", 4) == 0)
     {
@@ -1634,7 +1761,12 @@ static void handleHostPacket(const uint8_t* buffer, uint16_t respLen)
 
 /*
  * connectHost()
- *   Opens the TCP connection to ysf_host, retrying until it is up.
+ *
+ * Opens the TCP connection to ysf_host, retrying until it is up.
+ *
+ * Parameters: none.
+ *
+ * Returns: The connected socket, or -1 if the gateway is stopping.
  */
 static int connectHost(void)
 {
@@ -1645,7 +1777,7 @@ static int connectHost(void)
 
         if (fd < 0)
         {
-            perror("Socket creation error");
+            reportError(modemName, "YSF gateway", "Socket creation error: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
 
@@ -1653,9 +1785,9 @@ static int connectHost(void)
         serv_addr.sin_family = AF_INET;
         serv_addr.sin_port   = htons(clientPort);
 
-        if (inet_pton(AF_INET, ysfHost, &serv_addr.sin_addr) <= 0)
+        if (!hostToAddress(ysfHost, &serv_addr.sin_addr))
         {
-            perror("Invalid address/ Address not supported");
+            reportError(modemName, "YSF gateway", "Invalid address/ Address not supported");
             exit(EXIT_FAILURE);
         }
 
@@ -1675,8 +1807,14 @@ static int connectHost(void)
 
 /*
  * startClient()
- *   Thread that connects to ysf_host and handles its packets. When the host
- *   goes away the reflector is unlinked and the connection is made again.
+ *
+ * Thread that connects to ysf_host and handles its packets. When the host
+ * goes away the reflector is unlinked and the connection is made again.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL when the thread ends.
  */
 void* startClient(void* arg)
 {
@@ -1751,8 +1889,15 @@ void* startClient(void* arg)
 
 /*
  * main()
- *   Program entry. Parses the command line (-m modem number 1-10, -d daemon,
- *   -v version, -x debug), starts the host client and waits.
+ *
+ * Program entry. Parses the command line (-m modem number 1-10, -d daemon,
+ * -v version, -x debug), starts the host client and waits.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on normal exit, 1 on a command line or startup error.
  */
 int main(int argc, char** argv)
 {
@@ -1762,7 +1907,7 @@ int main(int argc, char** argv)
     unsigned int seconds = 0U;
     uint64_t lastSecond;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1771,7 +1916,7 @@ int main(int argc, char** argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "YSF gateway", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -1779,8 +1924,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(ysfHost, sizeof(ysfHost), "%s", optarg);   /* where the protocol service runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -1792,7 +1940,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: YSF_Gateway [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: YSF_Gateway [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1803,7 +1951,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "YSF_Gateway: error in fork(), exiting\n");
+            reportError(modemName, "YSF gateway", "YSF_Gateway: error in fork(), exiting");
             return 1;
         }
 
@@ -1837,7 +1985,7 @@ int main(int argc, char** argv)
 
     if (pthread_create(&clientid, NULL, &startClient, NULL) != 0)
     {
-        fprintf(stderr, "Can't create YSF host thread\n");
+        reportError(modemName, "YSF gateway", "Can't create YSF host thread");
         return 1;
     }
 

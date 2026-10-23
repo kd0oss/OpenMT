@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -17,7 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <dsp_tools.h>
+#include <fec_tools.h>
 
 #include "ysf_func.h"
 
@@ -32,6 +33,16 @@ static const uint8_t YSF_SYNC_BYTES[] = {0xD4U, 0x71U, 0xC9U, 0x63U, 0x4DU};
 static const uint8_t WHITENING_DATA[] = {0x93U, 0xD7U, 0x51U, 0x21U, 0x9CU, 0x2FU, 0x6CU, 0xD0U, 0xEFU, 0x0FU,
                                          0xF8U, 0x3DU, 0xF1U, 0x73U, 0x20U, 0x94U, 0xEDU, 0x1EU, 0x7CU, 0xD8U};
 
+/*
+ * bitCount()
+ *
+ * Counts the bits that are set in a value.
+ *
+ * Parameters:
+ *   v - The value.
+ *
+ * Returns: The number of 1 bits in v.
+ */
 static unsigned int bitCount(unsigned int v)
 {
     unsigned int n = 0U;
@@ -50,22 +61,51 @@ static unsigned int bitCount(unsigned int v)
 /* ------------------------------------------------------------------------ */
 
 /*
- * The FICH (100 dibits, 5 columns) and the data channels (180 dibits, 9
- * columns) are interleaved by writing the dibits in rows and reading them in
- * columns of a 20 row table: dibit i goes to dibit position 2 * (i / cols) +
- * 40 * (i % cols), which is the bit position given by the table below.
+ * interleave5()
+ *
+ * Gives the bit position of a dibit for the FICH and the short data channel.
+ * They are interleaved by writing the dibits in rows and reading them in
+ * columns of a 20 row table (5 columns): dibit i goes to position 2 * (i /
+ * 5) + 40 * (i % 5).
+ *
+ * Parameters:
+ *   i - Index of the dibit, 0 to 99.
+ *
+ * Returns: The bit position of the dibit in the interleaved data.
  */
 static unsigned int interleave5(unsigned int i)
 {
     return 2U * (i / 5U) + 40U * (i % 5U);
 }
 
+/*
+ * interleave9()
+ *
+ * Gives the bit position of a dibit for the long data channels, which are
+ * interleaved in the same way as the FICH but with 9 columns: dibit i goes
+ * to position 2 * (i / 9) + 40 * (i % 9).
+ *
+ * Parameters:
+ *   i - Index of the dibit, 0 to 179.
+ *
+ * Returns: The bit position of the dibit in the interleaved data.
+ */
 static unsigned int interleave9(unsigned int i)
 {
     return 2U * (i / 9U) + 40U * (i % 9U);
 }
 
-/* V/D mode 2 voice channel: 26 columns, bit interleaved */
+/*
+ * interleave26()
+ *
+ * Gives the bit position of a bit of the V/D mode 2 voice channel, which is
+ * bit interleaved with 26 columns.
+ *
+ * Parameters:
+ *   i - Index of the bit, 0 to 103.
+ *
+ * Returns: The bit position of the bit in the interleaved data.
+ */
 static unsigned int interleave26(unsigned int i)
 {
     return (i / 26U) + 4U * (i % 26U);
@@ -93,6 +133,17 @@ typedef struct
     unsigned int dp;
 } Viterbi;
 
+/*
+ * viterbiStart()
+ *
+ * Prepares a Viterbi decoder for a new block: clears the path metrics and
+ * the decision history.
+ *
+ * Parameters:
+ *   v - The decoder to start.
+ *
+ * Returns: nothing.
+ */
 static void viterbiStart(Viterbi* v)
 {
     memset(v->metrics1, 0x00, CONV_STATES * sizeof(uint16_t));
@@ -103,6 +154,20 @@ static void viterbiStart(Viterbi* v)
     v->dp         = 0U;
 }
 
+/*
+ * viterbiDecode()
+ *
+ * Takes one pair of received bits of the rate 1/2 convolutional code,
+ * updates the metrics of the 16 states and stores the decisions for the
+ * chainback.
+ *
+ * Parameters:
+ *   v  - The decoder.
+ *   s0 - First received bit (0 or 1).
+ *   s1 - Second received bit (0 or 1).
+ *
+ * Returns: nothing.
+ */
 static void viterbiDecode(Viterbi* v, uint8_t s0, uint8_t s1)
 {
     uint64_t dec = 0U;
@@ -132,6 +197,22 @@ static void viterbiDecode(Viterbi* v, uint8_t s0, uint8_t s1)
     v->newMetrics = tmp;
 }
 
+/*
+ * viterbiChainback()
+ *
+ * Traces the best path back through the stored decisions, starting from
+ * state 0, and writes the decoded bits.
+ *
+ * Parameters:
+ *   v     - The decoder, after all the bit pairs were given to
+ *           viterbiDecode().
+ *   out   - Receives the decoded bits, most significant bit first; must be
+ *           zero before the call.
+ *   nBits - Number of bits to decode.
+ *
+ * Returns: The lowest path cost, which is a measure of the number of bit
+ *   errors that were corrected.
+ */
 static unsigned int viterbiChainback(Viterbi* v, uint8_t* out, unsigned int nBits)
 {
     uint32_t state = 0U;
@@ -158,7 +239,16 @@ static unsigned int viterbiChainback(Viterbi* v, uint8_t* out, unsigned int nBit
 
 /*
  * ysfConvEncode()
- *   Encodes nBits bits of 'in' (most significant bit first) into 2 * nBits bits.
+ *
+ * Encodes nBits bits of 'in' (most significant bit first) into 2 * nBits
+ * bits, with the rate 1/2 constraint length 5 convolutional code of YSF.
+ *
+ * Parameters:
+ *   in    - The bits to encode.
+ *   out   - Receives the 2 * nBits encoded bits.
+ *   nBits - Number of bits to encode.
+ *
+ * Returns: nothing.
  */
 void ysfConvEncode(const uint8_t* in, uint8_t* out, unsigned int nBits)
 {
@@ -188,11 +278,34 @@ void ysfConvEncode(const uint8_t* in, uint8_t* out, unsigned int nBits)
 /* Sync                                                                      */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * ysfAddSync()
+ *
+ * Writes the 40 bit frame sync word at the start of a frame.
+ *
+ * Parameters:
+ *   frame - The frame, YSF_FRAME_LENGTH_BYTES bytes.
+ *
+ * Returns: nothing.
+ */
 void ysfAddSync(uint8_t* frame)
 {
     memcpy(frame, YSF_SYNC_BYTES, YSF_SYNC_LENGTH_BYTES);
 }
 
+/*
+ * ysfHasSync()
+ *
+ * Checks if a frame starts with the frame sync word, allowing some bit
+ * errors.
+ *
+ * Parameters:
+ *   frame     - The frame.
+ *   maxErrors - Largest number of wrong bits that is still accepted.
+ *
+ * Returns: true if the number of wrong bits in the sync word is not more
+ *   than maxErrors.
+ */
 bool ysfHasSync(const uint8_t* frame, unsigned int maxErrors)
 {
     unsigned int errs = 0U;
@@ -209,9 +322,15 @@ bool ysfHasSync(const uint8_t* frame, unsigned int maxErrors)
 
 /*
  * golayDecode()
- *   Decodes a 24 bit extended Golay word the way MMDVMHost does: the word is
- *   accepted when the syndrome is light or the corrected word has even weight.
- *   The 12 data bits are returned in *data.
+ *
+ * Decodes a 24 bit extended Golay word the way MMDVMHost does: the word is
+ * accepted when the syndrome is light or the corrected word has even weight.
+ *
+ * Parameters:
+ *   bytes - The 3 bytes of the word.
+ *   data  - Receives the 12 data bits.
+ *
+ * Returns: true if the word was accepted.
  */
 static bool golayDecode(const uint8_t* bytes, unsigned int* data)
 {
@@ -228,11 +347,35 @@ static bool golayDecode(const uint8_t* bytes, unsigned int* data)
 /* FICH                                                                      */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * ysfFichInit()
+ *
+ * Clears a FICH.
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: nothing.
+ */
 void ysfFichInit(YsfFich* f)
 {
     memset(f->b, 0x00, sizeof(f->b));
 }
 
+/*
+ * ysfFichDecode()
+ *
+ * Decodes the FICH of a frame: the 100 dibits after the sync word are de-
+ * interleaved, Viterbi decoded and checked with four Golay (24,12) words and
+ * a CRC.
+ *
+ * Parameters:
+ *   f     - Receives the 6 bytes of the FICH; changed only when all the
+ *           Golay words are good.
+ *   frame - The frame.
+ *
+ * Returns: true if the Golay words and the CRC are good.
+ */
 bool ysfFichDecode(YsfFich* f, const uint8_t* frame)
 {
     Viterbi v;
@@ -275,6 +418,18 @@ bool ysfFichDecode(YsfFich* f, const uint8_t* frame)
     return CRC_checkCCITT162(f->b, 6U);
 }
 
+/*
+ * ysfFichEncode()
+ *
+ * Writes a FICH into a frame: adds the CRC, Golay encodes, convolves and
+ * interleaves it into the 100 dibits after the sync word.
+ *
+ * Parameters:
+ *   f     - The FICH; the CRC bytes of f are set.
+ *   frame - The frame that receives the FICH.
+ *
+ * Returns: nothing.
+ */
 void ysfFichEncode(YsfFich* f, uint8_t* frame)
 {
     uint8_t conv[13];
@@ -327,27 +482,250 @@ void ysfFichEncode(YsfFich* f, uint8_t* frame)
     }
 }
 
+/*
+ * ysfFichGetFI()
+ *
+ * Gets the frame information field of the FICH (header, communications or
+ * terminator).
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetFI(const YsfFich* f)   { return (f->b[0] >> 6) & 0x03U; }
+/*
+ * ysfFichGetCM()
+ *
+ * Gets the call mode field of the FICH (group or individual call).
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetCM(const YsfFich* f)   { return (f->b[0] >> 2) & 0x03U; }
+/*
+ * ysfFichGetBN()
+ *
+ * Gets the block number field of the FICH.
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetBN(const YsfFich* f)   { return f->b[0] & 0x03U; }
+/*
+ * ysfFichGetBT()
+ *
+ * Gets the block total field of the FICH.
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetBT(const YsfFich* f)   { return (f->b[1] >> 6) & 0x03U; }
+/*
+ * ysfFichGetFN()
+ *
+ * Gets the frame number field of the FICH.
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetFN(const YsfFich* f)   { return (f->b[1] >> 3) & 0x07U; }
+/*
+ * ysfFichGetFT()
+ *
+ * Gets the frame total field of the FICH.
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetFT(const YsfFich* f)   { return f->b[1] & 0x07U; }
+/*
+ * ysfFichGetDT()
+ *
+ * Gets the data type field of the FICH (V/D mode 1, data FR, V/D mode 2 or
+ * voice FR).
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetDT(const YsfFich* f)   { return f->b[2] & 0x03U; }
+/*
+ * ysfFichGetMR()
+ *
+ * Gets the message routing field of the FICH.
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetMR(const YsfFich* f)   { return (f->b[2] >> 3) & 0x03U; }
+/*
+ * ysfFichGetDev()
+ *
+ * Gets the low deviation flag of the FICH.
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: true if the flag is set.
+ */
 bool    ysfFichGetDev(const YsfFich* f)  { return (f->b[2] & 0x40U) == 0x40U; }
+/*
+ * ysfFichGetDGId()
+ *
+ * Gets the digital group ID field of the FICH.
+ *
+ * Parameters:
+ *   f - The FICH.
+ *
+ * Returns: The field value.
+ */
 uint8_t ysfFichGetDGId(const YsfFich* f) { return f->b[3] & 0x7FU; }
 
+/*
+ * ysfFichSetFI()
+ *
+ * Sets the frame information field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   fi - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetFI(YsfFich* f, uint8_t fi)   { f->b[0] = (uint8_t)((f->b[0] & 0x3FU) | ((fi << 6) & 0xC0U)); }
+/*
+ * ysfFichSetCM()
+ *
+ * Sets the call mode field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   cm - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetCM(YsfFich* f, uint8_t cm)   { f->b[0] = (uint8_t)((f->b[0] & 0xF3U) | ((cm << 2) & 0x0CU)); }
+/*
+ * ysfFichSetBN()
+ *
+ * Sets the block number field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   bn - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetBN(YsfFich* f, uint8_t bn)   { f->b[0] = (uint8_t)((f->b[0] & 0xFCU) | (bn & 0x03U)); }
+/*
+ * ysfFichSetBT()
+ *
+ * Sets the block total field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   bt - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetBT(YsfFich* f, uint8_t bt)   { f->b[1] = (uint8_t)((f->b[1] & 0x3FU) | ((bt << 6) & 0xC0U)); }
+/*
+ * ysfFichSetFN()
+ *
+ * Sets the frame number field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   fn - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetFN(YsfFich* f, uint8_t fn)   { f->b[1] = (uint8_t)((f->b[1] & 0xC7U) | ((fn << 3) & 0x38U)); }
+/*
+ * ysfFichSetFT()
+ *
+ * Sets the frame total field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   ft - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetFT(YsfFich* f, uint8_t ft)   { f->b[1] = (uint8_t)((f->b[1] & 0xF8U) | (ft & 0x07U)); }
+/*
+ * ysfFichSetDT()
+ *
+ * Sets the data type field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   dt - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetDT(YsfFich* f, uint8_t dt)   { f->b[2] = (uint8_t)((f->b[2] & 0xFCU) | (dt & 0x03U)); }
+/*
+ * ysfFichSetMR()
+ *
+ * Sets the message routing field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   mr - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetMR(YsfFich* f, uint8_t mr)   { f->b[2] = (uint8_t)((f->b[2] & 0xC7U) | ((mr << 3) & 0x38U)); }
+/*
+ * ysfFichSetVoIP()
+ *
+ * Sets or clears the VoIP flag of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   on - true to set the flag.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetVoIP(YsfFich* f, bool on)    { if (on) f->b[2] |= 0x04U; else f->b[2] &= 0xFBU; }
+/*
+ * ysfFichSetDev()
+ *
+ * Sets or clears the low deviation flag of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   on - true to set the flag.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetDev(YsfFich* f, bool on)     { if (on) f->b[2] |= 0x40U; else f->b[2] &= 0xBFU; }
+/*
+ * ysfFichSetDGId()
+ *
+ * Sets the digital group ID field of the FICH.
+ *
+ * Parameters:
+ *   f  - The FICH.
+ *   id - The new value.
+ *
+ * Returns: nothing.
+ */
 void ysfFichSetDGId(YsfFich* f, uint8_t id) { f->b[3] = (uint8_t)((f->b[3] & 0x80U) | (id & 0x7FU)); }
 
 /* ------------------------------------------------------------------------ */
@@ -356,7 +734,20 @@ void ysfFichSetDGId(YsfFich* f, uint8_t id) { f->b[3] = (uint8_t)((f->b[3] & 0x8
 
 #define PAYLOAD_OFFSET (YSF_SYNC_LENGTH_BYTES + YSF_FICH_LENGTH_BYTES)
 
-/* Collect the 'n' byte pieces of a data channel, which sit every 18 bytes */
+/*
+ * dchGather()
+ *
+ * Collects the n byte pieces of a data channel, which sit every 18 bytes of
+ * the payload, into one buffer.
+ *
+ * Parameters:
+ *   data - The payload.
+ *   dch  - Receives the 5 pieces, one after the other.
+ *   n    - Size of one piece in bytes (9 for a long and 5 for a short data
+ *          channel).
+ *
+ * Returns: nothing.
+ */
 static void dchGather(const uint8_t* data, uint8_t* dch, unsigned int n)
 {
     for (unsigned int i = 0U; i < 5U; i++)
@@ -365,6 +756,19 @@ static void dchGather(const uint8_t* data, uint8_t* dch, unsigned int n)
     }
 }
 
+/*
+ * dchScatter()
+ *
+ * The reverse of dchGather(): puts the 5 pieces of a data channel back into
+ * the payload.
+ *
+ * Parameters:
+ *   data - The payload.
+ *   dch  - The 5 pieces, one after the other.
+ *   n    - Size of one piece in bytes.
+ *
+ * Returns: nothing.
+ */
 static void dchScatter(uint8_t* data, const uint8_t* dch, unsigned int n)
 {
     for (unsigned int i = 0U; i < 5U; i++)
@@ -374,8 +778,16 @@ static void dchScatter(uint8_t* data, const uint8_t* dch, unsigned int n)
 }
 
 /*
- * Decodes a long data channel (20 bytes, 9 bytes in each of 5 pieces) into
- * 'output' (23 bytes).  Returns true when the CRC is good.
+ * dchDecode20()
+ *
+ * Decodes a long data channel (180 dibits, 45 bytes) into 22 bytes of data
+ * and CRC.
+ *
+ * Parameters:
+ *   dch    - The 45 bytes of the channel.
+ *   output - Receives the decoded bytes; at least 23 bytes.
+ *
+ * Returns: true when the CRC is good.
  */
 static bool dchDecode20(const uint8_t* dch, uint8_t* output)
 {
@@ -399,7 +811,19 @@ static bool dchDecode20(const uint8_t* dch, uint8_t* output)
     return CRC_checkCCITT162(output, 22U);
 }
 
-/* The reverse: 'output' holds 20 whitened bytes, the CRC is added here. */
+/*
+ * dchEncode20()
+ *
+ * The reverse of dchDecode20(): the CRC is added to the 20 whitened bytes,
+ * and the result is convolved and interleaved.
+ *
+ * Parameters:
+ *   output - The 20 whitened bytes; the CRC is added after them, so it must
+ *            hold 23 bytes.
+ *   bytes  - Receives the 45 bytes of the channel.
+ *
+ * Returns: nothing.
+ */
 static void dchEncode20(uint8_t* output, uint8_t* bytes)
 {
     uint8_t convolved[45];
@@ -426,17 +850,50 @@ static void dchEncode20(uint8_t* output, uint8_t* bytes)
     }
 }
 
+/*
+ * unwhiten20()
+ *
+ * Removes the whitening of 20 data bytes (the same operation whitens them
+ * again).
+ *
+ * Parameters:
+ *   output - The 20 bytes, changed in place.
+ *
+ * Returns: nothing.
+ */
 static void unwhiten20(uint8_t* output)
 {
     for (unsigned int i = 0U; i < 20U; i++)
         output[i] ^= WHITENING_DATA[i];
 }
 
+/*
+ * ysfPayloadInit()
+ *
+ * Clears a payload structure.
+ *
+ * Parameters:
+ *   p - The payload.
+ *
+ * Returns: nothing.
+ */
 void ysfPayloadInit(YsfPayload* p)
 {
     memset(p, 0x00, sizeof(*p));
 }
 
+/*
+ * setCall()
+ *
+ * Stores a callsign in a 10 character field, padded with spaces.
+ *
+ * Parameters:
+ *   dest     - The 10 byte field.
+ *   has      - Set to true.
+ *   callsign - The callsign as a string.
+ *
+ * Returns: nothing.
+ */
 static void setCall(uint8_t* dest, bool* has, const char* callsign)
 {
     memset(dest, ' ', YSF_CALLSIGN_LENGTH);
@@ -447,22 +904,68 @@ static void setCall(uint8_t* dest, bool* has, const char* callsign)
     *has = true;
 }
 
+/*
+ * ysfPayloadSetUplink()
+ *
+ * Sets the uplink callsign, which is written over the one in the gateway
+ * data of the frames (bytes 10 to 19).
+ *
+ * Parameters:
+ *   p        - The payload.
+ *   callsign - The callsign.
+ *
+ * Returns: nothing.
+ */
 void ysfPayloadSetUplink(YsfPayload* p, const char* callsign)
 {
     setCall(p->uplink, &p->hasUplink, callsign);
 }
 
+/*
+ * ysfPayloadSetDownlink()
+ *
+ * Sets the downlink callsign, which is written over the one in the gateway
+ * data of the frames (bytes 0 to 9).
+ *
+ * Parameters:
+ *   p        - The payload.
+ *   callsign - The callsign.
+ *
+ * Returns: nothing.
+ */
 void ysfPayloadSetDownlink(YsfPayload* p, const char* callsign)
 {
     setCall(p->downlink, &p->hasDownlink, callsign);
 }
 
+/*
+ * ysfPayloadReset()
+ *
+ * Forgets the source and destination callsigns of the call that ended; the
+ * uplink and downlink callsigns are kept.
+ *
+ * Parameters:
+ *   p - The payload.
+ *
+ * Returns: nothing.
+ */
 void ysfPayloadReset(YsfPayload* p)
 {
     p->hasSource = false;
     p->hasDest   = false;
 }
 
+/*
+ * takeDest()
+ *
+ * Stores the destination callsign, only if there is none yet.
+ *
+ * Parameters:
+ *   p   - The payload.
+ *   src - The 10 byte callsign.
+ *
+ * Returns: nothing.
+ */
 static void takeDest(YsfPayload* p, const uint8_t* src)
 {
     if (!p->hasDest)
@@ -472,6 +975,17 @@ static void takeDest(YsfPayload* p, const uint8_t* src)
     }
 }
 
+/*
+ * takeSource()
+ *
+ * Stores the source callsign, only if there is none yet.
+ *
+ * Parameters:
+ *   p   - The payload.
+ *   src - The 10 byte callsign.
+ *
+ * Returns: nothing.
+ */
 static void takeSource(YsfPayload* p, const uint8_t* src)
 {
     if (!p->hasSource)
@@ -481,6 +995,18 @@ static void takeSource(YsfPayload* p, const uint8_t* src)
     }
 }
 
+/*
+ * putGateway()
+ *
+ * Writes the downlink and uplink callsigns, when they are set, into the
+ * gateway data of a data channel.
+ *
+ * Parameters:
+ *   p      - The payload.
+ *   output - The 20 bytes of data, changed in place.
+ *
+ * Returns: nothing.
+ */
 static void putGateway(const YsfPayload* p, uint8_t* output)
 {
     if (p->hasDownlink)
@@ -490,7 +1016,20 @@ static void putGateway(const YsfPayload* p, uint8_t* output)
         memcpy(output + YSF_CALLSIGN_LENGTH, p->uplink, YSF_CALLSIGN_LENGTH);
 }
 
-/* Header and terminator: CSD1 in the first half, CSD2 in the second */
+/*
+ * ysfPayloadHeader()
+ *
+ * Handles the data of a header or terminator frame: the first half (CSD1)
+ * gives the destination and source callsigns, and the second half (CSD2)
+ * gets the downlink and uplink callsigns.  The halves that were decoded are
+ * corrected and written back into the frame.
+ *
+ * Parameters:
+ *   p     - The payload.
+ *   frame - The frame, changed in place.
+ *
+ * Returns: true if the first half could be decoded.
+ */
 bool ysfPayloadHeader(YsfPayload* p, uint8_t* frame)
 {
     uint8_t* data = frame + PAYLOAD_OFFSET;
@@ -528,6 +1067,22 @@ bool ysfPayloadHeader(YsfPayload* p, uint8_t* frame)
     return valid1;
 }
 
+/*
+ * ysfPayloadVDMode1Data()
+ *
+ * Handles the data channel of a V/D mode 1 frame: frame 0 gives the
+ * destination and source callsigns, frame 1 gets the gateway callsigns.  The
+ * frame is corrected and written back.
+ *
+ * Parameters:
+ *   p       - The payload.
+ *   frame   - The frame, changed in place.
+ *   fn      - The frame number.
+ *   gateway - true if the call comes from this gateway, so the gateway
+ *             callsigns are left as they are.
+ *
+ * Returns: true if frame 0 was decoded, i.e. the callsigns are known.
+ */
 bool ysfPayloadVDMode1Data(YsfPayload* p, uint8_t* frame, uint8_t fn, bool gateway)
 {
     uint8_t* data = frame + PAYLOAD_OFFSET;
@@ -565,6 +1120,22 @@ bool ysfPayloadVDMode1Data(YsfPayload* p, uint8_t* frame, uint8_t fn, bool gatew
     return ret && (fn == 0U);
 }
 
+/*
+ * ysfPayloadDataFRData()
+ *
+ * Handles the two data channels of a data FR mode frame: frame 0 gives the
+ * destination and source callsigns and gets the gateway callsigns.  The
+ * halves that were decoded are corrected and written back.
+ *
+ * Parameters:
+ *   p       - The payload.
+ *   frame   - The frame, changed in place.
+ *   fn      - The frame number.
+ *   gateway - true if the call comes from this gateway, so the gateway
+ *             callsigns are left as they are.
+ *
+ * Returns: true if the first half of frame 0 was decoded.
+ */
 bool ysfPayloadDataFRData(YsfPayload* p, uint8_t* frame, uint8_t fn, bool gateway)
 {
     uint8_t* data = frame + PAYLOAD_OFFSET;
@@ -608,7 +1179,24 @@ bool ysfPayloadDataFRData(YsfPayload* p, uint8_t* frame, uint8_t fn, bool gatewa
     return ret1 && (fn == 0U);
 }
 
-/* V/D mode 2 has a short data channel: 10 bytes, 5 bytes in each piece */
+/*
+ * ysfPayloadVDMode2Data()
+ *
+ * Handles the short data channel (10 bytes, 5 bytes in each piece) of a V/D
+ * mode 2 frame: frames 0 and 1 give the destination and source callsigns,
+ * frames 2 and 3 get the downlink and uplink callsigns.  The frame is
+ * corrected and written back.
+ *
+ * Parameters:
+ *   p       - The payload.
+ *   frame   - The frame, changed in place.
+ *   fn      - The frame number.
+ *   gateway - true if the call comes from this gateway, so the gateway
+ *             callsigns are left as they are.
+ *
+ * Returns: true if the channel was decoded and the frame is 0 or 1, i.e. a
+ *   callsign was taken.
+ */
 bool ysfPayloadVDMode2Data(YsfPayload* p, uint8_t* frame, uint8_t fn, bool gateway)
 {
     uint8_t* data = frame + PAYLOAD_OFFSET;
@@ -693,7 +1281,19 @@ bool ysfPayloadVDMode2Data(YsfPayload* p, uint8_t* frame, uint8_t fn, bool gatew
     return ret && (fn == 0U || fn == 1U);
 }
 
-/* V/D mode 2 audio: each bit of the voice channels is sent three times */
+/*
+ * ysfPayloadVDMode2Audio()
+ *
+ * Corrects the audio of a V/D mode 2 frame: each bit of the five voice
+ * channels is sent three times, so a majority vote repairs the bits.  The
+ * corrected channels are written back.
+ *
+ * Parameters:
+ *   p     - Not used.
+ *   frame - The frame, changed in place.
+ *
+ * Returns: The number of bit triplets that were not all equal.
+ */
 unsigned int ysfPayloadVDMode2Audio(YsfPayload* p, uint8_t* frame)
 {
     uint8_t* data = frame + PAYLOAD_OFFSET;
@@ -755,7 +1355,19 @@ unsigned int ysfPayloadVDMode2Audio(YsfPayload* p, uint8_t* frame)
     return errors;
 }
 
-/* Voice FR mode: the whole 180 dibits of the data channel are contiguous */
+/*
+ * ysfPayloadVoiceFRData()
+ *
+ * Corrects the data channel of a voice FR frame (the 180 dibits are not
+ * split in pieces) and writes it back.
+ *
+ * Parameters:
+ *   p     - Not used.
+ *   frame - The frame, changed in place.
+ *
+ * Returns: true if the data was decoded (CRC good), false otherwise; the
+ *   frame is not changed then.
+ */
 bool ysfPayloadVoiceFRData(YsfPayload* p, uint8_t* frame)
 {
     uint8_t* data = frame + PAYLOAD_OFFSET;
@@ -772,6 +1384,18 @@ bool ysfPayloadVoiceFRData(YsfPayload* p, uint8_t* frame)
     return true;
 }
 
+/*
+ * writeCsd()
+ *
+ * Whitens, encodes and interleaves 20 bytes of callsign data into the 9 byte
+ * pieces of one half of a header.
+ *
+ * Parameters:
+ *   csd  - The 20 bytes.
+ *   data - The payload position of the half, changed.
+ *
+ * Returns: nothing.
+ */
 static void writeCsd(const uint8_t* csd, uint8_t* data)
 {
     uint8_t output[25], bytes[45];
@@ -783,6 +1407,19 @@ static void writeCsd(const uint8_t* csd, uint8_t* data)
     dchScatter(data, bytes, 9U);
 }
 
+/*
+ * ysfPayloadReadCsd()
+ *
+ * Reads one half of the header of a frame.
+ *
+ * Parameters:
+ *   frame - The frame.
+ *   half  - 0 for the first half (CSD1), otherwise the second (CSD2).
+ *   csd   - Receives the 20 bytes; filled with spaces when the half cannot
+ *           be decoded.
+ *
+ * Returns: true if the half was decoded.
+ */
 bool ysfPayloadReadCsd(const uint8_t* frame, unsigned int half, uint8_t* csd)
 {
     uint8_t dch[45], output[25];
@@ -801,11 +1438,35 @@ bool ysfPayloadReadCsd(const uint8_t* frame, unsigned int half, uint8_t* csd)
     return true;
 }
 
+/*
+ * ysfPayloadWriteCsd()
+ *
+ * Writes one half of the header of a frame.
+ *
+ * Parameters:
+ *   frame - The frame, changed in place.
+ *   half  - 0 for the first half (CSD1), otherwise the second (CSD2).
+ *   csd   - The 20 bytes to write.
+ *
+ * Returns: nothing.
+ */
 void ysfPayloadWriteCsd(uint8_t* frame, unsigned int half, const uint8_t* csd)
 {
     writeCsd(csd, frame + PAYLOAD_OFFSET + (half != 0U ? 9U : 0U));
 }
 
+/*
+ * ysfPayloadWriteHeader()
+ *
+ * Writes both halves of the header of a frame.
+ *
+ * Parameters:
+ *   frame - The frame, changed in place.
+ *   csd1  - The 20 bytes of the first half.
+ *   csd2  - The 20 bytes of the second half.
+ *
+ * Returns: nothing.
+ */
 void ysfPayloadWriteHeader(uint8_t* frame, const uint8_t* csd1, const uint8_t* csd2)
 {
     writeCsd(csd1, frame + PAYLOAD_OFFSET);
@@ -818,6 +1479,18 @@ void ysfPayloadWriteHeader(uint8_t* frame, const uint8_t* csd1, const uint8_t* c
 
 static const char BLANK_CALL[] = "          ";
 
+/*
+ * ysfCtrlSetCallsign()
+ *
+ * Sets the callsign of this gateway, padded with spaces.  It is also used as
+ * the uplink and downlink callsign of the frames.
+ *
+ * Parameters:
+ *   c        - The control.
+ *   callsign - The callsign.
+ *
+ * Returns: nothing.
+ */
 void ysfCtrlSetCallsign(YsfCtrl* c, const char* callsign)
 {
     memset(c->callsign, ' ', YSF_CALLSIGN_LENGTH);
@@ -831,6 +1504,17 @@ void ysfCtrlSetCallsign(YsfCtrl* c, const char* callsign)
     ysfPayloadSetDownlink(&c->netPayload, c->callsign);
 }
 
+/*
+ * ysfCtrlInit()
+ *
+ * Prepares a control with its defaults: RF time out 180 s, network watchdog
+ * 1.5 s, both sides idle.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 void ysfCtrlInit(YsfCtrl* c)
 {
     memset(c, 0x00, sizeof(*c));
@@ -853,6 +1537,16 @@ void ysfCtrlInit(YsfCtrl* c)
     ysfCtrlSetCallsign(c, "");
 }
 
+/*
+ * ysfCtrlReset()
+ *
+ * Ends any call and returns the control to the idle state.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 void ysfCtrlReset(YsfCtrl* c)
 {
     c->rfState = YSF_RF_LISTENING;
@@ -865,11 +1559,41 @@ void ysfCtrlReset(YsfCtrl* c)
     ysfPayloadReset(&c->netPayload);
 }
 
+/*
+ * ysfCtrlBusy()
+ *
+ * Tells if a call is in progress.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: true if an RF or a network call is going on.
+ */
 bool ysfCtrlBusy(const YsfCtrl* c)
 {
     return c->rfState != YSF_RF_LISTENING || c->netState != YSF_NET_IDLE;
 }
 
+/*
+ * raise()
+ *
+ * Reports a call event through the event callback, if there is one.
+ *
+ * Parameters:
+ *   c       - The control.
+ *   ev      - The event.
+ *   source  - The 10 character source callsign.
+ *   dest    - The 10 character destination callsign.
+ *   gateway - The 10 character gateway callsign.
+ *   dgid    - The digital group ID.
+ *   dt      - The data type.
+ *   data    - true for a data call.
+ *   seconds - Duration of the call.
+ *   ber     - Bit error rate (RF calls) or packet loss (network calls) in
+ *             percent.
+ *
+ * Returns: nothing.
+ */
 static void raise(YsfCtrl* c, YsfEvent ev, const char* source, const char* dest, const char* gateway, uint8_t dgid, uint8_t dt, bool data, float seconds, float ber)
 {
     YsfCall call;
@@ -891,17 +1615,54 @@ static void raise(YsfCtrl* c, YsfEvent ev, const char* source, const char* dest,
     c->event(c->ctx, &call);
 }
 
+/*
+ * rfExpired()
+ *
+ * Tells if the RF call has been going on for longer than the time out (a
+ * time out of 0 never expires).
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: true if the RF timer is running and has reached the time out.
+ */
 static bool rfExpired(const YsfCtrl* c)
 {
     return c->rfTimerRunning && c->rfTimeoutMs > 0U && c->rfTimer >= c->rfTimeoutMs;
 }
 
+/*
+ * netExpired()
+ *
+ * Tells if the network call has been going on for longer than the time out
+ * (a time out of 0 never expires).
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: true if the network timer is running and has reached the time
+ *   out.
+ */
 static bool netExpired(const YsfCtrl* c)
 {
     return c->netTimerRunning && c->rfTimeoutMs > 0U && c->netTimer >= c->rfTimeoutMs;
 }
 
-/* Send a frame (120 bytes) of the RF call to the gateway */
+/*
+ * toNet()
+ *
+ * Sends a frame of the RF call to the gateway: adds the gateway callsign,
+ * source, destination and frame counter to make the 151 byte body.  Nothing
+ * is sent without a network callback or after the call has timed out.
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The frame, YSF_FRAME_LENGTH_BYTES bytes.
+ *   count - Number of the frame in the call.
+ *   end   - true for the last frame.
+ *
+ * Returns: nothing.
+ */
 static void toNet(YsfCtrl* c, const uint8_t* frame, unsigned int count, bool end)
 {
     uint8_t body[YSF_NET_BODY_LENGTH];
@@ -918,7 +1679,21 @@ static void toNet(YsfCtrl* c, const uint8_t* frame, unsigned int count, bool end
     c->sendNet(c->ctx, body, end);
 }
 
-/* Repeat a received frame on RF; only when the network is not already using the transmitter */
+/*
+ * toRf()
+ *
+ * Repeats a received frame on RF, when local repeat is on and the network is
+ * not already using the transmitter.  The routing and deviation flags of the
+ * FICH are set first.
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The frame.
+ *   fich  - The FICH to write into the copy of the frame.
+ *   eot   - true for the last frame.
+ *
+ * Returns: nothing.
+ */
 static void toRf(YsfCtrl* c, const uint8_t* frame, const YsfFich* fich, bool eot)
 {
     uint8_t out[YSF_FRAME_LENGTH_BYTES];
@@ -936,6 +1711,17 @@ static void toRf(YsfCtrl* c, const uint8_t* frame, const YsfFich* fich, bool eot
     c->sendRf(c->ctx, out, eot);
 }
 
+/*
+ * endRf()
+ *
+ * Ends the RF call: back to listening, stops the timer and forgets the
+ * callsigns.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 static void endRf(YsfCtrl* c)
 {
     c->rfState = YSF_RF_LISTENING;
@@ -943,6 +1729,17 @@ static void endRf(YsfCtrl* c)
     ysfPayloadReset(&c->rfPayload);
 }
 
+/*
+ * endNet()
+ *
+ * Ends the network call: back to idle, stops the timers and forgets the
+ * callsigns.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 static void endNet(YsfCtrl* c)
 {
     c->netState = YSF_NET_IDLE;
@@ -954,6 +1751,18 @@ static void endNet(YsfCtrl* c)
     ysfPayloadReset(&c->netPayload);
 }
 
+/*
+ * checkCallsign()
+ *
+ * Checks that a source callsign is the one of this gateway (only the part
+ * before the trailing spaces is compared).
+ *
+ * Parameters:
+ *   c      - The control.
+ *   source - The 10 character callsign to check.
+ *
+ * Returns: true if it matches.
+ */
 static bool checkCallsign(const YsfCtrl* c, const char* source)
 {
     unsigned int len = YSF_CALLSIGN_LENGTH;
@@ -964,6 +1773,17 @@ static bool checkCallsign(const YsfCtrl* c, const char* source)
     return memcmp(source, c->callsign, len) == 0;
 }
 
+/*
+ * startRf()
+ *
+ * Starts an RF call: clears the counters and starts the timer.
+ *
+ * Parameters:
+ *   c    - The control.
+ *   data - true for a data call, false for voice.
+ *
+ * Returns: nothing.
+ */
 static void startRf(YsfCtrl* c, bool data)
 {
     c->rfFrames = 0U;
@@ -974,6 +1794,18 @@ static void startRf(YsfCtrl* c, bool data)
     c->rfState  = data ? YSF_RF_DATA : YSF_RF_AUDIO;
 }
 
+/*
+ * rfSetCalls()
+ *
+ * Takes the source and destination callsigns of the RF call from the
+ * payload; a group call goes to ALL.
+ *
+ * Parameters:
+ *   c  - The control.
+ *   cm - The call mode of the frames.
+ *
+ * Returns: nothing.
+ */
 static void rfSetCalls(YsfCtrl* c, uint8_t cm)
 {
     if (c->rfPayload.hasSource)
@@ -985,11 +1817,38 @@ static void rfSetCalls(YsfCtrl* c, uint8_t cm)
         memcpy(c->rfDest, c->rfPayload.dest, YSF_CALLSIGN_LENGTH);
 }
 
+/*
+ * ratio()
+ *
+ * Makes a percentage.
+ *
+ * Parameters:
+ *   errs - Number of errors.
+ *   bits - Number of bits.
+ *
+ * Returns: errs as a percentage of bits, or 0 when bits is 0.
+ */
 static float ratio(unsigned int errs, unsigned int bits)
 {
     return bits > 0U ? (float)(errs * 100U) / (float)bits : 0.0F;
 }
 
+/*
+ * rfHeader()
+ *
+ * Handles the header frame of an RF call.  It starts the call, unless it is
+ * refused because the callsign is not this gateway's callsign (when only
+ * that callsign is allowed), and sends the header to the network and the
+ * transmitter.
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The frame, changed in place.
+ *   valid - Not used.
+ *   data  - true for a data call, false for voice.
+ *
+ * Returns: nothing.
+ */
 static void rfHeader(YsfCtrl* c, uint8_t* frame, bool valid, bool data)
 {
     (void)valid;
@@ -1028,6 +1887,19 @@ static void rfHeader(YsfCtrl* c, uint8_t* frame, bool valid, bool data)
     c->rfFrames++;
 }
 
+/*
+ * rfTerminator()
+ *
+ * Handles the terminator frame of an RF call: sends it on, reports the end
+ * of the call and returns to listening.
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The frame, changed in place.
+ *   data  - true for a data call, false for voice.
+ *
+ * Returns: nothing.
+ */
 static void rfTerminator(YsfCtrl* c, uint8_t* frame, bool data)
 {
     uint8_t dgid = ysfFichGetDGId(&c->lastFich);
@@ -1059,7 +1931,17 @@ static void rfTerminator(YsfCtrl* c, uint8_t* frame, bool data)
     endRf(c);
 }
 
-/* The frame number of a frame whose FICH could not be decoded follows the one before */
+/*
+ * guessNext()
+ *
+ * Works out the frame number of a frame whose FICH could not be decoded: it
+ * follows the one before.
+ *
+ * Parameters:
+ *   c - The control, whose last FICH is changed.
+ *
+ * Returns: nothing.
+ */
 static void guessNext(YsfCtrl* c)
 {
     uint8_t ft = ysfFichGetFT(&c->lastFich);
@@ -1076,6 +1958,18 @@ static void guessNext(YsfCtrl* c)
     ysfFichSetFN(&c->lastFich, fn);
 }
 
+/*
+ * rfVoiceFR()
+ *
+ * Handles one frame of a voice FR call: header, terminator or voice.
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The frame, changed in place.
+ *   valid - true if the FICH was decoded.
+ *
+ * Returns: nothing.
+ */
 static void rfVoiceFR(YsfCtrl* c, uint8_t* frame, bool valid)
 {
     uint8_t fi = ysfFichGetFI(&c->lastFich);
@@ -1111,6 +2005,20 @@ static void rfVoiceFR(YsfCtrl* c, uint8_t* frame, bool valid)
     }
 }
 
+/*
+ * rfVoiceDN()
+ *
+ * Handles one frame of a V/D mode 1 or 2 call: header, terminator, voice,
+ * or, when no call is going on, a clean frame that starts a call late (a new
+ * header is made for it).
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The frame, changed in place.
+ *   valid - true if the FICH was decoded.
+ *
+ * Returns: nothing.
+ */
 static void rfVoiceDN(YsfCtrl* c, uint8_t* frame, bool valid)
 {
     uint8_t fi   = ysfFichGetFI(&c->lastFich);
@@ -1221,6 +2129,18 @@ static void rfVoiceDN(YsfCtrl* c, uint8_t* frame, bool valid)
     }
 }
 
+/*
+ * rfDataFR()
+ *
+ * Handles one frame of a data FR call: header, terminator or data.
+ *
+ * Parameters:
+ *   c     - The control.
+ *   frame - The frame, changed in place.
+ *   valid - true if the FICH was decoded.
+ *
+ * Returns: nothing.
+ */
 static void rfDataFR(YsfCtrl* c, uint8_t* frame, bool valid)
 {
     uint8_t fi = ysfFichGetFI(&c->lastFich);
@@ -1251,6 +2171,20 @@ static void rfDataFR(YsfCtrl* c, uint8_t* frame, bool valid)
     }
 }
 
+/*
+ * ysfCtrlRf()
+ *
+ * Handles a frame received from RF, or the loss of the signal.  The FICH is
+ * decoded (when it cannot be, the one before is used) and the frame goes to
+ * the handler for its data type.
+ *
+ * Parameters:
+ *   c    - The control.
+ *   in   - The received frame (not used when lost is true).
+ *   lost - true if the signal was lost instead of a frame received.
+ *
+ * Returns: nothing.
+ */
 void ysfCtrlRf(YsfCtrl* c, const uint8_t* in, bool lost)
 {
     uint8_t frame[YSF_FRAME_LENGTH_BYTES];
@@ -1314,12 +2248,32 @@ void ysfCtrlRf(YsfCtrl* c, const uint8_t* in, bool lost)
 /* Network                                                                   */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * isBlank()
+ *
+ * Tells if a callsign field is all spaces.
+ *
+ * Parameters:
+ *   call - The 10 byte field.
+ *
+ * Returns: true if it is blank.
+ */
 static bool isBlank(const char* call)
 {
     return memcmp(call, BLANK_CALL, YSF_CALLSIGN_LENGTH) == 0;
 }
 
-/* A terminator frame to the transmitter: the call has finished without one from the network */
+/*
+ * netSendEot()
+ *
+ * Sends a terminator frame to the transmitter, for a network call that ended
+ * without one.
+ *
+ * Parameters:
+ *   c - The control.
+ *
+ * Returns: nothing.
+ */
 static void netSendEot(YsfCtrl* c)
 {
     uint8_t eot[YSF_FRAME_LENGTH_BYTES];
@@ -1336,6 +2290,19 @@ static void netSendEot(YsfCtrl* c)
     c->sendRf(c->ctx, eot, true);
 }
 
+/*
+ * netAnnounce()
+ *
+ * Reports the start of a network call, once the source and destination
+ * callsigns are both known.
+ *
+ * Parameters:
+ *   c    - The control.
+ *   dgid - The digital group ID.
+ *   dt   - The data type.
+ *
+ * Returns: nothing.
+ */
 static void netAnnounce(YsfCtrl* c, uint8_t dgid, uint8_t dt)
 {
     if (c->netAnnounced)
@@ -1348,7 +2315,19 @@ static void netAnnounce(YsfCtrl* c, uint8_t dgid, uint8_t dt)
     raise(c, YSF_EV_NET_START, c->netSource, c->netDest, c->netGateway, dgid, dt, false, 0.0F, 0.0F);
 }
 
-/* The callsigns of a call that started without them come from the payload */
+/*
+ * netCallsigns()
+ *
+ * Fills in the callsigns of a network call that started without them from
+ * the payload, then reports the start of the call.
+ *
+ * Parameters:
+ *   c    - The control.
+ *   dgid - The digital group ID.
+ *   dt   - The data type.
+ *
+ * Returns: nothing.
+ */
 static void netCallsigns(YsfCtrl* c, uint8_t dgid, uint8_t dt)
 {
     if (isBlank(c->netSource) && c->netPayload.hasSource)
@@ -1360,6 +2339,21 @@ static void netCallsigns(YsfCtrl* c, uint8_t dgid, uint8_t dt)
     netAnnounce(c, dgid, dt);
 }
 
+/*
+ * ysfCtrlNet()
+ *
+ * Handles a packet from the network (a 151 byte body).  It starts a call,
+ * counts lost packets, corrects the frame and sends it to the transmitter,
+ * and reports the start, end and callsigns of the call.  A packet from
+ * another callsign during a call ends that call when a second one confirms
+ * it.  Packets are ignored while an RF call is using the transmitter.
+ *
+ * Parameters:
+ *   c    - The control.
+ *   body - The 151 byte body.
+ *
+ * Returns: nothing.
+ */
 void ysfCtrlNet(YsfCtrl* c, const uint8_t* body)
 {
     uint8_t frame[YSF_FRAME_LENGTH_BYTES];
@@ -1552,6 +2546,18 @@ void ysfCtrlNet(YsfCtrl* c, const uint8_t* body)
     }
 }
 
+/*
+ * ysfCtrlClock()
+ *
+ * Advances the timers and ends a network call when no packet has come within
+ * the watchdog time.
+ *
+ * Parameters:
+ *   c  - The control.
+ *   ms - Time since the last call, in milliseconds.
+ *
+ * Returns: nothing.
+ */
 void ysfCtrlClock(YsfCtrl* c, uint32_t ms)
 {
     if (c->rfTimerRunning)

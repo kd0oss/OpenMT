@@ -26,6 +26,7 @@
 #include <dmr_fec.h>
 #include <dmr_func.h>
 #include <errno.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <math.h>
 #include <netdb.h>
@@ -48,17 +49,7 @@
 #include <tools.h>
 #include <unistd.h>
 #include <netinet/tcp.h>
-/* Disable Nagle: these programs talk over loopback TCP in small frames
- * (200 bytes of samples, 3 byte requests).  With Nagle on, a small write
- * waits for the ACK of the previous one, and the peer delays that ACK for
- * ~40 ms, so the stream arrives in bursts with 40 ms gaps. */
-static void setNoDelay(int fd)
-{
-    int one = 1;
-
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-}
-
+#define DMR_SEND_MS          30U     /* frames go to the modem and to the gateway one per 30 ms (a DMR slot) */
 #define VERSION "2026-01-21"
 #define BUFFER_SIZE 1024
 
@@ -129,8 +120,8 @@ char modemHost[80]       = "127.0.0.1";
 uint8_t modemId          = 1;
 char modemName[8]        = "modem1";
 char stationCall[9]      = "N0CALL";
-char slot1_call[9]       = "";
-char slot2_call[9]       = "";
+char slot1_call[16]      = "";
+char slot2_call[16]      = "";
 char slot1_name[15]      = "";
 char slot2_name[15]      = "";
 unsigned int slot1_srcId = 0;
@@ -185,7 +176,6 @@ pthread_t modemHostid;
 pthread_t gwHostid;
 pthread_t timerid;
 
-pthread_mutex_t timerMutex     = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t rxBufMutex     = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwBufMutex     = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwCommBufMutex = PTHREAD_MUTEX_INITIALIZER;
@@ -246,98 +236,46 @@ static uint8_t dmrIdleFrame[33U];  // DMR_FRAME_LENGTH_BYTES (must be a literal:
 
 void* dmrTxThread(void* arg);
 
-typedef struct TIMERS
-{
-    char name[20];
-    bool valid;
-    bool enabled;
-    uint32_t duration;
-    uint32_t count;
-    bool triggered;
-} TIMERS;
-
-TIMERS timer[10];
 
 void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet);
 void sendDataToModem(uint8_t* data, uint8_t length, uint8_t slot, bool isNet);
 void sendCommToModem(uint8_t* data, uint8_t length);
 void* startTCPServer(void* arg);
-void writeBits(uint8_t c, bool isEOT);
 void writeSamples(uint8_t c, bool isEOT);
 void processTx(const uint8_t* data, uint8_t length, bool isEOT);
 void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet);
 void dmrRxSamples(const q15_t* samples, uint16_t length);
 void dmrRxBits(const uint8_t* bytes, uint8_t length);
 
-// error - wrapper for perror
+/*
+ * error()
+ *
+ * Reports a message with reportError() and ends the program with exit status 1.
+ *
+ * Parameters:
+ *   msg - Text printed in front of the system error message.
+ *
+ * Returns: nothing.
+ */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "DMR", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
-// Wait for 'delay' miroseconds
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-};
+;
 
-// Print debug data.
-void dump(char* text, unsigned char* data, unsigned int length)
-{
-    struct timespec ts;
-    uint64_t milliseconds;
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    // Get the current time with nanosecond precision
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("clock_gettime");
-        return;
-    }
-
-    // Convert to milliseconds
-    milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-
-    fprintf(stdout, "%s: %llu\n", text, milliseconds);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++) fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++) fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            unsigned char c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-}
-
+/*
+ * isActiveMode()
+ *
+ * Tells whether this host may process frames: the modem host's active mode
+ * is DMR or idle.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the active mode is DMR or IDLE, false if another protocol
+ *   owns the modem.
+ */
 bool isActiveMode()
 {
     char active_mode[10] = "IDLE";
@@ -350,85 +288,20 @@ bool isActiveMode()
         return false;
 }
 
-void initTimers()
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        bzero(timer[i].name, 20);
-        timer[i].valid     = false;
-        timer[i].duration  = 0;
-        timer[i].count     = 0;
-        timer[i].enabled   = false;
-        timer[i].triggered = false;
-    }
-}
-
-int8_t getTimer(const char* name, uint32_t duration)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (!timer[i].valid)
-        {
-            strcpy(timer[i].name, name);
-            timer[i].valid     = true;
-            timer[i].enabled   = true;
-            timer[i].triggered = false;
-            timer[i].count     = 0;
-            timer[i].duration  = duration;
-            pthread_mutex_unlock(&timerMutex);
-            return i;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-    return -1;
-}
-
-bool isTimerTriggered(const char* name)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (timer[i].valid && timer[i].triggered && strcasecmp(timer[i].name, name) == 0)
-        {
-            pthread_mutex_unlock(&timerMutex);
-            return true;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-    return false;
-}
-
-void resetTimer(const char* name)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (timer[i].valid && strcasecmp(timer[i].name, name) == 0)
-        {
-            timer[i].count     = 0;
-            timer[i].triggered = false;
-            pthread_mutex_unlock(&timerMutex);
-            return;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-}
-
-void disableTimer(uint8_t id)
-{
-    pthread_mutex_lock(&timerMutex);
-    bzero(timer[id].name, 20);
-    timer[id].valid     = false;
-    timer[id].enabled   = false;
-    timer[id].triggered = false;
-    timer[id].duration  = 0;
-    timer[id].count     = 0;
-    pthread_mutex_unlock(&timerMutex);
-}
-
-// Simple timer thread.
-// Each loop through the while statement takes 1 millisecond.
+/*
+ * timerThread()
+ *
+ * Timer thread.  Every pass of the loop takes about one millisecond and
+ * advances all software timers.  The modeHang timer is held at zero while a
+ * transmission is on (or a simplex RF call is running); once it has been
+ * quiet for the hang time a SETIDLE command is queued to hand the modem
+ * back.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* timerThread(void* arg)
 {
     bool idle = true;
@@ -436,36 +309,25 @@ void* timerThread(void* arg)
     if (getTimer("modeHang", modeHang) < 0)
     {
         fprintf(stderr, "Timer thread exited.\n");
-        int iRet = 600;
-        pthread_exit(&iRet);
+        pthread_exit(NULL);
         return NULL;
     }
 
+    uint64_t lastTick = 0;      /* timers are advanced by the real time that passed, so a longer sleep loses nothing */
+
     while (connected)
     {
-        delay(1000);
+        delay(HOST_TIMER_PERIOD_US);
+        uint32_t elapsed = timerElapsedMs(&lastTick);
 
         for (uint8_t i = 0; i < 10; i++)
         {
-            pthread_mutex_lock(&timerMutex);
-            if (timer[i].valid && timer[i].enabled)
-            {
-                if (timer[i].count >= timer[i].duration)
-                {
-                    timer[i].triggered = true;
-                    timer[i].count     = 0;
-                }
-                else if (!timer[i].triggered)
-                {
-                    timer[i].count++;
-                }
-            }
-            pthread_mutex_unlock(&timerMutex);
+            timerTickN(i, elapsed);
             // fprintf(stderr, "T: %d  N: %s D: %u C: %u\n", i, timer[i].name, timer[i].duration, timer[i].count);
             if ((txOn || dmrSimplexRf) && strcasecmp(timer[i].name, "modeHang") == 0)
             {
                 idle = false;
-                resetTimer("modeHang");
+                resetTimer("modeHang", 0);
             }
             else if (!txOn && !dmrSimplexRf && strcasecmp(timer[i].name, "modeHang") == 0)
             {
@@ -478,7 +340,7 @@ void* timerThread(void* arg)
                         pthread_mutex_unlock(&rxBufMutex);
                         //    write(sockfd, SETIDLE, 5);
                         idle = true;
-                        resetTimer("modeHang");
+                        resetTimer("modeHang", 0);
                     }
                 }
             }
@@ -486,27 +348,31 @@ void* timerThread(void* arg)
     }
 
     fprintf(stderr, "Timer thread exited.\n");
-    int iRet = 600;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * rxThread()
+ *
+ * Thread that empties the receive ring buffer (rxBuffer).  Once every
+ * DMR_SEND_MS it takes one complete frame: a five byte command is written to
+ * the modem host socket, any other frame is passed to decodeFrame() as
+ * received data.  A frame that does not start with 0x61 is reported.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* rxThread(void* arg)
 {
-    if (getTimer("sendSlot", 30) < 0)
-    {
-        fprintf(stderr, "Failed to get timer. RX thread exited.\n");
-        int iRet  = 500;
-        connected = false;
-        pthread_exit(&iRet);
-        return NULL;
-    }
+    uint64_t next = 0;      /* when the next frame is due; one frame is sent every DMR_SEND_MS */
 
     while (connected)
     {
-        delay(500);
+        sleepUntilNext(&next, DMR_SEND_MS);
 
-        if (isTimerTriggered("sendSlot"))
         {
             pthread_mutex_lock(&rxBufMutex);
             if (RingBuffer_dataSize(&rxBuffer) >= 5)
@@ -516,7 +382,6 @@ void* rxThread(void* arg)
                 if (buf[0] != 0x61)
                 {
                     fprintf(stderr, "RX invalid header.\n");
-                    resetTimer("sendSlot");
                     pthread_mutex_unlock(&rxBufMutex);
                     continue;
                 }
@@ -528,13 +393,12 @@ void* rxThread(void* arg)
                 {
                     uint8_t buf[len];
                     RingBuffer_getData(&rxBuffer, buf, len);
-                    resetTimer("sendSlot");
                     pthread_mutex_unlock(&rxBufMutex);
                     if (len == 5)
                     {
                         if (write(sockfd, buf, len) < 0)
                         {
-                            fprintf(stderr, "ERROR: remote disconnect\n");
+                            reportError(modemName, "DMR", "remote disconnect");
                             break;
                         }
                     }
@@ -545,37 +409,38 @@ void* rxThread(void* arg)
                     continue;
                 }
             }
-            resetTimer("sendSlot");
             pthread_mutex_unlock(&rxBufMutex);
         }
     }
 
     fprintf(stderr, "RX thread exited.\n");
-    int iRet  = 500;
     connected = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * gwTxThread()
+ *
+ * Thread that sends data to the DMR gateway.  Once every DMR_SEND_MS it
+ * takes one complete frame from gwTxBuffer and writes it to the gateway
+ * socket.  It ends when the gateway disconnects or a write fails.
+ *
+ * Parameters:
+ *   arg - Socket of the gateway connection, passed as a pointer sized
+ *         integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* gwTxThread(void* arg)
 {
     int sockfd = (intptr_t)arg;
-    int8_t tId = getTimer("sendGW", 30);
-
-    if (tId < 0)
-    {
-        fprintf(stderr, "Failed to get timer. GW TX thread exited.\n");
-        int iRet  = 600;
-        connected = false;
-        pthread_exit(&iRet);
-        return NULL;
-    }
+    uint64_t next = 0;      /* when the next frame is due; one frame is sent every DMR_SEND_MS */
 
     while (dmrGWConnected)
     {
-        delay(500);
+        sleepUntilNext(&next, DMR_SEND_MS);
 
-        if (isTimerTriggered("sendGW"))
         {
             pthread_mutex_lock(&gwBufMutex);
             if (RingBuffer_dataSize(&gwTxBuffer) >= 5)
@@ -585,7 +450,6 @@ void* gwTxThread(void* arg)
                 if (buf[0] != 0x61)
                 {
                     fprintf(stderr, "GW TX invalid header.\n");
-                    resetTimer("sendGW");
                     pthread_mutex_unlock(&gwBufMutex);
                     continue;
                 }
@@ -597,29 +461,42 @@ void* gwTxThread(void* arg)
                 {
                     uint8_t buf[len];
                     RingBuffer_getData(&gwTxBuffer, buf, len);
-                    resetTimer("sendGW");
                     pthread_mutex_unlock(&gwBufMutex);
                     if (write(sockfd, buf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        reportError(modemName, "DMR", "remote disconnect");
                         break;
                     }
                     continue;
                 }
             }
-            resetTimer("sendGW");
             pthread_mutex_unlock(&gwBufMutex);
         }
     }
 
     fprintf(stderr, "GW TX thread exited.\n");
-    if (tId > 0)
-        disableTimer(tId);
-    int iRet  = 600;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * sendDataToModem()
+ *
+ * Sends a DMR frame to the modem host as a data frame (type DMD1 or DMD2).
+ * Frames from the radio are sent only for a duplex modem.  In SAMPLE and BIT
+ * mode nothing is sent, because there is no modem firmware to use these
+ * frames: this host keys the transmitter itself with the sample or bit
+ * stream written by dmrTxThread().
+ *
+ * Parameters:
+ *   data   - The frame data.
+ *   length - Number of bytes in data.
+ *   slot   - Time slot; slot 1 is sent as DMD1, anything else as DMD2.
+ *   isNet  - true if the frame came from the network; network frames of a
+ *            simplex modem always go as DMD1.
+ *
+ * Returns: nothing.
+ */
 void sendDataToModem(uint8_t* data, uint8_t length, uint8_t slot, bool isNet)
 {
     if (!isNet && !modem_duplex) return;
@@ -651,29 +528,20 @@ void sendDataToModem(uint8_t* data, uint8_t length, uint8_t slot, bool isNet)
     write(sockfd, buf, length + 8);
 }
 
+/*
+ * sendCommToModem()
+ *
+ * Writes a command packet to the modem host socket.
+ *
+ * Parameters:
+ *   data   - The command bytes.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
+ */
 void sendCommToModem(uint8_t* data, uint8_t length)
 {
     write(sockfd, data, length);
-}
-
-void writeBits(uint8_t c, bool isEOT)
-{
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'B', 'I', 'T', 'S'};  // setup 8 byte header
-    static uint8_t bytePos    = 8;                                            // set first position after header
-
-    bytes[bytePos++] = c;
-    if (bytePos == 200)
-    {
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
-
-    if (bytePos > 8 && isEOT)  // If EOT and number of new bytes less than 200 pad out with 0.
-    {
-        memset(bytes + bytePos, 0, 200 - bytePos);
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
 }
 
 /* TX samples written since the current downlink started (reset by
@@ -682,10 +550,21 @@ void writeBits(uint8_t c, bool isEOT)
  * written, so a report naming a later one belongs to some other stream. */
 static volatile uint32_t dmrTxSamplesWritten = 0U;
 
+/*
+ * writeSamples()
+ *
+ * Turns one byte of transmit bits (four symbols) into shaped transmit
+ * samples and queues them for the modem host.  The samples are collected in
+ * 200 byte SAMP packets.
+ *
+ * Parameters:
+ *   c     - Byte of transmit bits.
+ *   isEOT - true to send the partly filled packet now (end of transmission).
+ *
+ * Returns: nothing.
+ */
 void writeSamples(uint8_t c, bool isEOT)
 {
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'};  // setup 8 byte header
-    static uint8_t bytePos    = 8;                                            // set first position after header
     q15_t inBuffer[4U];
     q15_t outBuffer[DMR_RADIO_SYMBOL_LENGTH * 4U];
 
@@ -717,44 +596,31 @@ void writeSamples(uint8_t c, bool isEOT)
     arm_fir_interpolate_q15(&dmrModFilter, inBuffer, outBuffer, 4U);
     dmrTxSamplesWritten += DMR_RADIO_SYMBOL_LENGTH * 4U;
 
-    bytes[5] = 'A';
-    bytes[6] = 'M';
-    bytes[7] = 'P';
-
-    for (uint8_t i = 0U; i < DMR_RADIO_SYMBOL_LENGTH * 4U; i++)
-    {
-        bytes[bytePos++] = (outBuffer[i] & 0x00ff);
-        bytes[bytePos++] = (outBuffer[i] & 0xff00) >> 8;
-        if (bytePos == 200)
-        {
-            write(sockfd, bytes, 200);
-            bytePos = 8;
-            delay(500);
-        }
-    }
-
-    if (bytePos >= 8 && isEOT)  // If EOT and number of new bytes less than 200 pad out with 0.
-    {
-        bytes[5] = 'E';
-        bytes[6] = 'O';
-        bytes[7] = 'T';
-        memset(bytes + bytePos, 0, 200 - bytePos);
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
+    /* 200 byte SAMP packets; a short wait after each full one paces the modem host */
+    modemQueueSamples(sockfd, outBuffer, DMR_RADIO_SYMBOL_LENGTH * 4U, isEOT, 500U);
 }
 
-/* Modulate/queue an already-fully-formed DMR burst (sync, CACH, EMB, etc.
- * already stamped in by the caller) for TX in SAMPLE or BIT packet mode.
- * Every DMR burst is a complete, self-synchronized 33-byte (264-bit) unit
- * transmitted in its own TDMA slot, so unlike D-STAR/P25/M17 there is no
- * separate preamble to insert here. The caller passes isEOT=false during
- * a live transmission -- the 200-byte modem socket packet fills naturally
- * across successive bursts and flushes when full, same as P25/D-STAR/M17.
- * isEOT=true is for the one-shot end-of-transmission flush only (see the
- * txOn edge handling in dmrTxThread()); passing it on every burst would
- * tag ~33 packets/sec with the EOT header and force the modem to tear
- * down and re-key its TX chain each time, overflowing its RX buffer. */
+/*
+ * processTx()
+ *
+ * Modulates and queues a complete DMR burst for transmission in SAMPLE or
+ * BIT mode.  The caller has already added the sync, CACH and EMB fields.  A
+ * DMR burst is a self-contained 33 byte (264 bit) unit sent in its own time
+ * slot, so there is no preamble to add.  Callers pass isEOT as false during
+ * a live transmission, so that the 200 byte packets fill up and are flushed
+ * when full.  isEOT is true only for the single end-of-transmission flush
+ * (see dmrTxThread()); passing it on every burst would tag about 33 packets
+ * a second as end of transmission and make the modem restart its transmit
+ * chain each time, overflowing its receive buffer.  Does nothing in frame
+ * mode.
+ *
+ * Parameters:
+ *   data   - The burst bytes.
+ *   length - Number of bytes in data.
+ *   isEOT  - true to flush the partly filled packet as end of transmission.
+ *
+ * Returns: nothing.
+ */
 void processTx(const uint8_t* data, uint8_t length, bool isEOT)
 {
     if (packetType != PACKET_TYPE_SAMP && packetType != PACKET_TYPE_BIT)
@@ -766,7 +632,7 @@ void processTx(const uint8_t* data, uint8_t length, bool isEOT)
         if (packetType == PACKET_TYPE_SAMP)
             writeSamples(data[i], last);
         else
-            writeBits(data[i], last);
+            modemWriteBits(sockfd, data[i], last);
     }
 }
 
@@ -837,16 +703,46 @@ void processTx(const uint8_t* data, uint8_t length, bool isEOT)
  * radio. RX now has two tracking contexts sharing one sample front end;
  * see DMR_RX_CTX below. */
 
+/*
+ * dmrCountBits8()
+ *
+ * Counts the bits set in a byte.
+ *
+ * Parameters:
+ *   bits - Value to count.
+ *
+ * Returns: Number of one bits.
+ */
 static uint8_t dmrCountBits8(uint8_t bits)
 {
     return (uint8_t)__builtin_popcount(bits);
 }
 
+/*
+ * dmrCountBits32()
+ *
+ * Counts the bits set in a 32 bit value.
+ *
+ * Parameters:
+ *   bits - Value to count.
+ *
+ * Returns: Number of one bits.
+ */
 static uint8_t dmrCountBits32(uint32_t bits)
 {
     return (uint8_t)__builtin_popcount(bits);
 }
 
+/*
+ * dmrCountBits64()
+ *
+ * Counts the bits set in a 64 bit value.
+ *
+ * Parameters:
+ *   bits - Value to count.
+ *
+ * Returns: Number of one bits.
+ */
 static uint8_t dmrCountBits64(uint64_t bits)
 {
     return (uint8_t)__builtin_popcountll(bits);
@@ -1088,6 +984,15 @@ static int64_t         dmrSlotLastFrameNs[2]   = {0, 0};
 static pthread_mutex_t dmrSlotActivityMutex    = PTHREAD_MUTEX_INITIALIZER;
 static const int64_t   DMR_SLOT_IDLE_TIMEOUT_NS = 1500000000LL;  // 1.5s
 
+/*
+ * dmrNowNs()
+ *
+ * Reads the monotonic clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: Time in nanoseconds.
+ */
 static int64_t dmrNowNs(void)
 {
     struct timespec ts;
@@ -1095,7 +1000,16 @@ static int64_t dmrNowNs(void)
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
 }
 
-// Refresh a slot's activity timestamp (see dmrSlotLastFrameNs).
+/*
+ * dmrSlotNoteFrame()
+ *
+ * Records that a frame has just been seen on a slot, for the slot watchdog.
+ *
+ * Parameters:
+ *   slot - Time slot index, 0 or 1.
+ *
+ * Returns: nothing.
+ */
 static void dmrSlotNoteFrame(uint8_t slot)
 {
     int64_t now = dmrNowNs();
@@ -1104,9 +1018,18 @@ static void dmrSlotNoteFrame(uint8_t slot)
     pthread_mutex_unlock(&dmrSlotActivityMutex);
 }
 
-/* Called where the last active slot's call ends. FRAME mode: un-key now,
- * as before (the MMDVM firmware handles any hang). SAMPLE/BIT mode: start
- * the TX hang instead -- dmrTxThread() un-keys when it runs out. */
+/*
+ * dmrReleaseTx()
+ *
+ * Called when the last active slot's call ends.  In frame mode the
+ * transmitter is un-keyed at once (the MMDVM firmware handles any hang
+ * time).  In SAMPLE and BIT mode the TX hang is started instead, and
+ * dmrTxThread() un-keys when it runs out.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void dmrReleaseTx(void)
 {
     if (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT)
@@ -1122,13 +1045,37 @@ static void dmrReleaseTx(void)
     }
 }
 
+/*
+ * dmrRxNominalSampleNs()
+ *
+ * Converts a position in the receive sample stream to a time, assuming
+ * exactly 24000 samples a second.
+ *
+ * Parameters:
+ *   ptr - Sample position.
+ *
+ * Returns: Time in nanoseconds.
+ */
 static int64_t dmrRxNominalSampleNs(uint32_t ptr)
 {
     return ((int64_t)ptr * 1000000000LL) / 24000LL;
 }
 
-// Called once per incoming SAMP packet, before its samples are processed.
-// endPtr is dataPtr just past the packet's last sample.
+/*
+ * dmrRxNoteSamplePacket()
+ *
+ * Called once for each incoming SAMP packet, before its samples are
+ * processed.  It compares the packet's arrival time with the nominal sample
+ * time to track the offset between the sample clock and the system clock,
+ * using the smallest offset seen in the current window.
+ *
+ * Parameters:
+ *   arrivalNs - Arrival time of the packet, in nanoseconds on the monotonic
+ *               clock.
+ *   endPtr    - Value of dataPtr just past the last sample of the packet.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxNoteSamplePacket(int64_t arrivalNs, uint32_t endPtr)
 {
     if (arrivalNs - dmrRxClockWindowStartNs >= DMR_RX_CLOCK_WINDOW_NS)
@@ -1143,8 +1090,17 @@ static void dmrRxNoteSamplePacket(int64_t arrivalNs, uint32_t endPtr)
         dmrRxClockOffsetNs = offset;
 }
 
-// Best estimate of when sample ptr arrived, in CLOCK_MONOTONIC ns, or 0
-// if no packet has been timed yet.
+/*
+ * dmrRxSampleTimeNs()
+ *
+ * Gives the best estimate of when a sample arrived.
+ *
+ * Parameters:
+ *   ptr - Sample position.
+ *
+ * Returns: Arrival time in nanoseconds on the monotonic clock, or 0 if no
+ *   packet has been timed yet.
+ */
 static int64_t dmrRxSampleTimeNs(uint32_t ptr)
 {
     int64_t best = (dmrRxClockOffsetNs < dmrRxClockOffsetPrevNs) ? dmrRxClockOffsetNs : dmrRxClockOffsetPrevNs;
@@ -1153,8 +1109,18 @@ static int64_t dmrRxSampleTimeNs(uint32_t ptr)
     return best + dmrRxNominalSampleNs(ptr);
 }
 
-// Phase of sample ptr, in ns within the 60ms TDMA frame, after TX slot-1
-// start; -1 if there's no timing yet.
+/*
+ * dmrRxPhaseNs()
+ *
+ * Works out where a sample falls in the 60 ms TDMA frame, counted from the
+ * start of TX slot 1.
+ *
+ * Parameters:
+ *   ptr - Sample position.
+ *
+ * Returns: Phase in nanoseconds (0 to 59999999), or -1 if there is no timing
+ *   yet.
+ */
 static int64_t dmrRxPhaseNs(uint32_t ptr)
 {
     pthread_mutex_lock(&dmrTxSlotTimeMutex);
@@ -1172,8 +1138,18 @@ static int64_t dmrRxPhaseNs(uint32_t ptr)
     return phase;
 }
 
-// Position of RX sample ptr within this host's TDMA cycle (0..1439, see
-// dmrTxRefValid), or -1 if there's no TX timing report for this downlink.
+/*
+ * dmrRxCyclePos()
+ *
+ * Works out the position of a receive sample within this host's TDMA cycle
+ * (0 to 1439 samples), using the TX timing report from the modem.
+ *
+ * Parameters:
+ *   ptr - Sample position.
+ *
+ * Returns: Position in the cycle, or -1 if there is no TX timing report for
+ *   this downlink.
+ */
 static int32_t dmrRxCyclePos(uint32_t ptr)
 {
     pthread_mutex_lock(&dmrTxSlotTimeMutex);
@@ -1192,7 +1168,18 @@ static int32_t dmrRxCyclePos(uint32_t ptr)
     return (int32_t)pos;
 }
 
-// 0 = TS1, 1 = TS2, -1 = no timing yet.
+/*
+ * dmrRxSlotFromPhase()
+ *
+ * Decides which time slot a received sync belongs to, from where it falls in
+ * the TDMA cycle.  It uses the TX timing report when there is one and the
+ * wall clock phase otherwise.
+ *
+ * Parameters:
+ *   ptr - Sample position of the sync.
+ *
+ * Returns: 0 for slot 1, 1 for slot 2, -1 if there is no timing yet.
+ */
 static int dmrRxSlotFromPhase(uint32_t ptr)
 {
     int32_t pos = dmrRxCyclePos(ptr);
@@ -1223,6 +1210,17 @@ static int dmrRxSlotFromPhase(uint32_t ptr)
     return (d > -15000000LL && d < 15000000LL) ? 0 : 1;
 }
 
+/*
+ * dmrRxLogSlotPhase()
+ *
+ * Debug output: prints where a locked sync falls in the TDMA cycle and which
+ * slot that implies, next to the slot the context was given.
+ *
+ * Parameters:
+ *   c - Receive context that has just locked.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxLogSlotPhase(const DMR_RX_CTX* c)
 {
     int64_t phase = dmrRxPhaseNs(c->syncPtr);
@@ -1244,8 +1242,17 @@ static void dmrRxLogSlotPhase(const DMR_RX_CTX* c)
 
 #define DMR_RX_BUF(s, idx) ((s)->buffer[(idx) % 900U])  // 900U = sizeof(s->buffer)/sizeof(q15_t)
 
-// Mirrors CDMRSlotRX::reset() for one context: used at startup and
-// whenever that context's stream is lost.
+/*
+ * dmrRxCtxReset()
+ *
+ * Resets one receive context, as CDMRSlotRX::reset() does in MMDVM.  Used at
+ * start-up and whenever the context's stream is lost.
+ *
+ * Parameters:
+ *   c - Context to reset.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxCtxReset(DMR_RX_CTX* c)
 {
     c->syncPtr   = 0U;
@@ -1257,8 +1264,16 @@ static void dmrRxCtxReset(DMR_RX_CTX* c)
     c->endPtr    = DMR_RX_NOENDPTR;
 }
 
-// Full RX reset (startup). Does NOT touch dataPtr -- it free-runs for the
-// life of the process; only the lock-tracking fields reset.
+/*
+ * dmrRxReset()
+ *
+ * Resets both receive contexts at start-up.  It does not touch dataPtr,
+ * which runs freely for the life of the process.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxReset(void)
 {
     for (uint8_t i = 0U; i < 2U; i++)
@@ -1269,8 +1284,24 @@ static void dmrRxReset(void)
     }
 }
 
-// Mirrors CDMRSlotRX::samplesToBits(). Buffer access is modulo the ring
-// size since start/count are absolute, free-running sample counts.
+/*
+ * dmrRxSamplesToBits()
+ *
+ * Converts samples to bits for the receive burst, like
+ * CDMRSlotRX::samplesToBits().  The start and count are absolute, free-
+ * running sample counts, so the buffer is addressed modulo its size.  Each
+ * sample is compared with the centre and threshold levels.
+ *
+ * Parameters:
+ *   start     - Absolute position of the first sample.
+ *   count     - Number of symbols to convert.
+ *   buffer    - Receives the bits.
+ *   offset    - Bit position in buffer where the first bit is written.
+ *   centre    - Centre level of the signal.
+ *   threshold - Level that separates the inner and outer symbols.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxSamplesToBits(uint32_t start, uint16_t count, uint8_t* buffer, uint16_t offset, q15_t centre, q15_t threshold)
 {
     DMR_RX_STATE* s = &dmrRx;
@@ -1310,20 +1341,51 @@ static void dmrRxSamplesToBits(uint32_t start, uint16_t count, uint8_t* buffer, 
     }
 }
 
-// The other of the two contexts -- used to give a newly locked stream the
-// opposite slot label when the other context is already tracking one.
+/*
+ * dmrRxOtherCtx()
+ *
+ * Gives the other of the two receive contexts.  It is used to label a newly
+ * locked stream with the opposite slot when the other context is already
+ * tracking one.
+ *
+ * Parameters:
+ *   c - One receive context.
+ *
+ * Returns: The other context.
+ */
 static DMR_RX_CTX* dmrRxOtherCtx(const DMR_RX_CTX* c)
 {
     return &dmrRxCtx[c->index ^ 1U];
 }
 
+/*
+ * dmrRxCtxActive()
+ *
+ * Tells whether a receive context is following a stream.
+ *
+ * Parameters:
+ *   c - Receive context.
+ *
+ * Returns: true if the context is tracking a burst or is in a state other
+ *   than idle.
+ */
 static bool dmrRxCtxActive(const DMR_RX_CTX* c)
 {
     return c->endPtr != DMR_RX_NOENDPTR || c->state != DMR_RXS_NONE;
 }
 
-// True if dataPtr lines up (within the guard, modulo one TDMA frame) with
-// the sync position of a stream some active context is already tracking.
+/*
+ * dmrRxNearTrackedStream()
+ *
+ * Tells whether a sample position lines up (within the guard, modulo one
+ * TDMA frame) with the sync position of a stream that an active context is
+ * already tracking.
+ *
+ * Parameters:
+ *   dataPtr - Sample position to test.
+ *
+ * Returns: true if it is near a tracked stream, false if not.
+ */
 static bool dmrRxNearTrackedStream(uint32_t dataPtr)
 {
     for (uint8_t i = 0U; i < 2U; i++)
@@ -1355,9 +1417,23 @@ static const uint32_t DMR_RX_DIAG_PERIOD_SAMPLES_LOCAL = 24000U;  // ~1s @ 24kHz
 static uint8_t  dmrRxDiagBestDist   = 255U;
 static uint32_t dmrRxDiagWindowBase = 0U;
 
-// Mirrors CDMRSlotRX::correlateSync() for one context, plus the slot
-// labelling decision, made exactly once per freshly locked stream (the
-// "first" branch).
+/*
+ * dmrRxCorrelateSync()
+ *
+ * Correlates the received symbols against the DMR sync patterns for one
+ * context, as CDMRSlotRX::correlateSync() does in MMDVM.  The match is
+ * stricter while starting from cold, to avoid locking onto noise, and looser
+ * once a burst sequence is being followed.  When a stream is freshly locked
+ * ("first"), the slot label is also chosen, once: the opposite slot if the
+ * other context is already tracking one, otherwise the slot given by where
+ * the burst falls in the TDMA cycle.
+ *
+ * Parameters:
+ *   c     - Receive context to work on.
+ *   first - true when this is the first lock of a stream.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxCorrelateSync(DMR_RX_CTX* c, bool first)
 {
     DMR_RX_STATE* s = &dmrRx;
@@ -1499,10 +1575,22 @@ static void dmrRxCorrelateSync(DMR_RX_CTX* c, bool first)
     c->endPtr   = s->dataPtr + DMR_SLOT_TYPE_LENGTH_SAMPLES_LOCAL / 2U + DMR_INFO_LENGTH_SAMPLES_LOCAL / 2U - 1U;
 }
 
-// Hand a completed, already-demodulated 33-byte DMR burst to the existing
-// FRAME-mode protocol logic, exactly as if it had arrived as a DMD1/DML1
-// (slot 0) or DMD2/DML2 (slot 1) network packet (see the FRAME branch in
-// startClient()).
+/*
+ * dmrRxDeliverFrame()
+ *
+ * Hands a finished, demodulated 33 byte DMR burst to the frame-mode protocol
+ * logic, exactly as if it had arrived as a DMD1 or DML1 (slot 1) or DMD2 or
+ * DML2 (slot 2) packet from the network.
+ *
+ * Parameters:
+ *   slot        - Time slot index, 0 or 1.
+ *   frame33     - The 33 byte burst.
+ *   controlByte - Control byte that tells the kind of burst (data, voice or
+ *                 none).
+ *   lost        - true to deliver a "lost" frame instead of data.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxDeliverFrame(uint8_t slot, const uint8_t* frame33, uint8_t controlByte, bool lost)
 {
     // frame33 must point at the 33-byte frame PAYLOAD (no leading control
@@ -1525,8 +1613,20 @@ static void dmrRxDeliverFrame(uint8_t slot, const uint8_t* frame33, uint8_t cont
     decodeDMR(buf, 9U + DMR_FRAME_LENGTH_BYTES, false);
 }
 
-// See dmrSlotLastFrameNs. Runs on the RX thread, like every other
-// decodeDMR() call this host makes for RF traffic.
+/*
+ * dmrSlotWatchdog()
+ *
+ * Ends a slot that has been marked active but has gone quiet.  Any frame
+ * seen by decodeDMR() refreshes the slot's time stamp; a slot that is active
+ * and has had no frame for DMR_SLOT_IDLE_TIMEOUT_NS gets a lost frame, which
+ * runs the normal end-of-call cleanup.  This stops a slot that was activated
+ * by a lone CSBK, with no call behind it, from keeping the repeater keyed.
+ * It runs on the RX thread, and does nothing in frame mode.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void dmrSlotWatchdog(void)
 {
     if (packetType != PACKET_TYPE_SAMP && packetType != PACKET_TYPE_BIT)
@@ -1557,14 +1657,25 @@ static void dmrSlotWatchdog(void)
 // Read out and decode the burst a context has just finished receiving
 // (dataPtr == c->endPtr), then either coast to the next burst on the same
 // slot or go back to idle.
-/* Diagnostic only (debugM). Called when a tracked voice call reaches a
- * position where burst A -- and so an MS voice sync -- is expected but none
- * was found. Demodulates the 24-symbol sync field at every sample offset
- * in +/-24 around where it should be and compares each against all the
- * ETSI TS 102 361-1 Table 9.2 sync patterns, then prints the closest
- * match: tells apart "the radio sent a different sync" (pattern name),
- * "the right sync, further off than the tracking window" (offset), and
- * "nothing sync-like" (high bit-error count). */
+/*
+ * dmrRxDiagMissingSync()
+ *
+ * Diagnostic only (debug mode).  Called when a followed voice call reaches
+ * the position where burst A, and so a voice sync, should be but none was
+ * found.  It demodulates the 24 symbol sync field at each sample offset
+ * within 24 samples of the expected place, compares each with the sync
+ * patterns of ETSI TS 102 361-1 Table 9.2 and prints the closest match.
+ * That tells apart a different sync pattern (the pattern name), the right
+ * sync outside the tracking window (the offset) and no sync at all (a high
+ * bit error count).
+ *
+ * Parameters:
+ *   c         - Receive context being followed.
+ *   centre    - Centre level of the signal.
+ *   threshold - Level that separates the inner and outer symbols.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxDiagMissingSync(const DMR_RX_CTX* c, q15_t centre, q15_t threshold)
 {
     static const struct
@@ -1619,6 +1730,21 @@ static void dmrRxDiagMissingSync(const DMR_RX_CTX* c, q15_t centre, q15_t thresh
             c->index, c->slot + 1U, patterns[bestPat].name, bestDist, (int)bestOff, msVoiceAt0);
 }
 
+/*
+ * dmrRxCtxBurstEnd()
+ *
+ * Reads out and decodes the burst a context has just finished receiving
+ * (dataPtr equals the context's endPtr), then either coasts to the next
+ * burst on the same slot or goes back to idle.  A sync found while tracking
+ * is folded into the drift estimate.  A simplex hotspot has no wake-up, and
+ * a radio's repeated wake-up CSBK is handled here; completed bursts are
+ * passed on with dmrRxDeliverFrame().
+ *
+ * Parameters:
+ *   c - Receive context whose burst has ended.
+ *
+ * Returns: nothing.
+ */
 static void dmrRxCtxBurstEnd(DMR_RX_CTX* c)
 {
     uint8_t slot = c->slot;
@@ -1862,10 +1988,20 @@ static int64_t dmrRxDiagShortSumAbs     = 0;
 static uint32_t dmrRxDiagShortWindowBase = 0U;
 static int32_t  dmrRxDiagBaselineAvgAbs  = -1;  // -1 = not yet seeded
 
-// Per-sample RX: one shared front end, then each context's refine/burst
-// handling, plus a free cold scan whenever a context is idle. Like
-// CDMRSlotRX::processSample(), but free-running: there is no external
-// "start()" that rewinds dataPtr once per cycle.
+/*
+ * dmrRxProcessSample()
+ *
+ * Processes one receive sample.  There is one shared front end, then each
+ * context's refine and burst handling, plus a free cold scan whenever a
+ * context is idle.  It works like CDMRSlotRX::processSample() in MMDVM, but
+ * runs freely: nothing rewinds dataPtr once per cycle.  In debug mode it
+ * also gathers signal level statistics.
+ *
+ * Parameters:
+ *   sample - The demodulated sample.
+ *
+ * Returns: true if the sample was handled.
+ */
 static bool dmrRxProcessSample(q15_t sample)
 {
     DMR_RX_STATE* s = &dmrRx;
@@ -1968,7 +2104,19 @@ static bool dmrRxProcessSample(q15_t sample)
     return dmrRxCtxActive(&dmrRxCtx[0U]) || dmrRxCtxActive(&dmrRxCtx[1U]);
 }
 
-// Entry point for SAMPLE-mode RX: feed demodulated C4FM samples in here.
+/*
+ * dmrRxSamples()
+ *
+ * Entry point for SAMPLE mode receive.  Feeds demodulated samples through
+ * dmrRxProcessSample() and runs the slot watchdog about once every 240
+ * samples.
+ *
+ * Parameters:
+ *   samples - Demodulated samples.
+ *   length  - Number of samples.
+ *
+ * Returns: nothing.
+ */
 void dmrRxSamples(const q15_t* samples, uint16_t length)
 {
     for (uint16_t i = 0U; i < length; i++)
@@ -2024,10 +2172,19 @@ static uint32_t dmrTxAbortCount[2U] = {0U, 0U};
  * in the cycle makes every key-up line up the same way. */
 static bool dmrTxStreaming = false;
 
-// Mirrors CDMRTX::createCACH(). txSlotIndex is the slot about to be
-// transmitted after this CACH; rxSlotIndex is the slot whose correlator
-// this CACH's last byte arms, matching MMDVM's own (slightly
-// counter-intuitive, but authoritative) m_markBuffer[2] assignment.
+/*
+ * dmrSendCACH()
+ *
+ * Creates and sends the CACH, as CDMRTX::createCACH() does in MMDVM.  The
+ * CACH is only sent to the modem while keyed.
+ *
+ * Parameters:
+ *   txSlotIndex - The slot that is sent after this CACH.
+ *   rxSlotIndex - The slot whose correlator the last byte of this CACH arms,
+ *                 as in MMDVM's own m_markBuffer[2] assignment.
+ *
+ * Returns: nothing.
+ */
 static void dmrSendCACH(uint8_t txSlotIndex, uint8_t rxSlotIndex)
 {
     dmrTxFrameCount++;
@@ -2095,10 +2252,20 @@ static void dmrSendCACH(uint8_t txSlotIndex, uint8_t rxSlotIndex)
         processTx(cach, DMR_CACH_LENGTH_BYTES_LOCAL, false);
 }
 
-// Mirrors CDMRTX::createData(): pull a real frame from this slot's FIFO
-// when there is one (and startup/abort hysteresis allows it), otherwise
-// transmit the idle frame so the slot keeps its TDMA structure. Only
-// actually sent to the modem while keyed -- see dmrSendCACH().
+/*
+ * dmrSendSlotBurst()
+ *
+ * Sends the burst of one slot, as CDMRTX::createData() does in MMDVM.  It
+ * takes a real frame from the slot's FIFO when there is one (and the start-
+ * up and abort hysteresis allows it); otherwise the idle frame is sent, so
+ * that the slot keeps its TDMA structure.  The burst is only sent to the
+ * modem while keyed.
+ *
+ * Parameters:
+ *   slotIndex - Time slot index, 0 or 1.
+ *
+ * Returns: nothing.
+ */
 static void dmrSendSlotBurst(uint8_t slotIndex)
 {
     uint8_t frame[33U];  // DMR_FRAME_LENGTH_BYTES
@@ -2153,6 +2320,16 @@ static const long    DMR_DMO_PERIOD_US     = 60000L;    // one burst + fill
  * the FIFO (12 frames, 720 ms), so keep it well below that. */
 static uint32_t dmrDmoPreambleMs = 360U;
 
+/*
+ * dmrSendDmoPreamble()
+ *
+ * Sends the preamble of a simplex (direct mode) transmission: bytes of
+ * DMR_DMO_PREAMBLE_BYTE for dmrDmoPreambleMs milliseconds.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void dmrSendDmoPreamble(void)
 {
     uint8_t chunk[32U];
@@ -2171,8 +2348,18 @@ static void dmrSendDmoPreamble(void)
         fprintf(stderr, "DMR TX (simplex): preamble %u ms sent\n", (unsigned)dmrDmoPreambleMs);
 }
 
-// One 60 ms period: a queued frame (or the idle frame when there is none, so
-// the carrier and burst structure carry on between frames) plus the fill.
+/*
+ * dmrSendDmoPeriod()
+ *
+ * Sends one 60 ms period of a simplex transmission: a queued frame (or the
+ * idle frame when there is none, so that the carrier and burst structure
+ * carry on between frames) plus the fill bytes.  In simplex everything comes
+ * from the slot 1 FIFO.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void dmrSendDmoPeriod(void)
 {
     uint8_t frame[33U];  // DMR_FRAME_LENGTH_BYTES
@@ -2209,27 +2396,23 @@ static void dmrSendDmoPeriod(void)
     processTx(DMR_DMO_PR_FILL, sizeof DMR_DMO_PR_FILL, false);
 }
 
-/* The TDMA scheduler itself: CACH(0,1) -> SLOT1 -> CACH(1,0) -> SLOT2 ->
- * repeat, exactly like CDMRTX::process()'s state machine, paced in real
- * time with an absolute-deadline clock so the 30ms/slot, 60ms/cycle
- * cadence doesn't drift even though processTx() below it also spends
- * real wall-clock time of its own doing per-packet socket pacing (that
- * pacing is flow control, not a precise symbol clock -- see
- * writeSamples()/writeBits()).
+/*
+ * dmrTxThread()
  *
- * This loop runs continuously regardless of txOn -- it is NOT gated on
- * "are we keyed?" the way an earlier version of this function was. That
- * earlier version skipped the whole cycle (including arming the RX
- * correlators, back when RX needed arming from here) whenever txOn was
- * false, which deadlocked the repeater: RX could never scan for an
- * incoming burst until txOn was already true -- but txOn only ever
- * becomes true as a RESULT of RX decoding a voice/data LC header.
- * RX no longer depends on this thread at all (see the file comment
- * above dmrRxProcessSample()), but the loop still always runs
- * unconditionally: dmrSendCACH()/dmrSendSlotBurst() are what gate the
- * actual modulated output to the modem on txOn, not the scheduler
- * itself, so the on-air TDMA structure (idle bursts, CACH) stays
- * continuous even while nothing is being relayed. */
+ * The TDMA scheduler: CACH(0,1), slot 1, CACH(1,0), slot 2, and repeat, like
+ * the state machine of CDMRTX::process() in MMDVM.  It is paced by an
+ * absolute-deadline clock so that the 30 ms slot and 60 ms cycle do not
+ * drift.  The loop runs all the time, whether or not the transmitter is
+ * keyed: dmrSendCACH() and dmrSendSlotBurst() decide what is sent to the
+ * modem from txOn, so the on-air TDMA structure stays continuous while
+ * nothing is relayed.  It also sends the end-of-transmission flush when txOn
+ * goes off, and ends the TX hang.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL.
+ */
 void* dmrTxThread(void* arg)
 {
     (void)arg;
@@ -2286,7 +2469,7 @@ void* dmrTxThread(void* arg)
             if (packetType == PACKET_TYPE_SAMP)
                 writeSamples(0x00U, true);
             else if (packetType == PACKET_TYPE_BIT)
-                writeBits(0x00U, true);
+                modemWriteBits(sockfd, 0x00U, true);
             if (debugM)
                 fprintf(stderr, "DMR TX: txOn dropped, flushed EOT to modem\n");
         }
@@ -2455,14 +2638,22 @@ static int32_t  dmrBitPhaseNow   = -1;     // TX stream position (0..575) at the
 static int32_t  dmrBitPendPhase  = -1;     // the same, at the end of the sync that started the pending burst
 static int32_t  dmrSlotPhase     = -1;     // [DMR] slotPhase: TX phase at which a TS1 uplink sync ends, -1 unset
 
-/* Which time slot an uplink burst is in. The radio times its uplink to the
- * downlink this modem sends, so the burst's position in the downlink's
- * 60 ms two-slot cycle says which slot it belongs to. The modem reports that
- * position with every BITS packet. dmrSlotPhase is the position at which a
- * TS1 sync typically ends (measured once per setup: run with debug on and look at
- * "sync end at TX phase"); TS2 is half a cycle (288 bits) later. The value
- * is the typical position for TS1, so a few bits of jitter either way is
- * harmless. */
+/*
+ * dmrBitSlotFromPhase()
+ *
+ * Tells which time slot an uplink burst is in, in BIT mode.  The radio times
+ * its uplink to the downlink the modem sends, so the burst's position in the
+ * downlink's 60 ms two-slot cycle gives the slot.  The modem reports that
+ * position with each BITS packet.  dmrSlotPhase is the position where a TS1
+ * sync typically ends (measured once for each setup); TS2 is half a cycle
+ * (288 bits) later.
+ *
+ * Parameters:
+ *   phase - TX stream position (0 to 575) at the end of the sync.
+ *
+ * Returns: 0 for slot 1, 1 for slot 2; 0 if the phase or dmrSlotPhase is not
+ *   known.
+ */
 static uint8_t dmrBitSlotFromPhase(int32_t phase)
 {
     if (phase < 0 || dmrSlotPhase < 0)
@@ -2472,18 +2663,48 @@ static uint8_t dmrBitSlotFromPhase(int32_t phase)
     return (d < 288) ? 0U : 1U;
 }
 
+/*
+ * dmrBitAnyCall()
+ *
+ * Tells whether a call is being received in BIT mode on either slot.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if either slot's context is not idle.
+ */
 static bool dmrBitAnyCall(void)
 {
     return dmrBitCtx[0].state != DMR_RXS_NONE || dmrBitCtx[1].state != DMR_RXS_NONE;
 }
 
+/*
+ * dmrBitReset()
+ *
+ * Clears the BIT mode receive state: any pending burst and both slot
+ * contexts.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void dmrBitReset(void)
 {
     dmrBitPending = false;
     memset(dmrBitCtx, 0, sizeof(dmrBitCtx));
 }
 
-// Copy the 264 bits ending at stream position 'end' (exclusive) out of the ring.
+/*
+ * dmrBitCutBurst()
+ *
+ * Copies the 264 bits that end at a stream position (exclusive) out of the
+ * BIT mode bit ring.
+ *
+ * Parameters:
+ *   end   - Stream position just after the burst's last bit.
+ *   frame - Receives the 33 byte burst.
+ *
+ * Returns: nothing.
+ */
 static void dmrBitCutBurst(uint64_t end, uint8_t* frame)
 {
     uint64_t start = end - DMR_FRAME_LENGTH_BITS;
@@ -2498,10 +2719,23 @@ static void dmrBitCutBurst(uint64_t end, uint8_t* frame)
     }
 }
 
-/* One complete burst of slot 'slot'. 'control' is DMR_RX_CONTROL_DATA /
- * _VOICE when a sync was found at the burst's centre, DMR_RX_CONTROL_NONE when
- * it was cut out at its expected position without one. Mirrors
- * dmrRxFinishBurst() above. */
+/*
+ * dmrBitBurst()
+ *
+ * Handles one complete burst of a slot in BIT mode.  It mirrors the SAMPLE
+ * mode burst handling (dmrRxCtxBurstEnd()) and delivers the burst through
+ * dmrRxDeliverFrame().
+ *
+ * Parameters:
+ *   frame   - The 33 byte burst.
+ *   control - DMR_RX_CONTROL_DATA or DMR_RX_CONTROL_VOICE if a sync was
+ *             found at the centre of the burst; DMR_RX_CONTROL_NONE if it
+ *             was cut out at its expected position without one.
+ *   end     - Stream position just after the burst.
+ *   slot    - Time slot index, 0 or 1.
+ *
+ * Returns: nothing.
+ */
 static void dmrBitBurst(uint8_t* frame, uint8_t control, uint64_t end, uint8_t slot)
 {
     DmrBitCtx* c = &dmrBitCtx[slot];
@@ -2665,6 +2899,21 @@ static void dmrBitBurst(uint8_t* frame, uint8_t control, uint64_t end, uint8_t s
     }
 }
 
+/*
+ * dmrProcessBit()
+ *
+ * Processes one received bit in BIT mode.  The bit is stored in the bit ring
+ * and the sync detector is advanced.  A sync match means that the burst it
+ * belongs to ends 108 bits later, and the slot of the burst is decided (from
+ * its position in the TDMA cycle, or from the slot being followed).  When a
+ * burst is complete it is cut out and handled with dmrBitBurst(); a burst
+ * whose expected position arrives with no sync is handled too, without one.
+ *
+ * Parameters:
+ *   bit - The received bit.
+ *
+ * Returns: nothing.
+ */
 static void dmrProcessBit(bool bit)
 {
     uint8_t frame[33U];  // DMR_FRAME_LENGTH_BYTES (must be a literal: global array size)
@@ -2766,8 +3015,20 @@ static void dmrProcessBit(bool bit)
     }
 }
 
-// Entry point for BIT-mode RX: feed raw hard-sliced dibit bytes in here
-// (8 bits = 4 symbols per byte, MSB first), same packing as writeBits().
+/*
+ * dmrRxBits()
+ *
+ * Entry point for BIT mode receive.  Feeds raw hard-sliced bytes through the
+ * bit state machine (8 bits, which is 4 symbols, per byte, most significant
+ * bit first), packed as modemWriteBits(sockfd, ) packs them.  A long gap in the stream
+ * restarts the receiver and drops the old call state.
+ *
+ * Parameters:
+ *   bytes  - Received bytes.
+ *   length - Number of bytes in bytes.
+ *
+ * Returns: nothing.
+ */
 void dmrRxBits(const uint8_t* bytes, uint8_t length)
 {
     int64_t now = dmrNowNs();
@@ -2833,6 +3094,22 @@ void dmrRxBits(const uint8_t* bytes, uint8_t length)
 static unsigned int dmrRfErrs[2] = {0U, 0U}; // bit errors found in this RF call, per slot
 static unsigned int dmrRfBits[2] = {0U, 0U}; // protected bits checked in this RF call, per slot
 
+/*
+ * dmrRfVoice()
+ *
+ * Adds the error bits of a received RF voice burst to the counts for the
+ * slot, for the call's BER.  Network frames and frames that are too short
+ * are ignored.
+ *
+ * Parameters:
+ *   slot   - Time slot index, 0 or 1.
+ *   buffer - The received frame (OpenMT header, control byte and 33 byte
+ *            burst).
+ *   length - Number of bytes in buffer.
+ *   isNet  - true if the frame came from the network.
+ *
+ * Returns: nothing.
+ */
 static void dmrRfVoice(unsigned int slot, uint8_t* buffer, uint8_t length, bool isNet)
 {
     if (isNet || length < 8U + 1U + DMR_FRAME_LENGTH_BYTES)
@@ -2844,8 +3121,19 @@ static void dmrRfVoice(unsigned int slot, uint8_t* buffer, uint8_t length, bool 
     dmrRfBits[slot] += DMR_FEC_BITS_PER_BURST;
 }
 
-/* Print the BER of the RF call that just ended on this slot and return it
- * (0 if there was none). */
+/*
+ * dmrRfBer()
+ *
+ * Works out and prints the BER of the RF call that has just ended on a slot,
+ * and clears the slot's counts.  A network call has no BER and leaves the
+ * counts alone.
+ *
+ * Parameters:
+ *   slot  - Time slot index, 0 or 1.
+ *   isNet - true if the call came from the network.
+ *
+ * Returns: The BER as a fraction of bits in error, or 0 if there was none.
+ */
 static float dmrRfBer(unsigned int slot, bool isNet)
 {
     float ber = 0.0f;
@@ -2869,6 +3157,234 @@ static float dmrRfBer(unsigned int slot, bool isNet)
     return ber;
 }
 
+/* True while the link control of the call on a slot is known, so that the
+ * embedded link control of its voice bursts can be rebuilt (see
+ * dmrRebuildBurst()). */
+static bool dmrRebuildLcValid[2] = {false, false};
+
+/*
+ * dmrRebuildLoadEmbeddedLc()
+ *
+ * Late entry: when a call is joined after its voice LC header, the link
+ * control that arrives in the embedded data of the voice bursts is loaded for
+ * the rebuild, so that the bursts that follow can be rebuilt like those of a
+ * call with a header.  A link control already known from a header is kept.
+ *
+ * Parameters:
+ *   slot - Time slot index, 0 or 1.
+ *   lc   - The 9 bytes of the embedded link control.
+ *
+ * Returns: nothing.
+ */
+static void dmrRebuildLoadEmbeddedLc(uint8_t slot, const uint8_t* lc)
+{
+    if (dmrRebuildLcValid[slot])
+        return;
+
+    const uint8_t rs = DMR_REBUILD_SLOT(slot);
+
+    DMRLC_decode(lc, rs);
+    DMREmbeddedData_setLC(rs);
+    dmrRebuildLcValid[slot] = true;
+}
+
+/*
+ * dmrRebuildBurst()
+ *
+ * Rebuilds a burst that is about to be relayed to the radio, from what is
+ * decoded from it, as MMDVMHost does in duplex mode: nothing that the radio
+ * sent is repeated as it came, except the voice itself.
+ *
+ *   - Data bursts get their slot type encoded again, with the colour code of
+ *     this host.
+ *   - The voice LC header and the terminator with LC are decoded (BPTC and
+ *     Reed-Solomon) and encoded again from the link control.  The header
+ *     also gives the embedded link control for the voice bursts that follow.
+ *   - CSBKs, data headers and rate 1/2 data blocks are decoded (BPTC) and
+ *     encoded again; a CSBK is checked with its CRC and given a new one.
+ *   - Voice bursts B to F get their EMB encoded again (with this host's
+ *     colour code) and their embedded link control rebuilt from the link
+ *     control of the header.  Burst A gets only its sync, which the caller
+ *     adds.
+ *   - Rate 3/4 data blocks are decoded (trellis) and encoded again; one that
+ *     cannot be repaired goes out as received.
+ *   - Rate 1 data blocks and the PI header are not decoded: they go out as
+ *     received, with the slot type and sync rewritten.
+ * A burst that does not decode is left as received.  The rebuild uses
+ * slotData[] entries of its own (DMR_REBUILD_SLOT), so the state of a call
+ * being decoded is not disturbed.
+ *
+ * Parameters:
+ *   slot   - Time slot index, 0 or 1.
+ *   buffer - The frame, starting with the OpenMT header; the control byte is
+ *            at offset 8 and the burst from offset 9.  The burst is changed
+ *            in place.
+ *
+ * Returns: nothing.
+ */
+static void dmrRebuildBurst(uint8_t slot, uint8_t* buffer)
+{
+    const uint8_t control = buffer[8];
+    uint8_t*      frame   = buffer + 9;
+    const uint8_t rs      = DMR_REBUILD_SLOT(slot);
+
+    if ((control & DMR_SYNC_DATA) == DMR_SYNC_DATA)
+    {
+        uint8_t colorCode, dataType;
+
+        DMRSlotType_decode(frame, &colorCode, &dataType);
+        if (colorCode != dmrColorCode)
+            return;
+
+        switch (dataType)
+        {
+            case DT_VOICE_LC_HEADER:
+            case DT_TERMINATOR_WITH_LC:
+            {
+                uint8_t lc[12];
+
+                if (dataType == DT_TERMINATOR_WITH_LC)
+                    dmrRebuildLcValid[slot] = false;
+
+                if (DMRFullLC_decode(frame, dataType, lc, rs))
+                {
+                    DMRLC_decode(lc, rs);
+                    DMRFullLC_encode(frame, dataType, rs);
+                    if (dataType == DT_VOICE_LC_HEADER)
+                    {
+                        DMREmbeddedData_setLC(rs);
+                        dmrRebuildLcValid[slot] = true;
+                    }
+                }
+                break;
+            }
+
+            case DT_CSBK:
+                if (CSBK_decode(frame, rs))
+                    CSBK_encode(frame, rs);
+                break;
+
+            case DT_DATA_HEADER:
+            case DT_RATE_12_DATA:
+            {
+                uint8_t data[12];
+
+                BPTC19696_decode(frame, data, rs);
+                BPTC19696_encode(data, frame, rs);
+                break;
+            }
+
+            case DT_RATE_34_DATA:
+            {
+                uint8_t payload[18];
+
+                /* A block that cannot be repaired is left as received */
+                if (DMRTrellis_decode(frame, payload))
+                    DMRTrellis_encode(payload, frame);
+                break;
+            }
+
+            default:
+                break;
+        }
+
+        DMRSlotType_encode(dmrColorCode, dataType, frame);
+    }
+    else if ((control & DMR_SYNC_AUDIO) != DMR_SYNC_AUDIO)
+    {
+        /* Voice burst B to F: the control byte carries its number */
+        const uint8_t n = control & 0x0FU;
+
+        if (n < 1U || n > 5U || !dmrRebuildLcValid[slot])
+            return;
+
+        DMREMB_decode(frame, rs);
+        setColorCode(dmrColorCode, rs);
+        setLCSS(DMREmbeddedData_getData(frame, n, rs), rs);
+        DMREMB_encode(frame, rs);
+    }
+}
+
+/*
+ * dmrRelayBurst()
+ *
+ * Passes a data or voice burst on to the radio: gives data bursts the
+ * base station or mobile station sync, then queues the burst in the slot's
+ * FIFO (SAMPLE and BIT mode, where dmrTxThread() sends it in its own TDMA
+ * slot) or sends it to the modem as a data frame (FRAME mode).  It is used
+ * for every burst of a call, the terminator included.  In duplex mode the
+ * burst is first rebuilt from what is decoded from it (dmrRebuildBurst()).
+ * The terminator is
+ * relayed before the call is closed, because closing the call un-keys the
+ * transmitter in FRAME mode.
+ *
+ * Parameters:
+ *   slot   - Time slot index, 0 or 1.
+ *   buffer - The frame, starting with the OpenMT header; the control byte is
+ *            at offset 8 and the burst from offset 9.  The sync of a data
+ *            burst is changed in place.
+ *   isNet  - true if the frame came from the network.
+ *
+ * Returns: nothing.
+ */
+static void dmrRelayBurst(uint8_t slot, uint8_t* buffer, bool isNet)
+{
+    /* In duplex the burst is rebuilt from what is decoded from it */
+    if (modem_duplex)
+        dmrRebuildBurst(slot, buffer);
+
+    /* Re-transmitted data bursts (voice LC header, terminator, CSBK, data)
+     * must carry the BS-sourced data sync, the same way voice burst A gets
+     * the BS-sourced voice sync -- MMDVMHost does this for every data burst
+     * it relays.  Without it a radio listening to a repeater finds no call
+     * set-up. */
+    if ((buffer[8] & DMR_SYNC_DATA) == DMR_SYNC_DATA)
+        addDMRDataSync(buffer + 8 + 1, modem_duplex);
+
+    if (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT)
+    {
+        /* Hand the frame to the slot's FIFO instead of modulating it at
+         * once: a real DMR burst has to go out inside its own 30 ms TDMA
+         * slot (see dmrTxThread()/dmrSendSlotBurst()).  In simplex there is
+         * only the slot 1 FIFO (see dmrSendDmoPeriod()). */
+        const uint8_t fifo = (slot == 0U || !modem_duplex) ? 0U : 1U;
+        pthread_mutex_lock(&dmrTxFifoMutex[fifo]);
+        RingBuffer_addData(&dmrTxFifo[fifo], buffer + 8 + 1, DMR_FRAME_LENGTH_BYTES);
+        pthread_mutex_unlock(&dmrTxFifoMutex[fifo]);
+        if (debugM)
+            fprintf(stderr, "DMR relay slot%u: queued frame, control=0x%02X\n", slot + 1U, buffer[8]);
+    }
+    else
+    {
+        uint8_t buf[34 + 1];
+        buf[0] = (slot == 0U) ? TYPE_DMR_DATA1 : TYPE_DMR_DATA2;
+        memcpy(buf + 1, buffer + 8, 34);
+        sendDataToModem(buf, 34 + 1, slot + 1U, isNet);
+    }
+}
+
+/*
+ * decodeDMR()
+ *
+ * Handles one DMR frame (DMD1, DML1, DMD2 or DML2) from the radio or the
+ * network.  A simplex modem works on slot 1 only, so slot 2 frames are moved
+ * to slot 1.  It then follows the call on that slot: the voice LC header
+ * starts a call (the call is looked up and recorded on the dashboard, and
+ * the modem is keyed), voice bursts are counted and forwarded, CSBK data is
+ * handled, and the terminator or a "lost" frame ends the call.  Frames are
+ * forwarded to the gateway, and to the modem when needed; in SAMPLE and BIT
+ * mode they are queued in the slot's FIFO for dmrTxThread() instead of being
+ * modulated at once, so that each burst leaves inside its own TDMA slot.
+ *
+ * Parameters:
+ *   buffer - The frame, starting with the OpenMT header; the type is at
+ *            offset 4 and the burst data from offset 8.
+ *   length - Number of bytes in buffer.
+ *   isNet  - true if the frame came from the network, false if from the
+ *            radio.
+ *
+ * Returns: nothing.
+ */
 void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
 {
     static uint8_t activeSlots = 0;
@@ -2990,7 +3506,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                         slot1_dstId = DMRLC_getDstId(0);
                         char tmp[100];
                         bzero(tmp, 100);
-                        if (findDMRId(slot1_srcId, slot1_call, tmp))
+                        if (findDMRId(slot1_srcId, slot1_call, sizeof(slot1_call), tmp, sizeof(tmp)))
                         {
                             bzero(slot1_name, 15);
                             memcpy(slot1_name, tmp, 14);
@@ -3022,6 +3538,10 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                 }
                 else if (dataType == DT_TERMINATOR_WITH_LC)
                 {
+                    /* Send the terminator to the radio while the call is still open */
+                    if (txOn && slotActive[0] && !simplexRF)
+                        dmrRelayBurst(0U, buffer, isNet);
+
                     slotActive[0] = false;
                     if (simplexRF)
                         dmrSimplexRf = false;
@@ -3086,7 +3606,29 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                         fprintf(stderr, "FLCO: %u\n", flco);
                         unsigned char data[9U];
                         DMREmbeddedData_getRawData(data, 0);
-                        dump((char*)"DMR", data, 9);
+                        hexDump((char*)"DMR", data, 9);
+                        if (flco == 0 || flco == 3)
+                            dmrRebuildLoadEmbeddedLc(0, data);
+                        if ((flco == 0 || flco == 3) && !slotActive[0] && !isNet)
+                        {
+                            /* late entry: the call is joined from its embedded
+                             * link control, no header was seen, so the slot
+                             * becomes active here and the bursts are relayed */
+                            slotActive[0] = true;
+                            if (activeSlots == 0)
+                            {
+                                activeSlots = 1;
+                                slotRow[0]  = 1;
+                            }
+                            else
+                            {
+                                activeSlots = 2;
+                                slotRow[0]  = 2;
+                            }
+                            if (slot1_starttime == 0)
+                                slot1_starttime = time(NULL);
+                            fprintf(stderr, "Slot 1 active (late entry)\n");
+                        }
                         if (flco == 0)
                         {
                             isGroup[0] = true;
@@ -3097,7 +3639,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                             slot1_dstId = DMRLC_getDstId(0);
                             char tmp[100];
                             bzero(tmp, 100);
-                            if (findDMRId(slot1_srcId, slot1_call, tmp))
+                            if (findDMRId(slot1_srcId, slot1_call, sizeof(slot1_call), tmp, sizeof(tmp)))
                             {
                                 bzero(slot1_name, 15);
                                 memcpy(slot1_name, tmp, 14);
@@ -3130,40 +3672,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
             }
 
             if (txOn && slotActive[0] && !simplexRF)
-            {
-                /* Re-transmitted data bursts (voice LC header, terminator,
-                 * CSBK, data) must carry the BS-sourced data sync, the same
-                 * way voice burst A gets the BS-sourced voice sync above --
-                 * MMDVMHost does this for every data burst it relays. This
-                 * was never done here, so headers and terminators went back
-                 * out with the radio's MS-sourced sync, which a radio
-                 * listening to a repeater doesn't look for: no ID, and no
-                 * call set-up, on the receiving radio. */
-                if ((buffer[8] & DMR_SYNC_DATA) == DMR_SYNC_DATA)
-                    addDMRDataSync(buffer + 8 + 1, modem_duplex);
-
-                if (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT)
-                {
-                    // Hand the frame to dmrTxThread()'s slot 1 FIFO instead
-                    // of modulating it immediately: a real DMR burst has to
-                    // go out inside its own 30ms TDMA slot, interleaved
-                    // with CACH and slot 2's traffic, not back-to-back with
-                    // whatever arrives here from the network/CSBK logic
-                    // above (see dmrTxThread()/dmrSendSlotBurst()).
-                    pthread_mutex_lock(&dmrTxFifoMutex[0]);
-                    RingBuffer_addData(&dmrTxFifo[0], buffer + 8 + 1, DMR_FRAME_LENGTH_BYTES);
-                    pthread_mutex_unlock(&dmrTxFifoMutex[0]);
-                    if (debugM)
-                        fprintf(stderr, "DMR relay slot1: queued frame, control=0x%02X\n", buffer[8]);
-                }
-                else
-                {
-                    uint8_t buf[34 + 1];
-                    buf[0] = TYPE_DMR_DATA1;
-                    memcpy(buf + 1, buffer + 8, 34);
-                    sendDataToModem(buf, 34 + 1, 1, isNet);
-                }
-            }
+                dmrRelayBurst(0U, buffer, isNet);
 
             if (dmrGWConnected && !isNet)
             {
@@ -3185,6 +3694,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
     }
     else if (memcmp((buffer + 4), TYPE_LOST1, 4) == 0)
     {
+        dmrRebuildLcValid[0] = false;
         if (simplexRF)
             dmrSimplexRf = false;
         if (!slotActive[1] && !simplexRF)
@@ -3278,7 +3788,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                     slot2_dstId = DMRLC_getDstId(1);
                     char tmp[100];
                     bzero(tmp, 100);
-                    if (!findDMRId(slot2_srcId, slot2_call, tmp) && packetType == PACKET_TYPE_BIT)
+                    if (!findDMRId(slot2_srcId, slot2_call, sizeof(slot2_call), tmp, sizeof(tmp)) && packetType == PACKET_TYPE_BIT)
                     {
                         strcpy(slot2_call, "N0CALL");
                         tmp[0] = 0;
@@ -3295,6 +3805,10 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
             }
             else if (dataType == DT_TERMINATOR_WITH_LC)
             {
+                /* Send the terminator to the radio while the call is still open */
+                if (txOn && slotActive[1])
+                    dmrRelayBurst(1U, buffer, isNet);
+
                 slotActive[1] = false;
                 if (!slotActive[0])
                 {
@@ -3350,7 +3864,27 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                     fprintf(stderr, "FLCO: %u\n", flco);
                     unsigned char data[9U];
                     DMREmbeddedData_getRawData(data, 1);
-                    dump((char*)"DMR", data, 9);
+                    hexDump((char*)"DMR", data, 9);
+                    if (flco == 0 || flco == 3)
+                        dmrRebuildLoadEmbeddedLc(1, data);
+                    if ((flco == 0 || flco == 3) && !slotActive[1] && !isNet)
+                    {
+                        /* late entry: see slot 1 */
+                        slotActive[1] = true;
+                        if (activeSlots == 0)
+                        {
+                            activeSlots = 1;
+                            slotRow[1]  = 1;
+                        }
+                        else
+                        {
+                            activeSlots = 2;
+                            slotRow[1]  = 2;
+                        }
+                        if (slot2_starttime == 0)
+                            slot2_starttime = time(NULL);
+                        fprintf(stderr, "Slot 2 active (late entry)\n");
+                    }
                     if (flco == 0)
                     {
                         isGroup[1] = true;
@@ -3360,7 +3894,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                         slot2_dstId = DMRLC_getDstId(1);
                         char tmp[100];
                         bzero(tmp, 100);
-                        if (findDMRId(slot2_srcId, slot2_call, tmp))
+                        if (findDMRId(slot2_srcId, slot2_call, sizeof(slot2_call), tmp, sizeof(tmp)))
                         {
                             bzero(slot2_name, 15);
                             memcpy(slot2_name, tmp, 14);
@@ -3393,31 +3927,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
         }
 
         if (txOn && slotActive[1])
-        {
-            // BS-sourced data sync on relayed data bursts -- see slot 1.
-            if ((buffer[8] & DMR_SYNC_DATA) == DMR_SYNC_DATA)
-                addDMRDataSync(buffer + 8 + 1, modem_duplex);
-
-            if (packetType == PACKET_TYPE_SAMP || packetType == PACKET_TYPE_BIT)
-            {
-                // See the slot 1 FIFO-push comment above -- same reasoning,
-                // slot 2's FIFO.
-                // In simplex there is only the slot 1 FIFO (see dmrSendDmoPeriod()).
-                const uint8_t fifo = modem_duplex ? 1U : 0U;
-                pthread_mutex_lock(&dmrTxFifoMutex[fifo]);
-                RingBuffer_addData(&dmrTxFifo[fifo], buffer + 8 + 1, DMR_FRAME_LENGTH_BYTES);
-                pthread_mutex_unlock(&dmrTxFifoMutex[fifo]);
-                if (debugM)
-                    fprintf(stderr, "DMR relay slot2: queued frame, control=0x%02X\n", buffer[8]);
-            }
-            else
-            {
-                uint8_t buf[34 + 1];
-                buf[0] = TYPE_DMR_DATA2;
-                memcpy(buf + 1, buffer + 8, 34);
-                sendDataToModem(buf, 34 + 1, 2, isNet);
-            }
-        }
+            dmrRelayBurst(1U, buffer, isNet);
 
         if (dmrGWConnected && !isNet)
         {
@@ -3438,6 +3948,7 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
     }
     else if (memcmp((buffer + 4), TYPE_LOST2, 4) == 0)
     {
+        dmrRebuildLcValid[1] = false;
         if (!slotActive[0])
         {
             dmrReleaseTx();
@@ -3473,6 +3984,19 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
     }
 }
 
+/*
+ * decodeFrame()
+ *
+ * Passes a frame to decodeDMR() if it is a DMR frame and the active mode is
+ * DMR or idle.
+ *
+ * Parameters:
+ *   buffer - The frame, starting with the OpenMT header.
+ *   length - Number of bytes in buffer.
+ *   isNet  - true if the frame came from the network.
+ *
+ * Returns: nothing.
+ */
 void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
 {
     char cType[4] = "RF";
@@ -3492,7 +4016,20 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
     }
 }
 
-// Start up connection to modem host.
+/*
+ * startClient()
+ *
+ * Thread that connects to the modem host socket.  It starts the gateway
+ * server, receive and timer threads, sends the mode and radio configuration
+ * packet (frequency, filters and, for BIT mode, the scan and slot settings),
+ * then processes the packets the modem host returns: commands, TX timing
+ * reports, the SAMP or BITS mode switch, and DMR frames.
+ *
+ * Parameters:
+ *   arg - Address of the modem host, as a text string.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* startClient(void* arg)
 {
     struct sockaddr_in serv_addr;
@@ -3503,14 +4040,14 @@ void* startClient(void* arg)
     // Create socket file descriptor
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "DMR", "Socket creation error: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags == -1)
     {
-        perror("fcntl F_GETFL");
+        reportError(modemName, "DMR", "fcntl F_GETFL: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -3522,9 +4059,9 @@ void* startClient(void* arg)
     serv_addr.sin_port   = htons(clientPort);
 
     // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(hostAddress, &serv_addr.sin_addr))
     {  // Connect to localhost
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "DMR", "Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
 
@@ -3534,7 +4071,7 @@ void* startClient(void* arg)
     {
         if (errno != EINPROGRESS)
         {
-            perror("connection failed");
+            reportError(modemName, "DMR", "connection failed: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
     }
@@ -3542,7 +4079,7 @@ void* startClient(void* arg)
     int err = pthread_create(&(gwHostid), NULL, &startTCPServer, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create gateway host thread :[%s]", strerror(err));
+        reportError(modemName, "DMR", "Can't create gateway host thread :[%s]", strerror(err));
         return 0;
     }
     else
@@ -3555,7 +4092,7 @@ void* startClient(void* arg)
     err = pthread_create(&(rxid), NULL, &rxThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create rx thread :[%s]", strerror(err));
+        reportError(modemName, "DMR", "Can't create rx thread :[%s]", strerror(err));
         return 0;
     }
     else
@@ -3566,7 +4103,7 @@ void* startClient(void* arg)
     err = pthread_create(&(timerid), NULL, &timerThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create timer thread :[%s]", strerror(err));
+        reportError(modemName, "DMR", "Can't create timer thread :[%s]", strerror(err));
         return 0;
     }
     else
@@ -3693,7 +4230,7 @@ void* startClient(void* arg)
     }
     write(sockfd, buffer, configLen);
 
-    dump((char*)"MODE", buffer, configLen);
+    hexDump((char*)"MODE", buffer, configLen);
     sleep(1);
 
     while (connected)
@@ -3757,7 +4294,7 @@ void* startClient(void* arg)
         memcpy(type, buffer + 4, typeLen);
 
  //       if (debugM)
-   //         dump((char*)"DMR host data", (unsigned char*)buffer, respLen);
+   //         hexDump((char*)"DMR host data", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -3872,7 +4409,7 @@ void* startClient(void* arg)
         else
         {
             //     if (debugM)
-            dump((char*)"Host rec data", buffer, respLen);
+            hexDump((char*)"Host rec data", buffer, respLen);
         }
     }
     txOn = false;
@@ -3880,12 +4417,67 @@ void* startClient(void* arg)
     // Close socket
     close(sockfd);
     connected = false;
-    int iRet  = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
-// Process bytes from gateway.
+/* A call from the network is open on a slot from its first frame until its
+ * terminator.  The gateway can be unlinked, or stop, without sending the
+ * terminator; the host would then stay keyed (and the dashboard in TX) for
+ * ever. */
+static bool     dmrNetOpen[2] = {false, false};
+static uint64_t dmrNetMs[2]   = {0U, 0U};
+
+/*
+ * dmrNetEnd()
+ *
+ * Ends the network calls that have no terminator: a "lost" packet is handed
+ * to decodeFrame() for the slot as if the gateway had sent it, so the call is
+ * closed the normal way (modem told to stop, last call and history saved).
+ *
+ * Parameters:
+ *   force - true to end the open calls now, false to end only those that have
+ *           had no frame from the gateway for 1.5 seconds.
+ *
+ * Returns: nothing.
+ */
+static void dmrNetEnd(bool force)
+{
+    for (uint8_t slot = 0U; slot < 2U; slot++)
+    {
+        if (!dmrNetOpen[slot] || (!force && nowMs() - dmrNetMs[slot] <= 1500U))
+            continue;
+
+        dmrNetOpen[slot] = false;
+
+        uint8_t lost[64];
+
+        memset(lost, 0x00, sizeof(lost));
+        lost[0] = 0x61;
+        lost[1] = 0x00;
+        lost[2] = 0x08;
+        lost[3] = 0x04;
+        memcpy(lost + 4, slot == 0U ? "DML1" : "DML2", 4);
+
+        fprintf(stderr, "DMR: network call on slot %u ended, no terminator from the gateway\n", slot + 1U);
+        decodeFrame(lost, 8, true);
+    }
+}
+
+/*
+ * processGatewaySocket()
+ *
+ * Thread that serves the connected DMR gateway.  It reads the gateway's
+ * packets: NAK, connect, disconnect, command and status packets are handled,
+ * and DMR frames (when DMR is the active mode) are decoded as network
+ * traffic with decodeFrame().
+ *
+ * Parameters:
+ *   arg - Socket of the gateway connection, passed as a pointer sized
+ *         integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* processGatewaySocket(void* arg)
 {
     int childfd      = (intptr_t)arg;
@@ -3907,7 +4499,7 @@ void* processGatewaySocket(void* arg)
     pthread_t txid;
     int err = pthread_create(&(txid), NULL, &gwTxThread, (void*)(intptr_t)childfd);
     if (err != 0)
-        fprintf(stderr, "Can't create GW TX thread :[%s]", strerror(err));
+        reportError(modemName, "DMR", "Can't create GW TX thread :[%s]", strerror(err));
     else
     {
         if (debugM) fprintf(stderr, "GW TX thread created successfully\n");
@@ -3917,6 +4509,19 @@ void* processGatewaySocket(void* arg)
 
     while (1)
     {
+        /* Wait for the gateway; when it is quiet, see whether a network call
+         * has gone silent (the gateway was unlinked or stopped sending). */
+        struct pollfd gwPoll = {childfd, POLLIN, 0};
+        int           gwWait = poll(&gwPoll, 1, 200);
+
+        if (gwWait == 0)
+        {
+            dmrNetEnd(false);
+            continue;
+        }
+        if (gwWait < 0 && errno == EINTR)
+            continue;
+
         int len = read(childfd, buffer, 1);
         if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
@@ -3931,7 +4536,7 @@ void* processGatewaySocket(void* arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "DMR_Service: error when reading from DMR gateway, errno=%d\n", errno);
+            reportError(modemName, "DMR", "DMR_Service: error when reading from DMR gateway, errno=%d", errno);
             close(childfd);
             break;
         }
@@ -3983,7 +4588,7 @@ void* processGatewaySocket(void* arg)
         memcpy(type, buffer + 4, typeLen);
 
         if (debugM)
-            dump((char*)"DMR Gateway data:", (uint8_t*)buffer, respLen);
+            hexDump((char*)"DMR Gateway data:", (uint8_t*)buffer, respLen);
 
         if (memcmp(type, TYPE_NACK, typeLen) == 0)
         {
@@ -4007,6 +4612,7 @@ void* processGatewaySocket(void* arg)
         else if (memcmp(type, TYPE_DISCONNECT, typeLen) == 0)
         {
             dmrReflConnected = false;
+            dmrNetEnd(true);
             char tmp[10];
             bzero(tmp, 10);
             memcpy(tmp, buffer + 4 + typeLen, 9);
@@ -4023,21 +4629,44 @@ void* processGatewaySocket(void* arg)
         else if (memcmp(type, "DM", 2) == 0 && isActiveMode())
         {
             reflBusy = true;
+            if (typeLen == 4 && (type[3] == '1' || type[3] == '2'))
+            {
+                const uint8_t netSlot = (uint8_t)(type[3] - '1');
+
+                if (type[2] == 'L' || (respLen > 8 && buffer[8] == 0x42))
+                    dmrNetOpen[netSlot] = false; /* lost, or the terminator */
+                else
+                {
+                    dmrNetOpen[netSlot] = true;
+                    dmrNetMs[netSlot]   = nowMs();
+                }
+            }
             decodeFrame(buffer, respLen, true);
         }
         delay(5);
     }
     fprintf(stderr, "Gateway disconnected.\n");
+    dmrNetEnd(true);
     dmrGWConnected   = false;
     dmrReflConnected = false;
     delGateway(modemName, "main", "DMR");
     clearReflLinkStatus(modemName, "DMR");
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
-// Listen for incoming gateway connection.
+/*
+ * startTCPServer()
+ *
+ * Thread that listens for the DMR gateway on the server port.  For each
+ * accepted connection it starts txThread() to send data to the gateway and
+ * processGatewaySocket() to read from it.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* startTCPServer(void* arg)
 {
     struct hostent* hostp; /* client host info */
@@ -4049,7 +4678,7 @@ void* startTCPServer(void* arg)
     setNoDelay(sockFd);
     if (sockFd < 0)
     {
-        fprintf(stderr, "DMR_Service: error when creating the socket: %s\n", strerror(errno));
+        reportError(modemName, "DMR", "DMR_Service: error when creating the socket: %s", strerror(errno));
         exit(1);
     }
 
@@ -4077,7 +4706,7 @@ void* startTCPServer(void* arg)
 
     if (bind(sockFd, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) < 0)
     {
-        fprintf(stderr, "DMR_Service: error when binding the socket to port %u: %s\n", serverPort, strerror(errno));
+        reportError(modemName, "DMR", "DMR_Service: error when binding the socket to port %u: %s", serverPort, strerror(errno));
         exit(1);
     }
 
@@ -4112,38 +4741,34 @@ void* startTCPServer(void* arg)
             setNoDelay(childfd);
         if (childfd < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
-            perror("accept failed");
+            reportError(modemName, "DMR", "accept failed: %s", strerror(errno));
             break;
         }
 
         if (childfd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
 
-        /*
-         * gethostbyaddr: determine who sent the message
-         */
-        hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
-        if (hostp == NULL)
-        {
-            error((char*)"ERROR on gethostbyaddr");
-            break;
-        }
-
         hostaddrp = inet_ntoa(clientaddr.sin_addr);
         if (hostaddrp == NULL)
         {
-            error((char*)"ERROR on inet_ntoa\n");
-            break;
+            reportError(modemName, "DMR", "Can't get the address of the client.");
+            close(childfd);
+            continue;
         }
 
         if (debugM)
-            fprintf(stderr, "Server established connection with %s (%s)\n", hostp->h_name, hostaddrp);
+        {
+            /* The name is only logged, so a client with no reverse DNS entry is still accepted */
+            hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
+            fprintf(stderr, "Server established connection with %s (%s)\n",
+                    hostp != NULL ? hostp->h_name : "unknown", hostaddrp);
+        }
 
         int err = 0;
         /*
                 pthread_t txid;
                 err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)childfd);
                 if (err != 0)
-                    fprintf(stderr, "Can't create tx thread :[%s]", strerror(err));
+                    reportError(modemName, "DMR", "Can't create tx thread :[%s]", strerror(err));
                 else
                 {
                     if (debugM) fprintf(stderr, "TX thread created successfully\n");
@@ -4154,7 +4779,7 @@ void* startTCPServer(void* arg)
         err = pthread_create(&(procid), NULL, &processGatewaySocket, (void*)(intptr_t)childfd);
         if (err != 0)
         {
-            fprintf(stderr, "Can't create gateway process thread :[%s]", strerror(err));
+            reportError(modemName, "DMR", "Can't create gateway process thread :[%s]", strerror(err));
             continue;
         }
         else
@@ -4165,18 +4790,33 @@ void* startTCPServer(void* arg)
         }
         delay(1000);
     }
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * main()
+ *
+ * Program entry.  Parses the command line (-m modem number 1 to 10, which
+ * also selects the TCP ports; -d daemon; -v version; -x debug), reads the
+ * modem and DMR settings from the database (ID, colour code, levels, slot
+ * phase and delay, DMO preamble, TX hang), starts the modem host client and
+ * the DMR TX thread, and then watches for configuration changes until the
+ * program is told to stop.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on exit.
+ */
 int main(int argc, char** argv)
 {
     bool daemon = false;
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -4185,7 +4825,7 @@ int main(int argc, char** argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "DMR", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -4194,8 +4834,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -4207,7 +4850,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: DMR_host [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: DMR_host [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -4218,7 +4861,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "DMR_host: error in fork(), exiting\n");
+            reportError(modemName, "DMR", "DMR_host: error in fork(), exiting");
             return 1;
         }
 
@@ -4258,7 +4901,7 @@ int main(int argc, char** argv)
 
     char tmp[15];
     readHostConfig(modemName, "config", "modem", tmp);
-    if (strcasecmp(tmp, "openmt") == 0)
+    if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
         packetType = PACKET_TYPE_SAMP;
     else if (strcasecmp(tmp, "openmths") == 0)
         packetType = PACKET_TYPE_BIT;
@@ -4354,7 +4997,7 @@ int main(int argc, char** argv)
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create modem host thread :[%s]", strerror(err));
+        reportError(modemName, "DMR", "Can't create modem host thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -4365,7 +5008,7 @@ int main(int argc, char** argv)
     err = pthread_create(&(dmrTxThreadHandle), NULL, &dmrTxThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create DMR TX scheduler thread :[%s]", strerror(err));
+        reportError(modemName, "DMR", "Can't create DMR TX scheduler thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -4401,7 +5044,7 @@ int main(int argc, char** argv)
                 readDashbCommand(modemName, "reflLinkDMR", parameter);
                 if (strlen(parameter) == 0)
                 {
-                    resetTimer("dbComm");
+                    resetTimer("dbComm", 0);
                     continue;
                 }
                 if (strcasecmp(parameter, "unlink") == 0)
@@ -4416,7 +5059,7 @@ int main(int argc, char** argv)
                     RingBuffer_addData(&gwCommand, buf, 8);
                     pthread_mutex_unlock(&gwCommBufMutex);
                     sleep(3);
-                    resetTimer("dbComm");
+                    resetTimer("dbComm", 0);
                     continue;
                 }
                 else if (!dmrReflConnected)
@@ -4470,7 +5113,7 @@ int main(int argc, char** argv)
                     ackDashbCommand(modemName, "reflLinkDMR", "No gateway");
                 }
             }
-            resetTimer("dbComm");
+            resetTimer("dbComm", 0);
         }
         delay(500000);
     }

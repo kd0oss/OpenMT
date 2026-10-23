@@ -28,6 +28,22 @@
 #include <sys/ioctl.h>
 #include <linux/gpio.h>
 
+/*
+ * gpio_line_request_output()
+ *
+ * Opens a GPIO chip and requests one line as an output with an initial
+ * level, using the Linux GPIO v2 character device interface.  The line is
+ * held until gpio_line_close().
+ *
+ * Parameters:
+ *   line      - Handle to fill in.
+ *   chip_path - GPIO chip device, for example /dev/gpiochip0.
+ *   offset    - Line number on that chip.
+ *   initial   - Initial output level (0 or non-zero).
+ *
+ * Returns: true on success; false if the chip cannot be opened or the line
+ *   cannot be requested, with errno left set.
+ */
 bool gpio_line_request_output(gpio_line_t *line, const char *chip_path, unsigned int offset, int initial)
 {
     struct gpio_v2_line_request req;
@@ -70,6 +86,18 @@ bool gpio_line_request_output(gpio_line_t *line, const char *chip_path, unsigned
     return true;
 }
 
+/*
+ * gpio_line_set_value()
+ *
+ * Sets the level of a requested output line.
+ *
+ * Parameters:
+ *   line  - Handle from gpio_line_request_output().
+ *   value - Level to set (0 or non-zero).
+ *
+ * Returns: true on success, false if the line is not requested or the ioctl
+ *   fails.
+ */
 bool gpio_line_set_value(gpio_line_t *line, int value)
 {
     struct gpio_v2_line_values vals;
@@ -86,6 +114,17 @@ bool gpio_line_set_value(gpio_line_t *line, int value)
     return ioctl(line->line_fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &vals) == 0;
 }
 
+/*
+ * gpio_line_close()
+ *
+ * Releases the line and closes the chip.  Safe to call on a handle that was
+ * never opened.
+ *
+ * Parameters:
+ *   line - Handle to close.
+ *
+ * Returns: nothing.
+ */
 void gpio_line_close(gpio_line_t *line)
 {
     if (line->line_fd >= 0)

@@ -1,8 +1,8 @@
 ysf_iq: YSF (C4FM, 9600 bit/s) test signal generator / decoder for HackRF and any SDR recording
 
-Build (from the YSF directory; dsp_tools.c is the OpenMT tools/ one; nxdn_func.c and ambe3000.c are the NXDN ones,
+Build (from the YSF directory; fec_tools.c is the OpenMT tools/ one; nxdn_func.c and ambe3000.c are the NXDN ones,
 for the dongle):
-  gcc -O2 -I. -I../nxdn -I../../tools -o ysf_iq test/ysf_iq.c ysf_func.c ysf_dsp.c ysf_gen.c ../nxdn/nxdn_func.c ../nxdn/ambe3000.c ../../tools/dsp_tools.c -lm
+  gcc -O2 -I. -I../nxdn -I../../tools -o ysf_iq test/ysf_iq.c ysf_func.c ysf_dsp.c ysf_gen.c ../nxdn/nxdn_func.c ../nxdn/ambe3000.c ../../tools/dsp_tools.c ../../tools/fec_tools.c -lm
 
 Generate and transmit (only on a frequency you are licensed for, low power / dummy load):
   ./ysf_iq gen -o call.cs8 --src KD0OSS --dst CQCQCQ --voice 100 --dgid 0 --repeat 5

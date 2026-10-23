@@ -21,6 +21,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <math.h>
 #include <netdb.h>
@@ -44,7 +45,7 @@
 
 #include <RingBuffer.h>
 #include <tools.h>
-#include <dsp_tools.h>
+#include <fec_tools.h>
 #include <ADF7021.h>
 
 #include <dsp_compat.h> //<arm_math.h>
@@ -110,8 +111,8 @@ uint8_t  packetType          = 0;
 uint8_t  modemId             = 1;          //< Modem Id used to create modem name.
 char     modemName[10]       = "modem1";   //< Modem name that this program is associated with.
 char     station_call[9]     = "";
-char     src_callsign[7]     = "";
-char     dst_callsign[7]     = "";
+char     src_callsign[16]    = "";   //< Callsign or id of the source (a DMR id lookup gives up to 10 characters; an id up to 8 digits)
+char     dst_callsign[16]    = "";   //< Callsign or id of the destination
 bool     debugM              = false;
 bool     connected           = true;
 bool     modem_duplex        = false;
@@ -148,7 +149,6 @@ RingBuffer gwTxBuffer;
 RingBuffer gwCommand;
 
 /* Mutexes protecting shared RingBuffers and state variables */
-pthread_mutex_t timerMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t rxBufMutex   = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwTxBufMutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t gwCmdMutex   = PTHREAD_MUTEX_INITIALIZER;
@@ -204,17 +204,6 @@ q15_t                            lpState[60U];     // NoTaps + BlockSize - 1, 32
 arm_fir_instance_q15 p25boxcar5Filter;
 q15_t                p25boxcar5State[30U];        // NoTaps + BlockSize - 1,  6 + 20 - 1 plus some spare
 
-typedef struct TIMERS
-{
-    char name[20];
-    bool valid;
-    bool enabled;
-    uint32_t duration;
-    uint32_t count;
-    bool triggered;
-} TIMERS;
-
-TIMERS timer[10];
 
 void processNone(q15_t sample);
 void processHdr(q15_t sample);
@@ -224,75 +213,35 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet);
 void processTx(const uint8_t* data, uint8_t length, const char* type, bool isTx);
 void* startTCPServer(void* arg);
 
-// error - wrapper for perror
+/*
+ * error()
+ *
+ * Reports a message with reportError() and ends the program with exit status 1.
+ *
+ * Parameters:
+ *   msg - Text printed in front of the system error message.
+ *
+ * Returns: nothing.
+ */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "P25", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
-// Wait for 'delay' microseconds
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-};
+;
 
-// Print debug data.
-void dump(char* text, uint8_t* data, unsigned int length)
-{
-    struct timespec ts;
-    uint64_t milliseconds;
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    // Get the current time with nanosecond precision
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("clock_gettime");
-        return;
-    }
-
-    // Convert to milliseconds
-    milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-
-    fprintf(stdout, "%s: %llu (ms)\n", text, milliseconds);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++) fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++) fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            uint8_t c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-}
-
+/*
+ * isActiveMode()
+ *
+ * Tells whether this host may process frames: the modem host's active mode
+ * is P25 or idle.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the active mode is P25 or IDLE, false if another protocol
+ *   owns the modem.
+ */
 bool isActiveMode()
 {
     char active_mode[10] = "IDLE";
@@ -305,6 +254,17 @@ bool isActiveMode()
         return false;
 }
 
+/*
+ * reset()
+ *
+ * Resets the SAMPLE and BIT mode receive state machine: the state, buffer
+ * pointers, sync pointers, correlation values and counters go back to their
+ * start-up values.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void reset()
 {
     p25state        = P25RXS_NONE;
@@ -351,7 +311,20 @@ void reset()
 static unsigned int p25RfErrs = 0U;     // bit errors found in this RF call
 static unsigned int p25RfBits = 0U;     // protected bits checked in this RF call
 
-/* Check (and, if enabled, regenerate) the voice frames of an RF LDU. */
+/*
+ * p25RfVoice()
+ *
+ * Checks the voice frames of a received RF LDU.  It counts the FEC errors
+ * and, if regeneration is enabled, corrects the frames and rebuilds the NID.
+ *
+ * Parameters:
+ *   data     - The LDU frame, starting with the OpenMT header; the LDU
+ *              itself is at offset 8.
+ *   nidValid - true if the NID of the frame was decoded without errors.
+ *   duid     - Data unit id of the frame.
+ *
+ * Returns: nothing.
+ */
 static void p25RfVoice(uint8_t* data, bool nidValid, uint8_t duid)
 {
     p25RfErrs += p25RegenerateLDU(data + 8, P25_FEC_REGENERATE != 0);
@@ -364,7 +337,17 @@ static void p25RfVoice(uint8_t* data, bool nidValid, uint8_t duid)
     }
 }
 
-/* Print the BER of the RF call that just ended and return it (0 if none). */
+/*
+ * p25RfBer()
+ *
+ * Prints the BER of the RF call that has just ended and clears the error
+ * counts.  A network call has no BER and leaves the counts alone.
+ *
+ * Parameters:
+ *   isNet - true if the call came from the network.
+ *
+ * Returns: The BER as a fraction of bits in error, or 0 if there was none.
+ */
 static float p25RfBer(bool isNet)
 {
     float ber = 0.0f;
@@ -388,10 +371,167 @@ static float p25RfBer(bool isNet)
     return ber;
 }
 
+/* True while the link control of the call being relayed is known: LDU1 gives
+ * the first, LDU2 the second.  A frame is only rebuilt from link control that
+ * was decoded in this call, never from an earlier call's. */
+static bool p25RebuildLcValid   = false;
+static bool p25RebuildLdu2Valid = false;
+
+/*
+ * p25RebuildFrame()
+ *
+ * Rebuilds a frame from what is decoded from it, as MMDVMHost does: nothing
+ * the radio sent is repeated as it came, except the voice itself (whose FEC
+ * is regenerated separately, see p25RfVoice()).
+ *
+ *   - Every frame gets its sync and its NID (with this host's NAC) again, and
+ *     its busy bits.
+ *   - The header is decoded (Golay and Reed-Solomon) and encoded again, so
+ *     the message indicator, algorithm, key and talkgroup are repeated clean.
+ *   - LDU1 and LDU2 get their link control encoded again from the decoded
+ *     link control (format, ids, message indicator, algorithm, key), and
+ *     their low speed data corrected and written again.
+ *   - The terminator with link control has its link control (Golay and
+ *     Reed-Solomon) decoded and encoded again, whatever its format.  One that
+ *     does not decode keeps what it came with.
+ *   - Trunking signalling (TSDU) and the packet data header (PDU) have their
+ *     rate 1/2 trellis block decoded, checked with its CRC and encoded
+ *     again.  The data blocks that follow a PDU header are not received by
+ *     this host.
+ * A frame whose link control does not decode keeps the link control it came
+ * with, unless this call already gave a good one.
+ *
+ * The busy bits of a terminator follow the sender: a frame from the network
+ * has them as the gateway sets them, one from the radio as this host sets
+ * them for its own terminator.
+ *
+ * Parameters:
+ *   frame - The P25 frame (without the 8 byte packet prefix), changed in
+ *           place.
+ *   duid  - Data unit id of the frame.
+ *   isNet - true if the frame came from the network.
+ *
+ * Returns: nothing.
+ */
+static void p25RebuildFrame(uint8_t* frame, uint8_t duid, bool isNet)
+{
+    switch (duid)
+    {
+        case P25_DUID_HEADER:
+            p25RebuildLcValid   = false;
+            p25RebuildLdu2Valid = false;
+            if (decodeHeader(frame))
+            {
+                addSync(frame);
+                encodeNID(frame, duid);
+                encodeHeader(frame);
+                addBusyBits(frame, P25_HDR_FRAME_LENGTH_BITS, false, true);
+            }
+            break;
+
+        case P25_DUID_LDU1:
+            if (decodeLDU1(frame))
+                p25RebuildLcValid = true;
+            addSync(frame);
+            encodeNID(frame, duid);
+            if (p25RebuildLcValid)
+                encodeLDU1(frame);
+            lowSpeedData_process(frame);
+            addBusyBits(frame, P25_LDU_FRAME_LENGTH_BITS, false, true);
+            break;
+
+        case P25_DUID_LDU2:
+            if (decodeLDU2(frame))
+                p25RebuildLdu2Valid = true;
+            addSync(frame);
+            encodeNID(frame, duid);
+            if (p25RebuildLdu2Valid)
+                encodeLDU2(frame);
+            lowSpeedData_process(frame);
+            addBusyBits(frame, P25_LDU_FRAME_LENGTH_BITS, false, true);
+            break;
+
+        case P25_DUID_TERM:
+            p25RebuildLcValid   = false;
+            p25RebuildLdu2Valid = false;
+            addSync(frame);
+            encodeNID(frame, duid);
+            addBusyBits(frame, P25_TERM_FRAME_LENGTH_BITS, isNet, !isNet);
+            break;
+
+        case P25_DUID_TERM_LC:
+        {
+            uint8_t lc[9];
+
+            p25RebuildLcValid   = false;
+            p25RebuildLdu2Valid = false;
+            if (decodeTDULC(frame, lc))
+                encodeTDULC(frame, lc);
+            addSync(frame);
+            encodeNID(frame, duid);
+            addBusyBits(frame, P25_TERMLC_FRAME_LENGTH_BITS, isNet, !isNet);
+            break;
+        }
+
+        case P25_DUID_TSDU:
+            /* Trunking signalling: the TSBK is decoded (trellis 1/2 and
+             * CRC) and encoded again; one that does not decode is repeated
+             * as it came */
+            if (rebuildTrellis12(frame))
+            {
+                addSync(frame);
+                encodeNID(frame, duid);
+            }
+            addBusyBits(frame, P25_TSDU_FRAME_LENGTH_BITS, false, true);
+            break;
+
+        case P25_DUID_PDU:
+            /* Packet data header, the one block of a PDU that this host
+             * receives: decoded and encoded again the same way */
+            if (rebuildTrellis12(frame))
+            {
+                addSync(frame);
+                encodeNID(frame, duid);
+                addBusyBits(frame, P25_PDU_HDR_FRAME_LENGTH_BITS, false, true);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+/* Set by decodeP25() when the frame it decoded is trunking signalling or a
+ * packet data header from the radio: a frame that is repeated in duplex mode
+ * although no voice call is on. */
+static bool p25RelayData = false;
+
+/*
+ * decodeP25()
+ *
+ * Handles one P25 frame from the radio or the network.  The NID is decoded
+ * to find the data unit (header, LDU1, LDU2, TSDU, PDU or terminator); when
+ * the NID is bad the unit is guessed from the one before.  The header starts
+ * a call and keys the modem, LDU frames are forwarded to the gateway (and to
+ * the dashboard record), and a terminator ends the call.  For RF voice the
+ * FEC errors are counted first.  The frame is then rebuilt from what is
+ * decoded from it (p25RebuildFrame()), so what is relayed or sent to the
+ * gateway is clean.
+ *
+ * Parameters:
+ *   data  - The frame, starting with the OpenMT header; the P25 data is at
+ *           offset 8.
+ *   isNet - true if the frame came from the network, false if from the
+ *           radio.
+ *
+ * Returns: nothing.
+ */
 void decodeP25(uint8_t* data, bool isNet)
 {
     // Decode the NID
     bool valid = decodeNID(data + 8);
+
+    p25RelayData = false;
 
     uint8_t duid = getDUID();
     fprintf(stderr, "Val: %d  DUID: %d  TX: %d  NAC: %X  ST: %d\n", valid, duid, txOn, getNAC(), rf_state);
@@ -441,6 +581,10 @@ void decodeP25(uint8_t* data, bool isNet)
         }
     }
 
+    /* Rebuild the frame from what is decoded from it, before the gateway
+     * copy and the relay below are made. */
+    p25RebuildFrame(data + 8, duid, isNet);
+
     if (duid == P25_DUID_HEADER)
     {
         if (rf_state == RS_RF_LISTENING)
@@ -487,7 +631,7 @@ void decodeP25(uint8_t* data, bool isNet)
                 sprintf(dst_callsign, "%d", p25dstId);
                 char tmp[100];
                 bzero(tmp, 100);
-                if (findDMRId(p25srcId, src_callsign, tmp))
+                if (findDMRId(p25srcId, src_callsign, sizeof(src_callsign), tmp, sizeof(tmp)))
                 {
                     sprintf(tmp, "%u", p25srcId);
                     fprintf(stderr, "Src: %d  Call: %s  Dst: %d\n", p25srcId, src_callsign, p25dstId);
@@ -539,6 +683,7 @@ void decodeP25(uint8_t* data, bool isNet)
     {
         addBusyBits(data + 8, P25_TSDU_FRAME_LENGTH_BITS, false, true);
         p25lastDUID = duid;
+        p25RelayData = !isNet;
         return;
     }
     else if (duid == P25_DUID_TERM || duid == P25_DUID_TERM_LC)
@@ -569,11 +714,25 @@ void decodeP25(uint8_t* data, bool isNet)
     }
     else if (duid == P25_DUID_PDU)
     {
-        p25lastDUID = duid;
+        p25lastDUID  = duid;
+        p25RelayData = !isNet;
         return;
     }
 }
 
+/*
+ * samples()
+ *
+ * Receive entry point for SAMPLE mode.  Each sample is added to the sample
+ * buffer and the bit buffer, and the state machine (idle, header or LDU) is
+ * run for it.
+ *
+ * Parameters:
+ *   samples - Demodulated samples.
+ *   length  - Number of samples.
+ *
+ * Returns: nothing.
+ */
 void samples(const q15_t* samples, uint8_t length)
 {
     for (uint8_t i = 0U; i < length; i++)
@@ -612,6 +771,18 @@ void samples(const q15_t* samples, uint8_t length)
     }
 }
 
+/*
+ * processNone()
+ *
+ * Idle receive state.  Looks for the P25 frame sync, and when it has been
+ * found keeps looking for a short time to pick the best match before
+ * starting the header or LDU.
+ *
+ * Parameters:
+ *   sample - The newest received sample.
+ *
+ * Returns: nothing.
+ */
 void processNone(q15_t sample)
 {
     bool ret = correlateSync();
@@ -643,6 +814,22 @@ void processNone(q15_t sample)
     }
 }
 
+/*
+ * samplesToBits()
+ *
+ * Converts samples to dibits for the receive frame, using the centre and
+ * threshold levels to pick the symbol (two bits for each sample).
+ *
+ * Parameters:
+ *   start     - Position of the first sample in the sample buffer.
+ *   count     - Number of symbols to convert.
+ *   buffer    - Receives the bits.
+ *   offset    - Bit position in buffer where the first bit is written.
+ *   center    - Centre level of the signal.
+ *   threshold - Level that separates the inner and outer symbols.
+ *
+ * Returns: nothing.
+ */
 void samplesToBits(uint16_t start, uint16_t count, uint8_t* buffer, uint16_t offset, q15_t center, q15_t threshold)
 {
     for (uint16_t i = 0U; i < count; i++)
@@ -684,6 +871,17 @@ void samplesToBits(uint16_t start, uint16_t count, uint8_t* buffer, uint16_t off
     }
 }
 
+/*
+ * correlateSync()
+ *
+ * Correlates the received symbols against the P25 sync pattern.  A match
+ * better than the stored one is remembered, together with the signal levels
+ * at that sync, so that the position of the frame can be found.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if a sync was found, false if not.
+ */
 bool correlateSync()
 {
     if (countBits32((p25bitBuffer[p25bitPtr] & P25_SYNC_SYMBOLS_MASK) ^ P25_SYNC_SYMBOLS) <= MAX_SYNC_SYMBOLS_ERRS)
@@ -793,6 +991,19 @@ bool correlateSync()
     return false;
 }
 
+/*
+ * calculateLevels()
+ *
+ * Works out the centre and threshold levels of the signal from the maximum
+ * and minimum positive and negative samples of a range, averaged with the
+ * earlier values.
+ *
+ * Parameters:
+ *   start - Position of the first sample in the sample buffer.
+ *   count - Number of symbols to look at.
+ *
+ * Returns: nothing.
+ */
 void calculateLevels(uint16_t start, uint16_t count)
 {
     q15_t maxPos = -16000;
@@ -859,6 +1070,20 @@ void calculateLevels(uint16_t start, uint16_t count)
     p25thresholdVal >>= 4;
 }
 
+/*
+ * processHdr()
+ *
+ * Header receive state.  When the end of the frame is reached it works out
+ * the signal levels, converts the samples to bits and passes the frame to
+ * the NID and frame decoder for the unit that was found (header, PDU, TSDU
+ * or terminator); LDU frames move the receiver to the LDU state.  A sync
+ * that arrives in the expected window is correlated.
+ *
+ * Parameters:
+ *   sample - The newest received sample.
+ *
+ * Returns: nothing.
+ */
 void processHdr(q15_t sample)
 {
     uint8_t hdrFrame[108] = {};
@@ -989,6 +1214,19 @@ void processHdr(q15_t sample)
     }
 }
 
+/*
+ * processLdu()
+ *
+ * LDU receive state.  Follows the data sync of a voice call: at the end of
+ * each LDU it works out the signal levels (only from a good sync), converts
+ * the samples to bits and passes the frame on.  If no sync has been seen for
+ * too long the call is signalled as lost and the receiver goes back to idle.
+ *
+ * Parameters:
+ *   sample - The newest received sample.
+ *
+ * Returns: nothing.
+ */
 void processLdu(q15_t sample)
 {
     if (p25minSyncPtr < p25maxSyncPtr)
@@ -1047,6 +1285,17 @@ void processLdu(q15_t sample)
     }
 }
 
+/*
+ * setEndPtr()
+ *
+ * Sets the length of the frame being received (p25endPtr, in bits) from the
+ * data unit id.
+ *
+ * Parameters:
+ *   duid - Data unit id of the frame.
+ *
+ * Returns: nothing.
+ */
 void setEndPtr(const uint8_t duid)
 {
     fprintf(stderr, "Set end ptr.\n");
@@ -1074,6 +1323,18 @@ void setEndPtr(const uint8_t duid)
     }
 }
 
+/*
+ * processBitNone()
+ *
+ * BIT mode idle state.  Shifts in one bit and, when the sync pattern
+ * matches, copies the sync bytes into the frame buffer and starts to collect
+ * the frame.
+ *
+ * Parameters:
+ *   bit - The received bit.
+ *
+ * Returns: nothing.
+ */
 void processBitNone(bool bit)
 {
     p25_64BitBuffer <<= 1;
@@ -1093,6 +1354,18 @@ void processBitNone(bool bit)
     }
 }
 
+/*
+ * processBitHdr()
+ *
+ * BIT mode header state.  Collects the bits of a header or other short
+ * frame; when the NID has arrived the data unit is known and the frame
+ * length is set.  When the frame is complete it is passed on.
+ *
+ * Parameters:
+ *   bit - The received bit.
+ *
+ * Returns: nothing.
+ */
 void processBitHdr(bool bit)
 {
     p25_64BitBuffer <<= 1;
@@ -1140,6 +1413,19 @@ void processBitHdr(bool bit)
     }
 }
 
+/*
+ * processBitLdu()
+ *
+ * BIT mode LDU state.  Collects the bits of an LDU, looking for the data
+ * sync only where it is expected (plus or minus two bits).  A completed
+ * frame is delivered, and the receiver goes back to idle when no sync has
+ * been seen for too long or a terminator is found.
+ *
+ * Parameters:
+ *   bit - The received bit.
+ *
+ * Returns: nothing.
+ */
 void processBitLdu(bool bit)
 {
     p25_64BitBuffer <<= 1;
@@ -1211,6 +1497,18 @@ void processBitLdu(bool bit)
     }
 }
 
+/*
+ * processBits()
+ *
+ * Receive entry point for BIT mode.  Feeds the bytes through the bit state
+ * machine, most significant bit first.
+ *
+ * Parameters:
+ *   bytes  - Received bytes.
+ *   length - Number of bytes in bytes.
+ *
+ * Returns: nothing.
+ */
 void processBits(uint8_t* bytes, uint8_t length)
 {
     bool bit;
@@ -1240,32 +1538,22 @@ void processBits(uint8_t* bytes, uint8_t length)
     }
 }
 
-void writeBits(uint8_t c, bool isEOT)
-{
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'B', 'I', 'T', 'S'}; // setup 8 byte header
-    static uint8_t bytePos = 8; // set first position after header
-
-    bytes[bytePos++] = c;
-    if (bytePos == 200)
-    {
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
-
-    if (bytePos > 8 && isEOT) // If EOT and number of new bytes less than 200 pad out with 0.
-    {
-        memset(bytes + bytePos, 0, 200 - bytePos);
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
-}
-
+/*
+ * writeSamples()
+ *
+ * Turns one byte of transmit bits (four symbols) into shaped transmit
+ * samples and queues them for the modem host.  The samples are collected in
+ * 200 byte SAMP packets.
+ *
+ * Parameters:
+ *   c     - Byte of transmit bits.
+ *   isEOT - true to send the partly filled packet now (end of transmission).
+ *
+ * Returns: nothing.
+ */
 void writeSamples(uint8_t c, bool isEOT)
 {
-    static uint8_t bytes[200] = {0x61, 0x00, 0xc8, 0x04, 'S', 'A', 'M', 'P'};  // setup 8 byte header
-    static uint8_t bytePos    = 8;                                             // set first position after header
     q15_t inBuffer[4U];
-    q15_t intBuffer[P25_RADIO_SYMBOL_LENGTH * 4U];
     q15_t outBuffer[P25_RADIO_SYMBOL_LENGTH * 4U];
 
     const uint8_t MASK = 0xC0U;
@@ -1291,36 +1579,27 @@ void writeSamples(uint8_t c, bool isEOT)
 
     arm_fir_interpolate_q15(&modFilter, inBuffer, outBuffer, 4U);
 
-  //  arm_fir_q15(&lpFilter, intBuffer, outBuffer, P25_RADIO_SYMBOL_LENGTH * 4U);
-
-    bytes[5] = 'A';
-    bytes[6] = 'M';
-    bytes[7] = 'P';
-
-    for (uint8_t i = 0U; i < P25_RADIO_SYMBOL_LENGTH * 4U; i++)
-    {
-        outBuffer[i] *= 1.0f;
-        bytes[bytePos++] = (outBuffer[i] & 0x00ff);
-        bytes[bytePos++] = (outBuffer[i] & 0xff00) >> 8;
-        if (bytePos == 200)
-        {
-            write(sockfd, bytes, 200);
-            bytePos = 8;
-            delay(500);
-        }
-    }
-
-    if (bytePos >= 8 && isEOT)  // If EOT and number of new bytes less than 200 pad out with 0.
-    {
-        bytes[5] = 'E';
-        bytes[6] = 'O';
-        bytes[7] = 'T';
-        memset(bytes + bytePos, 0, 200 - bytePos);
-        write(sockfd, bytes, 200);
-        bytePos = 8;
-    }
+    /* 200 byte SAMP packets; a short wait after each full one paces the modem host */
+    modemQueueSamples(sockfd, outBuffer, P25_RADIO_SYMBOL_LENGTH * 4U, isEOT, 500U);
 }
 
+/*
+ * processTx()
+ *
+ * Transmits a P25 item as BITS or SAMP packets.  An end of transmission
+ * flushes the partly filled packet.  When a transmission is not yet running,
+ * the start sync is sent first (p25txDelay bytes) as a preamble.  The data
+ * bytes are then written.
+ *
+ * Parameters:
+ *   data   - The frame bytes.
+ *   length - Number of bytes in data.
+ *   type   - Frame type: header, LDU or end of transmission.
+ *   isTx   - true if a transmission is already running, false to send the
+ *            preamble first.
+ *
+ * Returns: nothing.
+ */
 void processTx(const uint8_t* data, uint8_t length, const char* type, bool isTx)
 {
     if (strcasecmp(type, TYPE_EOT) == 0)
@@ -1328,7 +1607,7 @@ void processTx(const uint8_t* data, uint8_t length, const char* type, bool isTx)
         fprintf(stderr, "EOT ==================\n");
         uint8_t tmp[1] = {0x00};
         if (packetType == PACKET_TYPE_BIT)
-            writeBits(tmp[0], true);
+            modemWriteBits(sockfd, tmp[0], true);
         else if (packetType == PACKET_TYPE_SAMP)
             writeSamples(tmp[0], true);
         return;
@@ -1340,7 +1619,7 @@ void processTx(const uint8_t* data, uint8_t length, const char* type, bool isTx)
         for (uint8_t i = 0U; i < p25txDelay; i++)
         {
             if (packetType == PACKET_TYPE_BIT)
-                writeBits(P25_START_SYNC, false);
+                modemWriteBits(sockfd, P25_START_SYNC, false);
             else if (packetType == PACKET_TYPE_SAMP)
                 writeSamples(P25_START_SYNC, false);
         }
@@ -1350,91 +1629,25 @@ void processTx(const uint8_t* data, uint8_t length, const char* type, bool isTx)
     for (uint8_t i = 0U; i < length; i++)
     {
         if (packetType == PACKET_TYPE_BIT)
-            writeBits(data[i], false);
+            modemWriteBits(sockfd, data[i], false);
         else if (packetType == PACKET_TYPE_SAMP)
             writeSamples(data[i], false);
     }
 }
 
-void initTimers()
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        bzero(timer[i].name, 20);
-        timer[i].valid     = false;
-        timer[i].duration  = 0;
-        timer[i].count     = 0;
-        timer[i].enabled   = false;
-        timer[i].triggered = false;
-    }
-}
-
-int8_t getTimer(const char* name, uint32_t duration)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (!timer[i].valid)
-        {
-            strcpy(timer[i].name, name);
-            timer[i].valid     = true;
-            timer[i].enabled   = true;
-            timer[i].triggered = false;
-            timer[i].count     = 0;
-            timer[i].duration  = duration;
-            pthread_mutex_unlock(&timerMutex);
-            return i;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-    return -1;
-}
-
-bool isTimerTriggered(const char* name)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (timer[i].valid && timer[i].triggered && strcasecmp(timer[i].name, name) == 0)
-        {
-            pthread_mutex_unlock(&timerMutex);
-            return true;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-    return false;
-}
-
-void resetTimer(const char* name)
-{
-    for (uint8_t i = 0; i < 10; i++)
-    {
-        pthread_mutex_lock(&timerMutex);
-        if (timer[i].valid && strcasecmp(timer[i].name, name) == 0)
-        {
-            timer[i].count     = 0;
-            timer[i].triggered = false;
-            pthread_mutex_unlock(&timerMutex);
-            return;
-        }
-        pthread_mutex_unlock(&timerMutex);
-    }
-}
-
-void disableTimer(uint8_t id)
-{
-    pthread_mutex_lock(&timerMutex);
-    bzero(timer[id].name, 20);
-    timer[id].valid     = false;
-    timer[id].enabled   = false;
-    timer[id].triggered = false;
-    timer[id].duration  = 0;
-    timer[id].count     = 0;
-    pthread_mutex_unlock(&timerMutex);
-}
-
-// Simple timer thread.
-// Each loop through the while statement takes 1 millisecond.
+/*
+ * timerThread()
+ *
+ * Timer thread.  Every pass of the loop takes about ten milliseconds and
+ * advances all software timers by the time that really passed.  The modeHang timer is held at zero while a
+ * transmission is on; once it has been quiet for the hang time a SETIDLE
+ * command is queued to hand the modem back.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* timerThread(void *arg)
 {
     bool     idle = true;
@@ -1442,36 +1655,25 @@ void* timerThread(void *arg)
     if (getTimer("modeHang", modeHang) < 0)
     {
         fprintf(stderr, "Timer thread exited.\n");
-        int iRet = 600;
-        pthread_exit(&iRet);
+        pthread_exit(NULL);
         return NULL;
     }
 
+    uint64_t lastTick = 0;      /* timers are advanced by the real time that passed, so a longer sleep loses nothing */
+
     while (connected)
     {
-        delay(1000);
+        delay(HOST_TIMER_PERIOD_US);
+        uint32_t elapsed = timerElapsedMs(&lastTick);
 
         for (uint8_t i = 0; i < 10; i++)
         {
-            pthread_mutex_lock(&timerMutex);
-            if (timer[i].valid && timer[i].enabled)
-            {
-                if (timer[i].count >= timer[i].duration)
-                {
-                    timer[i].triggered = true;
-                    timer[i].count     = 0;
-                }
-                else if (!timer[i].triggered)
-                {
-                    timer[i].count++;
-                }
-            }
-            pthread_mutex_unlock(&timerMutex);
+            timerTickN(i, elapsed);
             // fprintf(stderr, "T: %d  N: %s D: %u C: %u\n", i, timer[i].name, timer[i].duration, timer[i].count);
             if (txOn && strcasecmp(timer[i].name, "modeHang") == 0)
             {
                 idle = false;
-                resetTimer("modeHang");
+                resetTimer("modeHang", 0);
             }
             else if (!txOn && strcasecmp(timer[i].name, "modeHang") == 0)
             {
@@ -1484,7 +1686,7 @@ void* timerThread(void *arg)
                         pthread_mutex_unlock(&rxBufMutex);
                         //    write(sockfd, SETIDLE, 5);
                         idle = true;
-                        resetTimer("modeHang");
+                        resetTimer("modeHang", 0);
                     }
                 }
             }
@@ -1492,21 +1694,32 @@ void* timerThread(void *arg)
     }
 
     fprintf(stderr, "Timer thread exited.\n");
-    int iRet = 600;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * rxThread()
+ *
+ * Thread that empties the receive ring buffer (rxBuffer), which holds what
+ * the gateway wants sent to the radio.  A five byte command is written to
+ * the modem host; a header, LDU or end of transmission frame is passed to
+ * processTx().  A byte that is not a frame start (0x61) is dropped.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* rxThread(void* arg)
 {
-    uint8_t loop = 0;
+    bool fast = false;       /* true: look again soon (more data may be waiting) */
 
     while (connected)
     {
-        delay(100);
-        loop++;
+        delay(fast ? 100 : HOST_POLL_US);
+        fast = false;
 
-        if (loop > 100)
         {
             pthread_mutex_lock(&rxBufMutex);
             uint32_t avail = RingBuffer_dataSize(&rxBuffer);
@@ -1526,6 +1739,7 @@ void* rxThread(void* arg)
                     RingBuffer_getData(&rxBuffer, buf, 1);
                     pthread_mutex_unlock(&rxBufMutex);
                     fprintf(stderr, "RX invalid header.\n");
+                    fast = true;
                     continue;
                 }
 
@@ -1554,9 +1768,10 @@ void* rxThread(void* arg)
                     {
                         if (write(sockfd, rbuf, len) < 0)
                         {
-                            fprintf(stderr, "ERROR: remote disconnect\n");
+                            reportError(modemName, "P25", "remote disconnect");
                             break;
                         }
+                        fast = true;
                         continue;
                     }
 
@@ -1577,31 +1792,39 @@ void* rxThread(void* arg)
                     }
                 }
             }
-            loop = 0;
         }
     }
 
     fprintf(stderr, "RX thread exited.\n");
-    int iRet       = 500;
     pthread_mutex_lock(&stateMutex);
     p25GWConnected = false;
     pthread_mutex_unlock(&stateMutex);
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
-// Send bytes to gateway.
+/*
+ * txThread()
+ *
+ * Thread that sends data to the P25 gateway.  At regular intervals it takes
+ * complete frames from gwTxBuffer and writes them to the gateway socket.
+ *
+ * Parameters:
+ *   arg - Socket of the gateway connection, passed as a pointer sized
+ *         integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* txThread(void *arg)
 {
     int      sockfd = (intptr_t)arg;
-    uint16_t loop   = 0;
+    bool     fast   = false;     /* true: look again soon (more data may be waiting) */
 
     while (1)
     {
-        delay(100);
-        loop++;
+        delay(fast ? 100 : HOST_POLL_US);
+        fast = false;
 
-        if (loop > 100)
         {
             pthread_mutex_lock(&gwTxBufMutex);
             uint32_t avail = RingBuffer_dataSize(&gwTxBuffer);
@@ -1621,6 +1844,7 @@ void* txThread(void *arg)
                     RingBuffer_getData(&gwTxBuffer, buf, 1);
                     pthread_mutex_unlock(&gwTxBufMutex);
                     fprintf(stderr, "TX invalid header. [%02X]\n", buf[0]);
+                    fast = true;
                     continue;
                 }
 
@@ -1643,12 +1867,11 @@ void* txThread(void *arg)
 
                     if (write(sockfd, tbuf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote reflector gateway disconnected.\n");
+                        reportError(modemName, "P25", "remote reflector gateway disconnected.");
                     }
                 }
             }
 
-            loop = 0;
         }
 
         pthread_mutex_lock(&gwCmdMutex);
@@ -1691,7 +1914,7 @@ void* txThread(void *arg)
 
                     if (write(sockfd, cbuf, len) < 0)
                     {
-                        fprintf(stderr, "ERROR: remote reflector gateway disconnected.\n");
+                        reportError(modemName, "P25", "remote reflector gateway disconnected.");
                     }
                 }
             }
@@ -1702,11 +1925,27 @@ void* txThread(void *arg)
     p25GWConnected = false;
     pthread_mutex_unlock(&stateMutex);
     fprintf(stderr, "TX GW thread exited.\n");
-    int iRet = 500;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * decodeFrame()
+ *
+ * Handles a frame from the modem host or the gateway.  A P25 frame is
+ * decoded with decodeP25() and, for duplex or network traffic, sent on to
+ * the modem (as it is in frame mode, or as BITS/SAMP packets through
+ * processTx() otherwise).  An end of transmission ends the call: the last
+ * call and history records are saved with the BER and the duration, and txOn
+ * is cleared.
+ *
+ * Parameters:
+ *   buffer - The frame, starting with the OpenMT header.
+ *   length - Number of bytes in buffer.
+ *   isNet  - true if the frame came from the network.
+ *
+ * Returns: nothing.
+ */
 void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
 {
     static bool started = false;
@@ -1720,19 +1959,28 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
 
     if (memcmp(buffer + 4, "P25", 3) == 0 && memcmp(buffer + 4, TYPE_EOT, typeLen) != 0)
     {
-    //    dump((char*)"Data", buffer + 8, length - 8);
+    //    hexDump((char*)"Data", buffer + 8, length - 8);
         decodeP25(buffer, isNet);
         if ((modem_duplex || isNet) && packetType == PACKET_TYPE_FRAME && txOn)
         {
             if (write(sockfd, buffer, length) < 0)
             {
-                fprintf(stderr, "ERROR: host disconnect\n");
+                reportError(modemName, "P25", "host disconnect");
             }
         }
         else if ((modem_duplex || isNet) && txOn)
         {
             processTx(buffer + 8, length - 8, "P25 ", started);
             started = true;
+        }
+        else if (modem_duplex && p25RelayData && packetType == PACKET_TYPE_FRAME)
+        {
+            /* trunking signalling or a data header from the radio, rebuilt
+             * by decodeP25(): repeated in duplex as MMDVMHost does, in
+             * frame mode only (sample and bit modes need the call's own
+             * transmit timing) */
+            if (write(sockfd, buffer, length) < 0)
+                reportError(modemName, "P25", "host disconnect");
         }
     }
     else if (memcmp(buffer + 4, TYPE_EOT, 4) == 0)
@@ -1745,6 +1993,8 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
             txOn       = false;
             rx_started = false;
             started    = false;
+            p25RebuildLcValid   = false;
+            p25RebuildLdu2Valid = false;
         }
         pthread_mutex_unlock(&stateMutex);
 
@@ -1752,6 +2002,16 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
         {
             if ((modem_duplex || isNet) && packetType != PACKET_TYPE_FRAME)
                 processTx(buffer + 8, length - 8, "P25E", wasOn);
+            else if ((modem_duplex || isNet) && length > 8)
+            {
+                /* frame mode: the modem is sent the terminator itself, rebuilt
+                 * like every other frame, so it stops transmitting at once */
+                uint8_t duid = ((size_t)(length - 8) == P25_TERMLC_FRAME_LENGTH_BYTES) ? P25_DUID_TERM_LC : P25_DUID_TERM;
+
+                p25RebuildFrame(buffer + 8, duid, isNet);
+                if (write(sockfd, buffer, length) < 0)
+                    reportError(modemName, "P25", "host disconnect");
+            }
 
             duration = difftime(time(NULL), start_time);
             char tmp[100];
@@ -1771,7 +2031,62 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
     }
 }
 
-// Process bytes from gateway.
+/* A call from the network is open from its first frame until its end frame.
+ * The gateway can be unlinked, or stop, without sending that end frame; the
+ * host would then stay keyed (and the dashboard in TX) for ever. */
+static bool     p25NetOpen = false;
+static uint64_t p25NetMs   = 0U;
+
+/*
+ * p25NetEnd()
+ *
+ * Ends a network call that has no end frame: a terminator is made and handed
+ * to decodeFrame() as if the gateway had sent it, so the call is closed the
+ * normal way (modem told to stop, last call and history saved, state idle).
+ *
+ * Parameters:
+ *   force - true to end the call now, false to end it only when no frame has
+ *           come from the gateway for 1.5 seconds.
+ *
+ * Returns: nothing.
+ */
+static void p25NetEnd(bool force)
+{
+    if (!p25NetOpen || (!force && nowMs() - p25NetMs <= 1500U))
+        return;
+
+    p25NetOpen = false;
+
+    uint8_t frame[8U + P25_TERM_FRAME_LENGTH_BYTES];
+
+    memset(frame, 0x00, sizeof(frame));
+    frame[0] = 0x61;
+    frame[1] = 0x00;
+    frame[2] = (uint8_t)sizeof(frame);
+    frame[3] = 0x04;
+    memcpy(frame + 4, "P25E", 4);
+    addSync(frame + 8);
+    encodeNID(frame + 8, P25_DUID_TERM);
+    addBusyBits(frame + 8, P25_TERM_FRAME_LENGTH_BITS, true, false);
+
+    fprintf(stderr, "P25: network call ended, no end frame from the gateway\n");
+    decodeFrame(frame, (uint8_t)sizeof(frame), true);
+}
+
+/*
+ * processGatewaySocket()
+ *
+ * Thread that serves the connected P25 gateway.  It reads the gateway's
+ * packets: NAK, connect, disconnect, command and status packets are handled,
+ * and P25 frames (when P25 is the active mode) are decoded as network
+ * traffic.
+ *
+ * Parameters:
+ *   arg - Socket of the gateway connection, passed as a pointer sized
+ *         integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void *processGatewaySocket(void *arg)
 {
     int      childfd = (intptr_t)arg;
@@ -1793,6 +2108,19 @@ void *processGatewaySocket(void *arg)
 
     while (1)
     {
+        /* Wait for the gateway; when it is quiet, see whether a network call
+         * has gone silent (the gateway was unlinked or stopped sending). */
+        struct pollfd gwPoll = {childfd, POLLIN, 0};
+        int           gwWait = poll(&gwPoll, 1, 200);
+
+        if (gwWait == 0)
+        {
+            p25NetEnd(false);
+            continue;
+        }
+        if (gwWait < 0 && errno == EINTR)
+            continue;
+
         int len = read(childfd, buffer, 1);
         if (len < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
@@ -1807,7 +2135,7 @@ void *processGatewaySocket(void *arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "P25_Service: error when reading from P25 gateway, errno=%d\n", errno);
+            reportError(modemName, "P25", "P25_Service: error when reading from P25 gateway, errno=%d", errno);
             close(childfd);
             break;
         }
@@ -1859,7 +2187,7 @@ void *processGatewaySocket(void *arg)
         memcpy(type, buffer + 4, typeLen);
 
         if (debugM)
-            dump((char*)"P25 Gateway data:", (uint8_t*)buffer, respLen);
+            hexDump((char*)"P25 Gateway data:", (uint8_t*)buffer, respLen);
 
         if (memcmp(type, TYPE_NACK, typeLen) == 0)
         {
@@ -1891,6 +2219,8 @@ void *processGatewaySocket(void *arg)
             p25ReflConnected = false;
             pthread_mutex_unlock(&stateMutex);
 
+            p25NetEnd(true);
+
             char tmp[8];
             bzero(tmp, 8);
             memcpy(tmp, buffer + 4 + typeLen, 6);
@@ -1910,12 +2240,22 @@ void *processGatewaySocket(void *arg)
             reflBusy = true;
             pthread_mutex_unlock(&stateMutex);
 
+            if (memcmp(type, "P25E", 4) == 0)
+                p25NetOpen = false;
+            else
+            {
+                p25NetOpen = true;
+                p25NetMs   = nowMs();
+            }
+
             decodeFrame(buffer, respLen, true);
         }
         delay(5);
     }
 
     fprintf(stderr, "Gateway disconnected.\n");
+
+    p25NetEnd(true);
 
     pthread_mutex_lock(&stateMutex);
     p25GWConnected   = false;
@@ -1924,12 +2264,23 @@ void *processGatewaySocket(void *arg)
 
     delGateway(modemName, "main", "P25");
     clearReflLinkStatus(modemName, "P25");
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
-// Start up communication with modem host.
+/*
+ * startClient()
+ *
+ * Thread that connects to the modem host socket.  It starts the gateway
+ * server, receive and timer threads, sends the mode and radio configuration
+ * packet, then processes the packets the modem host returns: commands, the
+ * SAMP or BITS mode switch and P25 frames.
+ *
+ * Parameters:
+ *   arg - Address of the modem host, as a text string.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* startClient(void *arg)
 {
     struct sockaddr_in serv_addr;
@@ -1940,14 +2291,14 @@ void* startClient(void *arg)
     // Create socket file descriptor
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "P25", "Socket creation error: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags == -1)
     {
-        perror("fcntl F_GETFL");
+        reportError(modemName, "P25", "fcntl F_GETFL: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -1959,9 +2310,9 @@ void* startClient(void *arg)
     serv_addr.sin_port   = htons(clientPort);
 
     // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(hostAddress, &serv_addr.sin_addr))
     {
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "P25", "Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
 
@@ -1970,7 +2321,7 @@ void* startClient(void *arg)
     {
         if (errno != EINPROGRESS)
         {
-            perror("connection failed");
+            reportError(modemName, "P25", "connection failed: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
     }
@@ -1978,7 +2329,7 @@ void* startClient(void *arg)
     int err = pthread_create(&(gwHostid), NULL, &startTCPServer, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create gateway host thread :[%s]", strerror(err));
+        reportError(modemName, "P25", "Can't create gateway host thread :[%s]", strerror(err));
         return 0;
     }
     else
@@ -1991,7 +2342,7 @@ void* startClient(void *arg)
     err = pthread_create(&(rxid), NULL, &rxThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create rx thread :[%s]", strerror(err));
+        reportError(modemName, "P25", "Can't create rx thread :[%s]", strerror(err));
         return 0;
     }
     else
@@ -2002,7 +2353,7 @@ void* startClient(void *arg)
     err = pthread_create(&(timerid), NULL, &timerThread, NULL);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create timer thread :[%s]", strerror(err));
+        reportError(modemName, "P25", "Can't create timer thread :[%s]", strerror(err));
         return 0;
     }
     else
@@ -2075,7 +2426,7 @@ void* startClient(void *arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "p25_Service: error when reading from server, errno=%d\n", errno);
+            reportError(modemName, "P25", "p25_Service: error when reading from server, errno=%d", errno);
             break;
         }
 
@@ -2118,7 +2469,7 @@ void* startClient(void *arg)
         memcpy(type, buffer + 4, typeLen);
 
         if (debugM)
-            dump((char*)"P25 data", (uint8_t*)buffer, respLen);
+            hexDump((char*)"P25 data", (uint8_t*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -2184,12 +2535,22 @@ void* startClient(void *arg)
     fprintf(stderr, "Disconnected from host.\n");
     close(sockfd);
     connected = false;
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
-// Listen for incoming gateway connection.
+/*
+ * startTCPServer()
+ *
+ * Thread that listens for the P25 gateway on the server port.  For each
+ * accepted connection it starts txThread() to send data to the gateway and
+ * processGatewaySocket() to read from it.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* startTCPServer(void* arg)
 {
     struct hostent* hostp;
@@ -2199,7 +2560,7 @@ void* startTCPServer(void* arg)
     sockFd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockFd < 0)
     {
-        fprintf(stderr, "P25_Service: error when creating the socket: %s\n", strerror(errno));
+        reportError(modemName, "P25", "P25_Service: error when creating the socket: %s", strerror(errno));
         exit(1);
     }
 
@@ -2214,7 +2575,7 @@ void* startTCPServer(void* arg)
 
     if (bind(sockFd, (struct sockaddr*)&serveraddr, sizeof(serveraddr)) < 0)
     {
-        fprintf(stderr, "P25_Service: error when binding the socket to port %u: %s\n", serverPort, strerror(errno));
+        reportError(modemName, "P25", "P25_Service: error when binding the socket to port %u: %s", serverPort, strerror(errno));
         exit(1);
     }
 
@@ -2237,33 +2598,32 @@ void* startTCPServer(void* arg)
         childfd = accept(sockFd, (struct sockaddr*)&clientaddr, &clientlen);
         if (childfd < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
         {
-            perror("accept failed");
+            reportError(modemName, "P25", "accept failed: %s", strerror(errno));
             break;
         }
 
         if (childfd < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
 
-        hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
-        if (hostp == NULL)
-        {
-            error((char*)"ERROR on gethostbyaddr");
-            break;
-        }
-
         hostaddrp = inet_ntoa(clientaddr.sin_addr);
         if (hostaddrp == NULL)
         {
-            error((char*)"ERROR on inet_ntoa\n");
-            break;
+            reportError(modemName, "P25", "Can't get the address of the client.");
+            close(childfd);
+            continue;
         }
 
         if (debugM)
-            fprintf(stderr, "Server established connection with %s (%s)\n", hostp->h_name, hostaddrp);
+        {
+            /* The name is only logged, so a client with no reverse DNS entry is still accepted */
+            hostp = gethostbyaddr((const char*)&clientaddr.sin_addr.s_addr, sizeof(clientaddr.sin_addr.s_addr), AF_INET);
+            fprintf(stderr, "Server established connection with %s (%s)\n",
+                    hostp != NULL ? hostp->h_name : "unknown", hostaddrp);
+        }
 
         pthread_t txid;
         int err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)childfd);
         if (err != 0)
-            fprintf(stderr, "Can't create tx thread :[%s]", strerror(err));
+            reportError(modemName, "P25", "Can't create tx thread :[%s]", strerror(err));
         else
         {
             if (debugM) fprintf(stderr, "TX thread created successfully\n");
@@ -2273,7 +2633,7 @@ void* startTCPServer(void* arg)
         err = pthread_create(&(procid), NULL, &processGatewaySocket, (void*)(intptr_t)childfd);
         if (err != 0)
         {
-            fprintf(stderr, "Can't create gateway process thread :[%s]", strerror(err));
+            reportError(modemName, "P25", "Can't create gateway process thread :[%s]", strerror(err));
             continue;
         }
         else
@@ -2283,18 +2643,32 @@ void* startTCPServer(void* arg)
         }
         delay(1000);
     }
-    int iRet = 100;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
+/*
+ * main()
+ *
+ * Program entry.  Parses the command line (-m modem number 1 to 10, which
+ * also selects the TCP ports; -d daemon; -v version; -x debug), reads the
+ * modem and P25 settings from the database (levels, power, NAC, frequencies,
+ * callsign), starts the modem host client and then watches for configuration
+ * changes until the program is told to stop.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on exit.
+ */
 int main(int argc, char** argv)
 {
     bool daemon = 0;
     int  ret;
     int  c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -2303,7 +2677,7 @@ int main(int argc, char** argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "P25", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -2312,8 +2686,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -2325,7 +2702,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: P25_Service [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: P25_Service [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -2336,7 +2713,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "P25_Service: error in fork(), exiting\n");
+            reportError(modemName, "P25", "P25_Service: error in fork(), exiting");
             return 1;
         }
 
@@ -2421,7 +2798,7 @@ int main(int argc, char** argv)
     int err = pthread_create(&(modemHostid), NULL, &startClient, modemHost);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create modem host thread :[%s]", strerror(err));
+        reportError(modemName, "P25", "Can't create modem host thread :[%s]", strerror(err));
         return 1;
     }
     else
@@ -2459,7 +2836,7 @@ int main(int argc, char** argv)
                 readDashbCommand(modemName, "reflLinkP25", parameter);
                 if (strlen(parameter) == 0)
                 {
-                    resetTimer("status");
+                    resetTimer("status", 0);
                     continue;
                 }
                 if (strcasecmp(parameter, "unlink") == 0)
@@ -2476,7 +2853,7 @@ int main(int argc, char** argv)
                     pthread_mutex_unlock(&gwCmdMutex);
 
                     sleep(3);
-                    resetTimer("status");
+                    resetTimer("status", 0);
                     continue;
                 }
                 else if (!p25ReflConnected)
@@ -2528,7 +2905,7 @@ int main(int argc, char** argv)
                     ackDashbCommand(modemName, "reflLinkP25", "No gateway");
                 }
             }
-            resetTimer("status");
+            resetTimer("status", 0);
         }
         delay(500000); // 5 secs
     }

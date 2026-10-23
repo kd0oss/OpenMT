@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -44,7 +45,7 @@
 #include <unistd.h>
 
 #include <ADF7021.h>
-#include <dsp_tools.h>
+#include <fec_tools.h>
 
 #include "ysf_dsp.h"
 #include "ysf_func.h"
@@ -68,12 +69,39 @@ static int fails = 0;
 
 static const uint8_t WHITE[] = {0x93U, 0xD7U, 0x51U, 0x21U, 0x9CU, 0x2FU, 0x6CU, 0xD0U, 0xEFU, 0x0FU, 0xF8U, 0x3DU, 0xF1U};
 
+/*
+ * pad()
+ *
+ * Copies a callsign into a 10 byte field, padded with spaces.
+ *
+ * Parameters:
+ *   d - The field.
+ *   s - The callsign as a string.
+ *
+ * Returns: nothing.
+ */
 static void pad(uint8_t* d, const char* s)
 {
     memset(d, ' ', 10);
     memcpy(d, s, strlen(s));
 }
 
+/*
+ * mkHeader()
+ *
+ * Makes a header or terminator frame with the callsigns in the first half of
+ * the header.
+ *
+ * Parameters:
+ *   f    - Receives the frame.
+ *   fi   - The frame information, YSF_FI_HEADER or YSF_FI_TERMINATOR.
+ *   cm   - The call mode.
+ *   dt   - The data type.
+ *   dest - The destination callsign.
+ *   src  - The source callsign.
+ *
+ * Returns: nothing.
+ */
 static void mkHeader(uint8_t* f, uint8_t fi, uint8_t cm, uint8_t dt, const char* dest, const char* src)
 {
     uint8_t csd1[20], csd2[20];
@@ -94,6 +122,18 @@ static void mkHeader(uint8_t* f, uint8_t fi, uint8_t cm, uint8_t dt, const char*
     ysfPayloadWriteHeader(f, csd1, csd2);
 }
 
+/*
+ * mkShort()
+ *
+ * The V/D mode 2 short data channel: 10 bytes, whitened, with a CRC, the
+ * rate 1/2 code and the interleaving.
+ *
+ * Parameters:
+ *   frame - The frame that receives the channel.
+ *   ten   - The 10 bytes.
+ *
+ * Returns: nothing.
+ */
 static void mkShort(uint8_t* frame, const uint8_t* ten)
 {
     uint8_t out[13] = {0}, conv[25], bytes[25];
@@ -117,7 +157,20 @@ static void mkShort(uint8_t* frame, const uint8_t* ten)
     for (int i = 0; i < 5; i++) memcpy(frame + 30 + i * 18, bytes + i * 5, 5);
 }
 
-/* A V/D mode 2 frame; the callsigns travel in frames 0 and 1 */
+/*
+ * mkVd2()
+ *
+ * Makes a V/D mode 2 frame that carries the callsign for its frame number,
+ * with random voice bits.
+ *
+ * Parameters:
+ *   f    - Receives the frame.
+ *   fn   - The frame number.
+ *   dest - The destination callsign.
+ *   src  - The source callsign.
+ *
+ * Returns: nothing.
+ */
 static void mkVd2(uint8_t* f, uint8_t fn, const char* dest, const char* src)
 {
     YsfFich h;
@@ -160,6 +213,20 @@ static void mkVd2(uint8_t* f, uint8_t fn, const char* dest, const char* src)
     }
 }
 
+/*
+ * genVoiceCall()
+ *
+ * Makes the frames of a voice call: a header, n voice frames and a
+ * terminator.
+ *
+ * Parameters:
+ *   frames - Receives the frames.
+ *   dest   - The destination callsign.
+ *   src    - The source callsign.
+ *   n      - Number of voice frames.
+ *
+ * Returns: The number of frames made (n + 2).
+ */
 static unsigned int genVoiceCall(uint8_t frames[][FL], const char* dest, const char* src, unsigned int n)
 {
     unsigned int k = 0;
@@ -172,7 +239,21 @@ static unsigned int genVoiceCall(uint8_t frames[][FL], const char* dest, const c
     return k;
 }
 
-/* A data call: header, frames of the data FR mode with valid channels, terminator */
+/*
+ * genDataCall()
+ *
+ * Makes the frames of a data call: a header, n data FR frames with valid
+ * channels (the callsigns in the first frame of every eight) and a
+ * terminator.
+ *
+ * Parameters:
+ *   frames - Receives the frames.
+ *   dest   - The destination callsign.
+ *   src    - The source callsign.
+ *   n      - Number of data frames.
+ *
+ * Returns: The number of frames made (n + 2).
+ */
 static unsigned int genDataCall(uint8_t frames[][FL], const char* dest, const char* src, unsigned int n)
 {
     unsigned int k = 0;
@@ -215,6 +296,15 @@ static unsigned int gwHead = 0U, gwTail = 0U;
 static uint8_t rxbuf[2][600];
 static int rxlen[2] = {0, 0};
 
+/*
+ * nowMs()
+ *
+ * Reads the monotonic clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: Time in milliseconds.
+ */
 static uint64_t nowMs(void)
 {
     struct timespec ts;
@@ -224,6 +314,17 @@ static uint64_t nowMs(void)
     return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
 }
 
+/*
+ * gauss()
+ *
+ * Makes a random number with a Gaussian (normal) distribution, mean 0 and
+ * standard deviation 1 (Box-Muller method), used to add noise to the
+ * samples.
+ *
+ * Parameters: none.
+ *
+ * Returns: The random number.
+ */
 static double gauss(void)
 {
     double u = (rand() + 1.0) / (RAND_MAX + 2.0);
@@ -234,8 +335,14 @@ static double gauss(void)
 
 /*
  * pump()
- *   Reads whatever packets have arrived from the host on either socket and
- *   queues them, waiting up to timeoutMs for the first.
+ *
+ * Reads whatever packets have arrived from the host on either socket and
+ * queues them, waiting up to timeoutMs for the first.
+ *
+ * Parameters:
+ *   timeoutMs - Longest wait for the first packet, in milliseconds.
+ *
+ * Returns: nothing.
  */
 static void pump(int timeoutMs)
 {
@@ -306,6 +413,19 @@ static void pump(int timeoutMs)
     }
 }
 
+/*
+ * sendAll()
+ *
+ * Writes a whole buffer to a socket, retrying when the write is interrupted
+ * or would block.
+ *
+ * Parameters:
+ *   fd   - Socket to write to.
+ *   data - Bytes to write.
+ *   len  - Number of bytes in data.
+ *
+ * Returns: nothing.
+ */
 static void sendAll(int fd, const uint8_t* data, size_t len)
 {
     size_t done = 0U;
@@ -328,6 +448,16 @@ static char modeNow[10] = "IDLE";
 static unsigned int setModeCount = 0U, setIdleCount = 0U;
 static uint64_t idleAt = 0U;
 
+/*
+ * writeModeFile()
+ *
+ * Writes the current simulated modem mode to /tmp/ysf_stub_mode, where the
+ * host can read it as the active mode.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void writeModeFile(void)
 {
     FILE* f = fopen("/tmp/ysf_stub_mode", "w");
@@ -340,9 +470,15 @@ static void writeModeFile(void)
 }
 
 /*
- * drainModem()
- *   Processes the packets from the host that are not transmit data: mode
- *   commands. Transmit packets stay in the queue for the caller.
+ * handleModemCommands()
+ *
+ * Processes the packets from the host that are not transmit data: the mode
+ * commands (SETMODE changes IDLE to YSF, and the count is kept; SETIDLE
+ * returns to IDLE).  Transmit packets stay in the queue for the caller.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
  */
 static void handleModemCommands(void)
 {
@@ -370,6 +506,18 @@ static void handleModemCommands(void)
 }
 
 
+/*
+ * sendGwPacket()
+ *
+ * Sends a packet to the host's gateway port.
+ *
+ * Parameters:
+ *   type    - Four character packet type.
+ *   payload - The payload.
+ *   len     - Number of bytes in payload.
+ *
+ * Returns: nothing.
+ */
 static void sendGwPacket(const char* type, const uint8_t* payload, unsigned int len)
 {
     uint8_t pkt[200];
@@ -383,7 +531,17 @@ static void sendGwPacket(const char* type, const uint8_t* payload, unsigned int 
     sendAll(gwFd, pkt, 8 + len);
 }
 
-/* A message from the network: the end flag, then the 151 byte body */
+/*
+ * sendNetBody()
+ *
+ * Sends a message from the network to the host: the end flag, then the 151
+ * byte body.
+ *
+ * Parameters:
+ *   body - The 151 byte body.
+ *
+ * Returns: nothing.
+ */
 static void sendNetBody(const uint8_t* body)
 {
     uint8_t pl[1 + BODY];
@@ -393,7 +551,18 @@ static void sendNetBody(const uint8_t* body)
     sendGwPacket("YSFG", pl, sizeof(pl));
 }
 
-/* Sends modem samples to the host as SAMP packets */
+/*
+ * sendSamples()
+ *
+ * Sends modem samples to the host as SAMP packets of 96 samples (the last
+ * one is filled with zeros).
+ *
+ * Parameters:
+ *   s     - The samples.
+ *   count - Number of samples.
+ *
+ * Returns: nothing.
+ */
 static void sendSamples(const int16_t* s, unsigned int count)
 {
     uint8_t pkt[200];
@@ -426,7 +595,21 @@ static void sendSamples(const int16_t* s, unsigned int count)
     }
 }
 
-/* Plays a list of on air frames into the host */
+/*
+ * radioTransmit()
+ *
+ * Plays a list of on air frames into the host as a radio would send them: as
+ * MMDVM frames (--frame), as the bits of the ADF7021 with a lead-in of noise
+ * and a preamble, shifted 3 bits off a byte boundary (--bits), or as
+ * modulated samples with silence before and after (the noise of --noise is
+ * added).
+ *
+ * Parameters:
+ *   frames - The frames to play.
+ *   n      - Number of frames.
+ *
+ * Returns: nothing.
+ */
 static void radioTransmit(uint8_t frames[][FL], unsigned int n)
 {
     if (frameMode)
@@ -542,6 +725,16 @@ static void radioTransmit(uint8_t frames[][FL], unsigned int n)
 static uint8_t netMsg[MAXF][BODY];
 static unsigned int netCount = 0U;
 
+/*
+ * collectGateway()
+ *
+ * Takes the YSFG messages from the packets queued from the gateway port and
+ * stores them in netMsg.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void collectGateway(void)
 {
     while (gwTail != gwHead)
@@ -555,7 +748,18 @@ static void collectGateway(void)
     }
 }
 
-/* Waits until the gateway has gone quiet for quietMs */
+/*
+ * waitGatewayQuiet()
+ *
+ * Waits, while handling the host's packets, until the gateway port has been
+ * quiet for a time.
+ *
+ * Parameters:
+ *   quietMs - How long it must be quiet, in milliseconds.
+ *   maxMs   - Longest total wait, in milliseconds.
+ *
+ * Returns: nothing.
+ */
 static void waitGatewayQuiet(unsigned int quietMs, unsigned int maxMs)
 {
     uint64_t start = nowMs();
@@ -583,6 +787,19 @@ typedef struct
     bool eot;
 } TxCapture;
 
+/*
+ * captureFrameCb()
+ *
+ * Receiver callback that stores each frame received from the host's
+ * transmission.
+ *
+ * Parameters:
+ *   ctx  - The capture structure (TxCapture).
+ *   f    - The received frame.
+ *   lost - true if the signal was lost; such calls are ignored.
+ *
+ * Returns: nothing.
+ */
 static void captureFrameCb(void* ctx, const uint8_t* f, bool lost)
 {
     TxCapture* c = ctx;
@@ -593,9 +810,17 @@ static void captureFrameCb(void* ctx, const uint8_t* f, bool lost)
 
 /*
  * collectTransmit()
- *   Gathers what the host transmitted: decodes the samples or the bits with
- *   the receivers, or reads the frames of the MMDVM path, until the host has
- *   been quiet.
+ *
+ * Gathers what the host transmitted: decodes the samples or the bits with
+ * the receivers, or reads the frames of the MMDVM path, until the host has
+ * been quiet.
+ *
+ * Parameters:
+ *   c       - Receives the frames and the end of transmission flag.
+ *   quietMs - How long the host must be quiet, in milliseconds.
+ *   maxMs   - Longest total wait, in milliseconds.
+ *
+ * Returns: nothing.
  */
 static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int maxMs)
 {
@@ -670,6 +895,19 @@ static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int max
     }
 }
 
+/*
+ * countEqual()
+ *
+ * Counts how many frames of one list also appear in another.
+ *
+ * Parameters:
+ *   a  - First list of frames.
+ *   na - Number of frames in a.
+ *   b  - Second list of frames.
+ *   nb - Number of frames in b.
+ *
+ * Returns: The number of frames in a that are also in b.
+ */
 static unsigned int countEqual(uint8_t a[][FL], unsigned int na, uint8_t b[][FL], unsigned int nb)
 {
     unsigned int same = 0U;
@@ -689,6 +927,19 @@ static unsigned int countEqual(uint8_t a[][FL], unsigned int na, uint8_t b[][FL]
 static unsigned int refNetCount;
 static uint8_t refNet[MAXF][BODY];
 
+/*
+ * refNetCb()
+ *
+ * Control callback for the reference run: stores each body the control would
+ * send to the network.
+ *
+ * Parameters:
+ *   ctx  - Not used.
+ *   body - The body.
+ *   end  - Not used.
+ *
+ * Returns: nothing.
+ */
 static void refNetCb(void* ctx, const uint8_t* body, bool end)
 {
     (void)ctx;
@@ -698,6 +949,18 @@ static void refNetCb(void* ctx, const uint8_t* body, bool end)
         memcpy(refNet[refNetCount++], body, BODY);
 }
 
+/*
+ * reference()
+ *
+ * Runs the control logic directly on a list of frames, to find which network
+ * messages it should produce.  The result is kept in refNet.
+ *
+ * Parameters:
+ *   frames - The frames.
+ *   n      - Number of frames.
+ *
+ * Returns: nothing.
+ */
 static void reference(uint8_t frames[][FL], unsigned int n)
 {
     YsfCtrl c;
@@ -715,6 +978,19 @@ static void reference(uint8_t frames[][FL], unsigned int n)
 static unsigned int refRfCount;
 static uint8_t refRf[MAXF][FL];
 
+/*
+ * refRfCb()
+ *
+ * Control callback for the reference run: stores each frame the control
+ * would transmit.
+ *
+ * Parameters:
+ *   ctx   - Not used.
+ *   frame - The frame.
+ *   eot   - Not used.
+ *
+ * Returns: nothing.
+ */
 static void refRfCb(void* ctx, const uint8_t* frame, bool eot)
 {
     (void)ctx;
@@ -724,6 +1000,18 @@ static void refRfCb(void* ctx, const uint8_t* frame, bool eot)
         memcpy(refRf[refRfCount++], frame, FL);
 }
 
+/*
+ * referenceNet()
+ *
+ * Runs the control logic on a list of network bodies, to find which frames
+ * it should transmit.  The result is kept in refRf.
+ *
+ * Parameters:
+ *   bodies - The bodies.
+ *   n      - Number of bodies.
+ *
+ * Returns: nothing.
+ */
 static void referenceNet(uint8_t bodies[][BODY], unsigned int n)
 {
     YsfCtrl c;
@@ -739,6 +1027,22 @@ static void referenceNet(uint8_t bodies[][BODY], unsigned int n)
 
 static uint8_t txCall[MAXF][FL];
 
+/*
+ * main()
+ *
+ * Plays the modem host and the gateway for ysf_host and runs the tests:
+ * registration, a voice call from radio to network, from network to radio, a
+ * data call, the mode hang time and the network watchdog.  Options: -m modem
+ * number, --frame (MMDVM frames), --bits (OpenMT_HS bits), --noise rms,
+ * --hang seconds.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 if all tests pass, 1 if a test fails, 2 on a usage or setup
+ *   error.
+ */
 int main(int argc, char** argv)
 {
     int modem = 1;

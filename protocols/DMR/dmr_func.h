@@ -51,7 +51,13 @@ typedef struct SLOTDATA
 	bool EMB_data[72];
 } SLOTDATA;
 
-extern SLOTDATA slotData[2];
+/* Entries 0 and 1 hold the state of the received slots.  Entries 2 and 3 are
+ * the rebuild state of slot 1 and slot 2 (see DMR_REBUILD_SLOT): the host
+ * rebuilds the bursts it relays from what it decoded, and does that in
+ * entries of its own so that the decode state of a call in progress is not
+ * disturbed. */
+extern SLOTDATA slotData[4];
+#define DMR_REBUILD_SLOT(slot) ((uint8_t)(2U + (slot)))
 
 static const unsigned char TAG_DATA   = 0x01U;
 
@@ -268,6 +274,8 @@ void DMREMB_encode(unsigned char* data, const uint8_t slot);
 
 bool DMREmbeddedData_decode(const unsigned char* data, unsigned char lcss, const uint8_t slot);
 bool DMREmbeddedData_getRawData(unsigned char* data, const uint8_t slot);
+void DMREmbeddedData_setLC(const uint8_t slot);
+unsigned char DMREmbeddedData_getData(unsigned char* data, unsigned char n, const uint8_t slot);
 
 void decodeGPS(const unsigned char* data,  const uint8_t slot);
 

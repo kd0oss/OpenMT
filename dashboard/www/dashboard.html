@@ -276,7 +276,7 @@ span.psw
 .settingsauth
 {
   position: absolute;
-  top:  200px;
+  top:  285px;   /* leaves room for the Save button of the station settings above */
   left: 1px;
   width: 500px;
   display: inline-block;
@@ -320,6 +320,203 @@ span.psw
 #managetab
 {
   background-color: #f4b6b6;
+}
+
+#servicestab
+{
+  background-color: #b9e3f5;
+}
+
+/* Services tab: one row per service listed in the database */
+.svc_wrap
+{
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 6px;
+  font-size: 17px;
+  color: black;
+  overflow: auto;
+}
+
+.svc_note
+{
+  flex: 0 0 auto;
+  color: #700000;
+  font-weight: bold;
+  font-size: 15px;
+  min-height: 20px;
+}
+
+.svc_power
+{
+  flex: 0 0 auto;
+  padding: 4px 0 6px 0;
+}
+
+.svc_power button
+{
+  font-size: 16px;
+  height: 30px;
+  background-color: #ffd2a0;
+  margin-right: 8px;
+}
+
+.svc_power button:disabled
+{
+  opacity: 0.4;
+  cursor: default;
+}
+
+.svc_grid
+{
+  flex: 1 1 auto;
+  min-height: 80px;
+  overflow: auto;
+  background-color: white;
+  border: 2px solid #555;
+}
+
+.svc_grid table
+{
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 16px;
+  font-family: Arial, Helvetica, sans-serif;
+  width: 100%;
+}
+
+.svc_grid th
+{
+  position: sticky;
+  top: 0;
+  background-color: green;
+  color: yellow;
+  padding: 3px 8px;
+  border: 1px solid #555;
+  text-align: left;
+}
+
+.svc_grid td
+{
+  padding: 3px 8px;
+  border: 1px solid #aaa;
+  vertical-align: middle;
+}
+
+.svc_grid tbody tr:nth-child(even) td
+{
+  background-color: #BFFFED;
+}
+
+.svc_grid tbody tr:nth-child(odd) td
+{
+  background-color: #FFFFFF;
+}
+
+.svc_desc
+{
+  font-size: 13px;
+  color: #555;
+}
+
+.svc_dot
+{
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 6px;
+  margin-right: 6px;
+  vertical-align: middle;
+  background-color: #999;
+}
+
+.svc_grid button
+{
+  font-size: 15px;
+  height: 28px;
+  background-color: lightyellow;
+  margin-right: 3px;
+}
+
+.svc_grid button:disabled
+{
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Host list updates, in the Services tab */
+.hu_box
+{
+  flex: 0 0 auto;
+  background-color: #e6f4fb;
+  border: 2px solid #555;
+  margin-bottom: 6px;
+  padding: 4px 8px;
+  font-size: 15px;
+}
+
+.hu_title
+{
+  font-weight: bold;
+  font-size: 16px;
+}
+
+.hu_list
+{
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.hu_item
+{
+  width: 25%;
+  min-width: 230px;
+  padding: 2px 4px 2px 0;
+  box-sizing: border-box;
+}
+
+.hu_last
+{
+  display: block;
+  font-size: 12px;
+  color: #555;
+  margin-left: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hu_buttons button
+{
+  font-size: 15px;
+  height: 28px;
+  background-color: lightyellow;
+  margin: 4px 8px 2px 0;
+}
+
+.hu_buttons button:disabled
+{
+  opacity: 0.4;
+  cursor: default;
+}
+
+.hu_status
+{
+  font-size: 14px;
+  min-height: 18px;
+}
+
+.hu_log
+{
+  margin: 4px 0 0 0;
+  padding: 3px 6px;
+  max-height: 80px;
+  overflow: auto;
+  background-color: white;
+  border: 1px solid #888;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 /* Manage Data tab: toolbar, scrolling grid, pager */
@@ -462,7 +659,8 @@ span.psw
 .genSaveButton
 {
   position: absolute;
-  top: 130px;
+  top: 228px;   /* below the Description box */
+  left: 1px;
   font-size: 20px;
   background-color: lightgreen;
 }
@@ -943,6 +1141,8 @@ function openPage(tabln,tab,pageName,elmnt,color)
     loadMisc();
   if (pageName == "managetab")
     manageInit();
+  if (pageName == "servicestab")
+    servicesInit();
 }
 
 /* Fetch with timeout - aborts after ms milliseconds */
@@ -979,7 +1179,7 @@ function initDashBd()
 /* Fit the Modes tab to the window so that it scrolls when the sections do not fit */
 function resizeModeTab()
 {
-  var ids = ['modetab', 'misctab', 'managetab'];
+  var ids = ['modetab', 'misctab', 'managetab', 'servicestab'];
   for (var i=0;i<ids.length;i++)
   {
     var div = document.getElementById(ids[i]);
@@ -1174,7 +1374,7 @@ async function loadMisc()
             var row = tbody.insertRow(-1);
             row.insertCell(0).textContent = param;
             var input = document.createElement('input');
-            input.type = 'text';
+            input.type = /pass/i.test(param) ? 'password' : 'text';
             input.value = value;
             row.insertCell(1).appendChild(input);
             var button = document.createElement('button');
@@ -1235,8 +1435,10 @@ var managePage = 0;
 var manageCount = 0;
 var manageDateCol = "";
 
-/* Ask the server and return parsed JSON, or null (an alert is shown) */
-async function manageFetch(url, options)
+/* Ask the server and return parsed JSON, or null (an alert is shown).
+   When the admin session has timed out the login dialog is opened over the
+   page, and the request is repeated once the person has logged in again. */
+async function manageFetch(url, options, retried)
 {
   try
   {
@@ -1249,8 +1451,22 @@ async function manageFetch(url, options)
     var txt = await resp.text();
     if (txt == "unauthorized")
     {
-      alert("Not authorized. Please log in again.");
-      return null;
+      if (retried)
+      {
+        alert("Not authorized. Please log in again.");
+        return null;
+      }
+      if (!(await loginAgain()))
+        return null;
+      /* a request with a form body is sent again with a new copy of it */
+      var again = options;
+      if (options && options.body instanceof FormData)
+      {
+        var copy = new FormData();
+        options.body.forEach(function (value, key) { copy.append(key, value); });
+        again = Object.assign({}, options, { body: copy });
+      }
+      return await manageFetch(url, again, true);
     }
     return JSON.parse(txt);
   }
@@ -1392,6 +1608,440 @@ async function manageDelete()
   manageReload();
 }
 
+/* ---------------- Services tab ----------------
+   The list of services comes from the database (modem_host.services), so this page knows nothing about
+   any RF mode. A button only writes a request; the service manager on the Pi carries it out. */
+var servicesTimer = null;
+var servicesBusy = {};      /* unit name -> true while a request for it is being carried out */
+
+/* Show the tab: load the list now and keep it fresh while the tab is open */
+function servicesInit()
+{
+  if (servicesTimer != null)
+    clearInterval(servicesTimer);
+  servicesReload(false);
+  servicesTimer = setInterval(function () { servicesReload(true); }, 3000);
+  servicesPowerLoad();
+  hostUpdLoad(false);
+}
+
+/* Build the power buttons from the list in the database */
+async function servicesPowerLoad()
+{
+  var box = document.getElementById('servicesPower');
+  var res = await manageFetch("data_query.php?command=getSystemActions");
+  if (res == null)
+    return;
+  box.replaceChildren();
+  res.actions.forEach(function (a)
+  {
+    var btn = document.createElement('button');
+    btn.textContent = a.label;
+    btn.title = a.description;
+    btn.onclick = function () { servicesPower(a, btn); };
+    box.appendChild(btn);
+  });
+}
+
+/* Ask for a power action of the Pi (after a confirmation) and then wait for the Pi to come back */
+async function servicesPower(a, btn)
+{
+  if (!confirm(a.confirm || (a.label + "?")))
+    return;
+  var form = new FormData();
+  form.append('unit', 'system');
+  form.append('action', a.action);
+  var buttons = document.querySelectorAll('#servicesPower button');
+  buttons.forEach(function (b) { b.disabled = true; });
+  var res = await manageFetch("data_query.php?command=serviceAction",
+                              { method: 'POST', body: form, headers: { 'X-OpenMT': '1' } });
+  if (res == null || res.error)
+  {
+    if (res != null)
+      alert(res.error);
+    buttons.forEach(function (b) { b.disabled = false; });
+    return;
+  }
+  var result = null;
+  for (var i = 0; i < 40 && result === null; i++)
+  {
+    await new Promise(function (r) { setTimeout(r, 500); });
+    try
+    {
+      var resp = await fetch("data_query.php?command=getServiceResult&id=" + res.id);
+      result = JSON.parse(await resp.text()).result;
+    }
+    catch (err)
+    {
+      result = null;
+    }
+  }
+  if (result !== 'ok')
+  {
+    alert(result === null ? "The service manager did not answer. Check that it is running on the Pi."
+                          : a.label + " was not done (" + result + ").");
+    buttons.forEach(function (b) { b.disabled = false; });
+    return;
+  }
+
+  if (servicesTimer != null)
+    clearInterval(servicesTimer);
+  servicesTimer = null;
+  var note = document.getElementById('servicesNote');
+  if (a.action != 'reboot')
+  {
+    note.textContent = a.label + ": done. The Pi is going down and this page will stop answering.";
+    return;
+  }
+  note.textContent = "Restarting. This page reloads when the Pi is back (about a minute).";
+  var wentDown = false;
+  for (var n = 0; n < 150; n++)             /* up to about 5 minutes */
+  {
+    await new Promise(function (r) { setTimeout(r, 2000); });
+    try
+    {
+      var r = await fetchWithTimeout("data_query.php?command=getServices", 3000);
+      if (wentDown && r.ok)
+      {
+        location.reload();
+        return;
+      }
+    }
+    catch (err)
+    {
+      wentDown = true;
+    }
+  }
+  note.textContent = "The Pi has not answered for 5 minutes. Check it.";
+}
+
+/* Read the list and draw it. quiet = true when the timer calls: no dialogs, the timer simply stops
+   if the session has ended. */
+async function servicesReload(quiet)
+{
+  var tab = document.getElementById('servicestab');
+  if (tab.offsetParent === null)         /* another tab is showing */
+  {
+    clearInterval(servicesTimer);
+    servicesTimer = null;
+    return;
+  }
+  var res;
+  if (quiet)
+  {
+    try
+    {
+      var resp = await fetch("data_query.php?command=getServices");
+      var txt = await resp.text();
+      if (txt == "unauthorized")
+      {
+        clearInterval(servicesTimer);
+        servicesTimer = null;
+        document.getElementById('servicesNote').textContent = "The login has ended. Open the tab again to log in.";
+        return;
+      }
+      res = JSON.parse(txt);
+    }
+    catch (err)
+    {
+      return;
+    }
+  }
+  else
+    res = await manageFetch("data_query.php?command=getServices");
+  if (res == null)
+    return;
+  servicesDraw(res);
+}
+
+/* ---------------- Host list updates (Services tab) ----------------
+   The lists that can be updated come from the database (modem_host.host_update_sections).  A button only
+   writes a request; updateHostsRun.php starts on the Pi and the page follows its log. */
+var hostUpdTimer = null;
+var hostUpdSelected = {};       /* section name -> true while its box is ticked */
+var hostUpdDrawn = "";          /* the list of sections drawn, so a tick is not lost when the page refreshes */
+
+/* Read the sections and the latest run and show them.  quiet = true when the timer calls: no dialogs, and the
+   timer stops if the session has ended. */
+async function hostUpdLoad(quiet)
+{
+  var tab = document.getElementById('servicestab');
+  if (tab.offsetParent === null)         /* another tab is showing */
+  {
+    hostUpdStop();
+    return;
+  }
+  var res;
+  if (quiet)
+  {
+    try
+    {
+      var resp = await fetch("data_query.php?command=getHostUpdates");
+      var txt = await resp.text();
+      if (txt == "unauthorized")
+      {
+        hostUpdStop();
+        return;
+      }
+      res = JSON.parse(txt);
+    }
+    catch (err)
+    {
+      return;
+    }
+  }
+  else
+    res = await manageFetch("data_query.php?command=getHostUpdates");
+  if (res == null)
+    return;
+  hostUpdDraw(res);
+  var running = res.run && (res.run.state == 'running' || res.run.state == 'queued');
+  if (running && hostUpdTimer == null)
+    hostUpdTimer = setInterval(function () { hostUpdLoad(true); }, 2000);
+  if (!running)
+    hostUpdStop();
+}
+
+/* Stop following a run */
+function hostUpdStop()
+{
+  if (hostUpdTimer != null)
+    clearInterval(hostUpdTimer);
+  hostUpdTimer = null;
+}
+
+/* Draw the check boxes, the status line and the log.  Every text from the database is set with textContent. */
+function hostUpdDraw(res)
+{
+  var box = document.getElementById('hostUpdBox');
+  var list = document.getElementById('hostUpdList');
+  var status = document.getElementById('hostUpdStatus');
+  var log = document.getElementById('hostUpdLog');
+  var running = res.run && (res.run.state == 'running' || res.run.state == 'queued');
+
+  box.style.display = (res.sections.length == 0) ? 'none' : 'block';
+
+  var key = res.sections.map(function (s) { return s.section + "|" + s.label + "|" + s.last_run + "|" + s.last_result; }).join("\n");
+  if (key != hostUpdDrawn)
+  {
+    hostUpdDrawn = key;
+    list.replaceChildren();
+    res.sections.forEach(function (sec)
+    {
+      var item = document.createElement('div');
+      item.className = 'hu_item';
+      var label = document.createElement('label');
+      var tick = document.createElement('input');
+      tick.type = 'checkbox';
+      tick.checked = !!hostUpdSelected[sec.section];
+      tick.dataset.section = sec.section;
+      tick.onchange = function () { hostUpdSelected[sec.section] = tick.checked; hostUpdButtons(running); };
+      label.appendChild(tick);
+      label.appendChild(document.createTextNode(" " + sec.label));
+      label.title = sec.description;
+      item.appendChild(label);
+      var last = document.createElement('span');
+      last.className = 'hu_last';
+      last.textContent = sec.last_run ? ("Last: " + sec.last_run + " - " + sec.last_result) : "Never updated";
+      item.appendChild(last);
+      list.appendChild(item);
+    });
+  }
+  hostUpdButtons(running);
+
+  if (res.run)
+  {
+    var names = {};
+    res.sections.forEach(function (s) { names[s.section] = s.label; });
+    var what = res.run.sections.split(',').map(function (n) { return names[n] || n; }).join(', ');
+    var text = {queued: "Starting", running: "Updating", done: "Finished", failed: "Finished with errors"}[res.run.state] || res.run.state;
+    status.textContent = text + ": " + what + (res.run.finished ? " (" + res.run.finished + ")" : "");
+    status.style.color = (res.run.state == 'failed') ? '#c00000' : 'black';
+    log.style.display = 'block';
+    var atEnd = (log.scrollTop + log.clientHeight >= log.scrollHeight - 4);
+    log.textContent = res.run.log || "";
+    if (atEnd)
+      log.scrollTop = log.scrollHeight;
+  }
+  else
+  {
+    status.textContent = "";
+    log.style.display = 'none';
+  }
+}
+
+/* Enable the buttons: nothing can be started while an update runs, and "selected" needs a tick */
+function hostUpdButtons(running)
+{
+  var any = false;
+  document.querySelectorAll('#hostUpdList input').forEach(function (b) { if (b.checked) any = true; });
+  document.getElementById('hostUpdSelected').disabled = !!running || !any;
+  document.getElementById('hostUpdAll').disabled = !!running;
+  document.querySelectorAll('#hostUpdList input').forEach(function (b) { b.disabled = !!running; });
+}
+
+/* Start an update of the ticked sections, or of all of them */
+async function hostUpdStart(all)
+{
+  var names = [];
+  document.querySelectorAll('#hostUpdList input').forEach(function (b) { if (b.checked) names.push(b.dataset.section); });
+  if (!all && names.length == 0)
+    return;
+  var form = new FormData();
+  form.append('sections', all ? 'all' : names.join(','));
+  hostUpdButtons(true);
+  var res = await manageFetch("data_query.php?command=startHostUpdate",
+                              { method: 'POST', body: form, headers: { 'X-OpenMT': '1' } });
+  if (res == null || res.error)
+  {
+    if (res != null)
+      alert(res.error);
+    hostUpdLoad(false);
+    return;
+  }
+  hostUpdLoad(true);
+  if (hostUpdTimer == null)
+    hostUpdTimer = setInterval(function () { hostUpdLoad(true); }, 2000);
+}
+
+/* Text and colour for a state reported by systemd */
+function servicesState(active)
+{
+  var map = {
+    active:       ['Running',  '#1a9a1a'],
+    activating:   ['Starting', '#e0a000'],
+    reloading:    ['Reloading', '#e0a000'],
+    deactivating: ['Stopping', '#e0a000'],
+    failed:       ['Failed',   '#d02020'],
+    inactive:     ['Stopped',  '#888888'],
+    'not-installed': ['Not installed', '#bbbbbb']
+  };
+  return map[active] || ['Unknown', '#888888'];
+}
+
+/* Build the table. Every text from the database is set with textContent. */
+function servicesDraw(res)
+{
+  var note = document.getElementById('servicesNote');
+  var grid = document.getElementById('servicesGrid');
+
+  if (!res.managerAlive)
+    note.textContent = "The service manager is not running on the Pi, so these states may be out of date and the buttons will not work.";
+  else if (res.services.length == 0)
+    note.textContent = "No services are listed in the database.";
+  else
+    note.textContent = "";
+
+  var table = document.createElement('table');
+  var head = table.createTHead().insertRow();
+  ['Service', 'State', 'Start at boot', 'Control'].forEach(function (t)
+  {
+    var th = document.createElement('th');
+    th.textContent = t;
+    head.appendChild(th);
+  });
+  var body = table.createTBody();
+
+  res.services.forEach(function (svc)
+  {
+    var busy = !!servicesBusy[svc.unit];
+    var row = body.insertRow();
+    var st = servicesState(svc.active);
+    var running = (svc.active == 'active' || svc.active == 'activating' || svc.active == 'reloading');
+    var missing = (svc.active == 'not-installed');
+
+    var c1 = row.insertCell();
+    var name = document.createElement('b');
+    name.textContent = svc.label;
+    c1.appendChild(name);
+    var desc = document.createElement('div');
+    desc.className = 'svc_desc';
+    desc.textContent = svc.description + (svc.description ? "  (" : "(") + svc.unit + ")";
+    c1.appendChild(desc);
+
+    var c2 = row.insertCell();
+    var dot = document.createElement('span');
+    dot.className = 'svc_dot';
+    dot.style.backgroundColor = st[1];
+    c2.appendChild(dot);
+    c2.appendChild(document.createTextNode(busy ? "Working..." : st[0]));
+
+    var c3 = row.insertCell();
+    var canToggle = !missing && (svc.enabled == 'enabled' || svc.enabled == 'enabled-runtime' || svc.enabled == 'disabled');
+    if (canToggle)
+    {
+      var box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = (svc.enabled != 'disabled');
+      box.disabled = busy;
+      box.title = "Start this service when the Pi starts";
+      box.onchange = function () { servicesAction(svc, box.checked ? 'enable' : 'disable'); };
+      c3.appendChild(box);
+    }
+    else
+      c3.appendChild(document.createTextNode((missing || svc.enabled == 'unknown') ? "-" : svc.enabled));
+
+    var c4 = row.insertCell();
+    [['Start', 'start', running], ['Stop', 'stop', !running && svc.active != 'failed'], ['Restart', 'restart', !running]].forEach(function (b)
+    {
+      var btn = document.createElement('button');
+      btn.textContent = b[0];
+      btn.disabled = busy || missing || b[2];
+      btn.onclick = function () { servicesAction(svc, b[1]); };
+      c4.appendChild(btn);
+    });
+  });
+
+  grid.replaceChildren(table);
+}
+
+/* Send one request and wait (up to 40 seconds) until the service manager has carried it out */
+async function servicesAction(svc, action)
+{
+  if (action == 'stop' && !confirm("Stop " + svc.label + "?\n\nServices that need it will stop as well."))
+  {
+    servicesReload(false);
+    return;
+  }
+  var form = new FormData();
+  form.append('unit', svc.unit);
+  form.append('action', action);
+  servicesBusy[svc.unit] = true;
+  servicesReload(true);
+  var res = await manageFetch("data_query.php?command=serviceAction",
+                              { method: 'POST', body: form, headers: { 'X-OpenMT': '1' } });
+  if (res == null || res.error)
+  {
+    if (res != null)
+      alert(res.error);
+    delete servicesBusy[svc.unit];
+    servicesReload(false);
+    return;
+  }
+
+  var result = null;
+  for (var i = 0; i < 80 && result === null; i++)
+  {
+    await new Promise(function (r) { setTimeout(r, 500); });
+    try
+    {
+      var resp = await fetch("data_query.php?command=getServiceResult&id=" + res.id);
+      var data = JSON.parse(await resp.text());
+      result = data.result;
+    }
+    catch (err)
+    {
+      result = null;
+    }
+  }
+  delete servicesBusy[svc.unit];
+  if (result === null)
+    alert("The service manager did not answer. Check that it is running on the Pi.");
+  else if (result != 'ok')
+    alert(svc.label + ": " + action + " was not done (" + result + ").");
+  servicesReload(false);
+}
+
 /* Show "n more" / "n above" under a section when part of it is scrolled out of sight */
 function updateModeHint(wrap)
 {
@@ -1520,6 +2170,16 @@ async function updateGatewayStatus()
 {
   var linked = [];
   var l = 0;
+  /* A mode section may have been built after the gateway list: add the link control of those still missing */
+  if (activeGateways != "" && activeGateways != "none")
+  {
+    var gws = activeGateways.split(',');
+    for (var g=0;g<gws.length;g++)
+    {
+      if (!reflListDone[gws[g]])
+        getReflList(gws[g]);
+    }
+  }
   if (activeGateways != "")
   {
     var url = "data_query.php?command=getLinkedReflectors&modem_name="+modemName;
@@ -1701,6 +2361,12 @@ async function getConfig()
         station_longitude = fields[1];
         document.getElementById('station_longitude').value = Number(station_longitude);
       }
+
+      if (fields[0] == 'location')
+        document.getElementById('station_location').value = fields[1];
+
+      if (fields[0] == 'description')
+        document.getElementById('station_description').value = fields[1];
     }
     if (Number(station_latitude) == 0.0 && Number(station_longitude) == 0.0)
       map.setView([Number(station_latitude), Number(station_longitude)], 1);
@@ -2064,13 +2730,55 @@ async function buildHistoryTable()
   }
 }
 
+/* Set while a request is waiting for the person to log in again; called with
+   true when the login worked and false when the dialog was closed */
+var loginWaiter = null;
+
+/* Open the login dialog, with an optional notice (for example that the session
+   has expired) above the fields */
+function showLogin(message)
+{
+  var note = document.getElementById('loginNote');
+  note.textContent = message || '';
+  note.style.display = message ? 'block' : 'none';
+  document.getElementById('fpassword').value = '';
+  document.getElementById('id01').style.display = 'block';
+  var field = document.getElementById('fusername').value ? 'fpassword' : 'fusername';
+  setTimeout(function () { document.getElementById(field).focus(); }, 100);
+}
+
+/* Close the login dialog; a request that was waiting for the login is given up */
+function closeLogin()
+{
+  document.getElementById('id01').style.display = 'none';
+  if (loginWaiter)
+  {
+    var waiter = loginWaiter;
+    loginWaiter = null;
+    waiter(false);
+  }
+}
+
+/* The admin session has timed out: ask for the login again without leaving the
+   page.  Resolves to true when the person logged in, false when they gave up. */
+function loginAgain()
+{
+  authenticated = false;
+  return new Promise(function (resolve)
+  {
+    if (loginWaiter)
+      loginWaiter(false);
+    loginWaiter = resolve;
+    showLogin("Your session has expired. Please log in again.");
+  });
+}
+
 /* Check if user authenticated for admin functions */
 function checkAuth()
 {
   if (!authenticated)
   {
-    document.getElementById('id01').style.display='block';
-    setTimeout("document.getElementById('fpassword').focus()", 500);
+    showLogin("");
   }
   else
     openPage('tablink', 'tabcontent', 'settingstab', document.getElementById('Settings'), 'green');
@@ -2088,16 +2796,41 @@ async function doAuthentication()
     method: 'POST',
     body: formData
   });
-  if (!resp.ok) return;
+  if (!resp.ok)
+  {
+    showLoginNote("The login request failed (" + resp.status + ").");
+    return;
+  }
   var tmp = await resp.text();
   if (tmp == "authfailed")
+  {
     authenticated = false;
+    showLoginNote("Login failed. Check the user name and password.");
+    document.getElementById('fpassword').value = '';
+    document.getElementById('fpassword').focus();
+  }
   if (tmp == "authpassed")
   {
     authenticated = true;
     document.getElementById('id01').style.display='none';
-    openPage('tablink', 'tabcontent', 'settingstab', document.getElementById('Settings'), 'green');
+    if (loginWaiter)
+    {
+      /* a request was waiting: carry on with it, and stay on the same page */
+      var waiter = loginWaiter;
+      loginWaiter = null;
+      waiter(true);
+    }
+    else
+      openPage('tablink', 'tabcontent', 'settingstab', document.getElementById('Settings'), 'green');
   }
+}
+
+/* Show a message above the login fields */
+function showLoginNote(message)
+{
+  var note = document.getElementById('loginNote');
+  note.textContent = message;
+  note.style.display = 'block';
 }
 
 /* Save modem configuraion */
@@ -2157,10 +2890,13 @@ async function saveGeneral()
   var newCall = document.getElementById('callsign').value;
   var newLatitude = document.getElementById('station_latitude').value;
   var newLongitude = document.getElementById('station_longitude').value;
+  var newLocation = document.getElementById('station_location').value;
+  var newDescription = document.getElementById('station_description').value;
   var moduleName = "main"; // this may change if multiple modems are used.
 
   var url = "data_query.php?command=saveGeneral&modem_name="+modemName+"&moduleName="+moduleName+"&title="+newTitle+"&callsign="+newCall;
   url += "&latitude="+newLatitude+"&longitude="+newLongitude;
+  url += "&location="+encodeURIComponent(newLocation)+"&description="+encodeURIComponent(newDescription);
   var resp = await fetch(url);
   if (!resp.ok) return;
   var tmp = await resp.text();
@@ -2213,13 +2949,30 @@ async function saveAuth()
 }
 
 /* Load reflector list for give mode type and add to drop down */
+/* Modes whose link control has been looked at (a reflector list, a text box or none) */
+var reflListDone = {};
+
 async function getReflList(reflType)
 {
+  if (!document.getElementById(reflType+"_section"))
+    return;
+  reflListDone[reflType] = true;
   var url = "data_query.php?command=getReflectors&refl_type="+reflType;
   var resp = await fetch(url);
   if (!resp.ok) return;
   var tmp = await resp.text();
-  if (tmp == "none" || tmp == "failed") return;
+  if (tmp == "none" || tmp == "failed")
+  {
+    /* No reflector table for this mode: the database may describe a free text link target instead */
+    var resp2 = await fetch("data_query.php?command=getLinkInput&modem_name="+modemName+"&mode="+reflType);
+    if (!resp2.ok) return;
+    var tmp2 = await resp2.text();
+    if (tmp2 == "none" || tmp2 == "failed" || document.getElementById(reflType+'net')) return;
+    var parts = tmp2.split('\x1D');
+    document.getElementById(reflType+"_section").appendChild(createLinkInput(reflType, parts[0], parts.length > 1 ? parts[1] : ""));
+    return;
+  }
+  if (document.getElementById(reflType+'net')) return;
   document.getElementById(reflType+"_section").insertAdjacentHTML('beforeend', createReflDropDown(reflType));
   var list = document.getElementById(reflType+'net');
   var showModules = false;
@@ -2253,7 +3006,20 @@ async function reflConnect(reflType)
   var link = document.getElementById(reflType+'link').textContent;
   action = "unlink";
   if (link == "Link")
+  {
+    var box = document.getElementById(reflType+'net');
+    if (box.dataset.pattern !== undefined)
+    {
+      /* free text link target: checked against the pattern the database gave */
+      name = name.trim();
+      if (!new RegExp(box.dataset.pattern).test(name))
+      {
+        alert("Enter a valid "+(box.dataset.label || "link target")+".");
+        return;
+      }
+    }
     action = "link,"+name+","+mod;
+  }
   url = "data_query.php?command=dashbCom&modem_name="+modemName+"&action=reflLink"+reflType+"&parameter="+action;
 
   document.body.style.cursor = 'wait';
@@ -2277,6 +3043,44 @@ async function reflConnect(reflType)
     document.getElementById(reflType+'_linkstat').innerHTML = "Not Linked";
   }
   document.body.style.cursor = 'default';
+}
+
+/* Create the link control for a mode that takes a typed target (node number, callsign ...): label and pattern come from the database */
+function createLinkInput(reflType, label, pattern)
+{
+  var span = document.createElement('span');
+  span.className = 'refl_dropdown';
+  span.id = reflType+'_refl';
+  span.appendChild(document.createElement('br'));
+
+  var lab = document.createElement('label');
+  lab.htmlFor = reflType+'net';
+  lab.textContent = (label || "Link to")+": ";
+  span.appendChild(lab);
+
+  var box = document.createElement('input');
+  box.type = 'text';
+  box.id = reflType+'net';
+  box.maxLength = 30;
+  box.size = 14;
+  box.dataset.label = label || "";
+  box.dataset.pattern = pattern || "^.+$";
+  span.appendChild(box);
+
+  var mod = document.createElement('select');
+  mod.id = reflType+'netmod';
+  mod.style.display = 'none';
+  mod.appendChild(new Option("", ""));
+  span.appendChild(mod);
+
+  var btn = document.createElement('button');
+  btn.id = reflType+'link';
+  btn.className = 'linkto';
+  btn.textContent = "Link";
+  btn.addEventListener('click', function() { reflConnect(reflType); });
+  span.appendChild(document.createTextNode(" "));
+  span.appendChild(btn);
+  return span;
 }
 
 /* Create and setup empty reflector drop down lists */
@@ -2351,25 +3155,26 @@ function addMessage(source, message)
 
 <!-- login dialog -->
 <div id="id01" class="modal">
-<form class="modal-content animate" action="" method="post">
+<form class="modal-content animate" action="" method="post" onsubmit="doAuthentication(); return false;">
 <div class="imgcontainer">
-<span onclick="document.getElementById('id01').style.display='none'" class="close" title="Close Modal">&times;</span>
+<span onclick="closeLogin()" class="close" title="Close Modal">&times;</span>
 </div>
 <div class="container">
+<div id="loginNote" style="display:none; margin-bottom:10px; padding:8px; background-color:#fff3cd; color:#664d03; border:1px solid #ffecb5;"></div>
 <label for="uname"><b>Username</b></label>
 <input id="fusername" type="text" placeholder="Enter Username" name="uname" required>
 
 <label for="psw"><b>Password</b></label>
 <input id="fpassword" type="password" placeholder="Enter Password" name="psw" required>
 
-<button id="loginButton" class="login" type="button" onclick="doAuthentication()">Login</button>
+<button id="loginButton" class="login" type="submit">Login</button>
 <!--  <label>
 <input type="checkbox" checked="checked" name="remember"> Remember me
 </label> -->
 </div>
 
 <div class="container" style="background-color:#f1f1f1">
-<button type="button" onclick="document.getElementById('id01').style.display='none'" class="cancelbtn">Cancel</button>
+<button type="button" onclick="closeLogin()" class="cancelbtn">Cancel</button>
 </div>
 </form>
 </div>
@@ -2489,6 +3294,7 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 <button class='stablink' onclick="openPage('stablink', 'genset', 'modetab', this, 'lightblue')">Modes</button>
 <button class='stablink' style='width:20%' onclick="openPage('stablink', 'genset', 'misctab', this, '#d9b3ff')">Miscellaneous</button>
 <button class='stablink' style='width:17%' onclick="openPage('stablink', 'genset', 'managetab', this, '#f4b6b6')">Manage Data</button>
+<button class='stablink' style='width:15%' onclick="openPage('stablink', 'genset', 'servicestab', this, '#b9e3f5')">Services</button>
 </div>
 <div id='generaltab' class='genset'>
 <span class='genSettings'>
@@ -2500,7 +3306,11 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 <label for='station_latitude'>Latitude:</label>
 <input id='station_latitude' type='number' step='any' value='0.0'><br><br>
 <label for='station_longitude'>Longitude:</label>
-<input id='station_longitude' type='number' step='any' value='0.0'>
+<input id='station_longitude' type='number' step='any' value='0.0'><br><br>
+<label for='station_location'>Location:</label>
+<input id='station_location' type='text' size='20' maxlength='20'><br><br>
+<label for='station_description'>Description:</label>
+<input id='station_description' type='text' size='19' maxlength='19'>
 </span>
 <button class='genSaveButton' onclick='saveGeneral()'>Save</button>
 <span class='settingsauth'>
@@ -2563,6 +3373,23 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 <div id='modetab' class='genset'>
 </div>
 <div id='misctab' class='genset'>
+</div>
+<div id='servicestab' class='genset'>
+<div class='svc_wrap'>
+<div class='svc_note' id='servicesNote'></div>
+<div class='svc_power' id='servicesPower'></div>
+<div class='hu_box' id='hostUpdBox' style='display:none'>
+<div class='hu_title'>Update host lists</div>
+<div class='hu_list' id='hostUpdList'></div>
+<div class='hu_buttons'>
+<button id='hostUpdSelected' onclick="hostUpdStart(false)">Update selected</button>
+<button id='hostUpdAll' onclick="hostUpdStart(true)">Update all</button>
+</div>
+<div class='hu_status' id='hostUpdStatus'></div>
+<pre class='hu_log' id='hostUpdLog' style='display:none'></pre>
+</div>
+<div class='svc_grid' id='servicesGrid'></div>
+</div>
 </div>
 <div id='managetab' class='genset'>
 <div class='manage_wrap'>

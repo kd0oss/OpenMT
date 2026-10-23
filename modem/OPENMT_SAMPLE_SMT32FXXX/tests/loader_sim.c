@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  loader_sim.c - runs loader/loader_core.c on the PC.
  *
@@ -37,6 +38,17 @@ static int lineErrorAt = -1;                /* input index to flag as a line err
 
 #define CHECK(c, ...) do { if (!(c)) { failures++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
 
+/*
+ * ld_autobaud()
+ *
+ * Test stand-in for the baud rate detection.  In pty mode it reads bytes
+ * from the pty until a 0x7F arrives; otherwise it skips the 0x7F at the
+ * start of the test's input.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_autobaud(void)
 {
     if (mode_pty)
@@ -57,6 +69,18 @@ void ld_autobaud(void)
     }
 }
 
+/*
+ * ld_getc()
+ *
+ * Test stand-in for reading a byte from the host.  In pty mode it reads from
+ * the pty.  Otherwise it takes the next byte of the prepared input, returns
+ * -1 at the position chosen for a simulated line error, and ends the run
+ * when the input is used up.
+ *
+ * Parameters: none.
+ *
+ * Returns: The byte, or -1 for the simulated line error.
+ */
 int ld_getc(void)
 {
     uint8_t b;
@@ -81,6 +105,17 @@ int ld_getc(void)
     return inq[inPos++];
 }
 
+/*
+ * ld_putc()
+ *
+ * Test stand-in for sending a byte to the host: writes it to the pty or
+ * collects it in the output buffer.
+ *
+ * Parameters:
+ *   c - Byte to send.
+ *
+ * Returns: nothing.
+ */
 void ld_putc(uint8_t c)
 {
     if (mode_pty)
@@ -96,9 +131,37 @@ void ld_putc(uint8_t c)
     }
 }
 
+/*
+ * ld_flush()
+ *
+ * Test stand-in for waiting until the output is sent; does nothing.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_flush(void) {}
+/*
+ * ld_kick()
+ *
+ * Test stand-in for feeding the watchdog; does nothing.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_kick(void) {}
 
+/*
+ * ld_flash_erase_page()
+ *
+ * Test stand-in for erasing a page of the simulated flash.
+ *
+ * Parameters:
+ *   page - Page number.
+ *
+ * Returns: 0 on success, -1 if the page does not exist.
+ */
 int ld_flash_erase_page(uint32_t page)
 {
     if (page >= LD_TOTAL_PAGES)
@@ -109,6 +172,20 @@ int ld_flash_erase_page(uint32_t page)
     return 0;
 }
 
+/*
+ * ld_flash_program()
+ *
+ * Test stand-in for programming the simulated flash.  Like real flash it can
+ * only clear bits, so programming over a byte that does not already have the
+ * needed bits set fails.
+ *
+ * Parameters:
+ *   addr - Flash address.
+ *   d    - Data to program.
+ *   len  - Number of bytes.
+ *
+ * Returns: 0 on success, -1 on error.
+ */
 int ld_flash_program(uint32_t addr, const uint8_t *d, uint32_t len)
 {
     uint32_t i;
@@ -126,6 +203,18 @@ int ld_flash_program(uint32_t addr, const uint8_t *d, uint32_t len)
     return 0;
 }
 
+/*
+ * ld_flash_read()
+ *
+ * Test stand-in for reading memory: reads from the simulated RAM or flash.
+ *
+ * Parameters:
+ *   addr - Address to read from.
+ *   d    - Receives the bytes.
+ *   len  - Number of bytes.
+ *
+ * Returns: nothing.
+ */
 void ld_flash_read(uint32_t addr, uint8_t *d, uint32_t len)
 {
     if (addr >= LD_RAM_BASE)
@@ -138,12 +227,32 @@ void ld_flash_read(uint32_t addr, uint8_t *d, uint32_t len)
     }
 }
 
+/*
+ * ld_marker_valid()
+ *
+ * Test stand-in: tells whether the simulated "application complete" marker
+ * is set (erased).
+ *
+ * Parameters: none.
+ *
+ * Returns: 1 if the marker is set, 0 if not.
+ */
 int ld_marker_valid(void)
 {
     return flash[LD_MARKER_ADDR - LD_FLASH_BASE] == 0xFF &&
            flash[LD_MARKER_ADDR - LD_FLASH_BASE + 1] == 0xFF;
 }
 
+/*
+ * ld_marker_invalidate()
+ *
+ * Test stand-in: clears the marker by programming zero over it, if it is
+ * set.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 on success, non-zero on error.
+ */
 int ld_marker_invalidate(void)
 {
     static const uint8_t zero[2] = { 0, 0 };
@@ -151,11 +260,32 @@ int ld_marker_invalidate(void)
     return ld_marker_valid() ? ld_flash_program(LD_MARKER_ADDR, zero, 2) : 0;
 }
 
+/*
+ * ld_marker_commit()
+ *
+ * Test stand-in: sets the marker again by erasing its page, if it is
+ * cleared.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 on success, non-zero on error.
+ */
 int ld_marker_commit(void)
 {
     return ld_marker_valid() ? 0 : ld_flash_erase_page((LD_MARKER_ADDR - LD_FLASH_BASE) / LD_PAGE_SIZE);
 }
 
+/*
+ * ld_launch()
+ *
+ * Test stand-in for starting the application.  In pty mode it writes the
+ * flash to a dump file (if one was named), reports whether the application
+ * is valid and exits.  Otherwise it records the launch and ends the run.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_launch(void)
 {
     if (mode_pty)
@@ -180,24 +310,65 @@ void ld_launch(void)
 
 /* ------------------------------------------------------------------ */
 /* Self test                                                          */
-/* ------------------------------------------------------------------ */
+/*
+ * put()
+ *
+ * Appends bytes to the input prepared for the loader under test.
+ *
+ * Parameters:
+ *   p - Bytes to add.
+ *   n - Number of bytes.
+ *
+ * Returns: nothing.
+ */
 static void put(const void *p, unsigned n)
 {
     memcpy(inq + inLen, p, n);
     inLen += n;
 }
 
+/*
+ * putb()
+ *
+ * Appends one byte to the loader's test input.
+ *
+ * Parameters:
+ *   b - Byte to add.
+ *
+ * Returns: nothing.
+ */
 static void putb(uint8_t b)
 {
     put(&b, 1);
 }
 
+/*
+ * cmd()
+ *
+ * Appends a command code and its complement to the loader's test input.
+ *
+ * Parameters:
+ *   c - Command code.
+ *
+ * Returns: nothing.
+ */
 static void cmd(uint8_t c)
 {
     putb(c);
     putb((uint8_t)~c);
 }
 
+/*
+ * addr()
+ *
+ * Appends a 4-byte big-endian address and its XOR checksum to the loader's
+ * test input.
+ *
+ * Parameters:
+ *   a - Address.
+ *
+ * Returns: nothing.
+ */
 static void addr(uint32_t a)
 {
     uint8_t b[5] = { (uint8_t)(a >> 24), (uint8_t)(a >> 16), (uint8_t)(a >> 8), (uint8_t)a, 0 };
@@ -206,6 +377,20 @@ static void addr(uint32_t a)
     put(b, 5);
 }
 
+/*
+ * writeBlock()
+ *
+ * Appends a complete Write Memory command (command, address, data and
+ * checksum) to the loader's test input.
+ *
+ * Parameters:
+ *   a     - Flash address.
+ *   d     - Data to write.
+ *   len   - Number of bytes (1 to 256).
+ *   badCs - Non-zero to send a wrong checksum.
+ *
+ * Returns: nothing.
+ */
 static void writeBlock(uint32_t a, const uint8_t *d, unsigned len, int badCs)
 {
     uint8_t x = (uint8_t)(len - 1);
@@ -222,6 +407,18 @@ static void writeBlock(uint32_t a, const uint8_t *d, unsigned len, int badCs)
     putb(badCs ? (uint8_t)(x ^ 0x55) : x);
 }
 
+/*
+ * erasePages()
+ *
+ * Appends a complete Erase command for a list of pages to the loader's test
+ * input.
+ *
+ * Parameters:
+ *   pg - Page numbers.
+ *   n  - Number of pages.
+ *
+ * Returns: nothing.
+ */
 static void erasePages(const uint8_t *pg, unsigned n)
 {
     uint8_t x = (uint8_t)(n - 1);
@@ -237,6 +434,16 @@ static void erasePages(const uint8_t *pg, unsigned n)
     putb(x);
 }
 
+/*
+ * begin()
+ *
+ * Starts a new test case: clears the input and output buffers and the line
+ * error position, and queues the 0x7F that starts a session.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void begin(void)
 {
     inLen = 0;
@@ -247,6 +454,16 @@ static void begin(void)
     putb(0x7F);
 }
 
+/*
+ * run()
+ *
+ * Runs the loader (ld_run) on the prepared input until the input ends or the
+ * loader launches the application.
+ *
+ * Parameters: none.
+ *
+ * Returns: 1 if the input ran out, 2 if the loader launched the application.
+ */
 static int run(void)
 {
     int r = setjmp(endOfInput);
@@ -258,11 +475,32 @@ static int run(void)
     return r;
 }
 
+/*
+ * outIs()
+ *
+ * Compares the loader's output with the expected bytes.
+ *
+ * Parameters:
+ *   want - Expected bytes.
+ *   n    - Number of expected bytes.
+ *
+ * Returns: 1 if the output is exactly the expected bytes, 0 otherwise.
+ */
 static int outIs(const uint8_t *want, unsigned n)
 {
     return outLen == n && memcmp(outq, want, n) == 0;
 }
 
+/*
+ * freshFlash()
+ *
+ * Resets the simulated flash to erased (with a 16-byte loader area filled
+ * in) and clears the simulated RAM.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void freshFlash(void)
 {
     memset(flash, 0xFF, sizeof(flash));
@@ -271,6 +509,19 @@ static void freshFlash(void)
     memset(flash, 0xA5, 16);
 }
 
+/*
+ * selftest()
+ *
+ * Runs the loader through its commands and checks the replies: Get, Get
+ * Version, Get ID, Read Memory (including refused ranges), Write Memory
+ * (including bad checksum, wrong address and writes over the loader), Erase
+ * (global, page list and refused loader pages), the completion marker, Go
+ * (valid and invalid applications) and line errors.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void selftest(void)
 {
     uint8_t d[8] = { 0x00, 0x80, 0x00, 0x20, 0x01, 0x19, 0x00, 0x08 };  /* sp, pc */
@@ -486,7 +737,20 @@ static void selftest(void)
     CHECK(!ld_app_valid(), "sp outside RAM accepted");
 }
 
-/* ------------------------------------------------------------------ */
+/*
+ * main()
+ *
+ * With the argument "pty" it runs the loader against a pseudo terminal so a
+ * real flashing tool can talk to it, printing the pty name and optionally
+ * dumping the flash when the application is launched.  Without arguments it
+ * runs the self test.
+ *
+ * Parameters:
+ *   argc - Argument count.
+ *   argv - Argument vector: "pty" and an optional flash dump file name.
+ *
+ * Returns: 0 if all checks passed, 1 otherwise.
+ */
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "pty") == 0)

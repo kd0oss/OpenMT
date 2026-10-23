@@ -58,6 +58,23 @@ function connect_db()
 
 $mysql = connect_db();
 
+/*
+ * hostEsc()
+ *
+ * Escapes a value taken from a downloaded host list so it is safe inside a
+ * quoted SQL string.
+ *
+ * $value - The text to escape.
+ *
+ * Returns the escaped text.
+ */
+function hostEsc($value)
+{
+    global $mysql;
+
+    return mysqli_real_escape_string($mysql, (string)$value);
+}
+
 function getHostFile($file)
 {
     $user_agent = "Pi-Star_20260101";
@@ -107,12 +124,12 @@ function updateP25Hosts()
             if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
             {
                 $fields = explode("\t", $lines[$x]);
-                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'P25' AND Nick = '".$fields[0]."'";
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'P25' AND Nick = '\".hostEsc($fields[0]).\"'";
                 $result = mysqli_query($mysql, $query);
                 if (mysqli_num_rows($result) > 0)
-                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$fields[1]."', port = ".$fields[2]." WHERE Nick = '".$fields[0]."' AND refl_type = 'P25'";
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '\".hostEsc($fields[1]).\"', port = ".(int)$fields[2]." WHERE Nick = '\".hostEsc($fields[0]).\"' AND refl_type = 'P25'";
                 else
-                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$fields[0]."', ip4 = '".$fields[1]."', port = ".$fields[2].", refl_type = 'P25'";
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '\".hostEsc($fields[0]).\"', ip4 = '\".hostEsc($fields[1]).\"', port = ".(int)$fields[2].", refl_type = 'P25'";
                 mysqli_free_result($result);
 //                echo $query."\n";
                 mysqli_query($mysql, $query);
@@ -145,9 +162,9 @@ function updateNXDNHosts()
                 $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'NXDN' AND Nick = '".$nick."'";
                 $result = mysqli_query($mysql, $query);
                 if (mysqli_num_rows($result) > 0)
-                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$ip4."', port = ".$fields[2]." WHERE Nick = '".$nick."' AND refl_type = 'NXDN'";
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$ip4."', port = ".(int)$fields[2]." WHERE Nick = '".$nick."' AND refl_type = 'NXDN'";
                 else
-                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$nick."', ip4 = '".$ip4."', port = ".$fields[2].", refl_type = 'NXDN'";
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$nick."', ip4 = '".$ip4."', port = ".(int)$fields[2].", refl_type = 'NXDN'";
                 mysqli_free_result($result);
                 mysqli_query($mysql, $query);
             }
@@ -170,12 +187,12 @@ function updateDSTARHosts()
             if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
             {
                 $fields = explode("\t", $lines[$x]);
-                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '".$fields[0]."'";
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '\".hostEsc($fields[0]).\"'";
                 $result = mysqli_query($mysql, $query);
                 if (mysqli_num_rows($result) > 0)
-                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$fields[1]."', port = 0 WHERE Nick = '".$fields[0]."' AND refl_type = 'DSTAR'";
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '\".hostEsc($fields[1]).\"', port = 0 WHERE Nick = '\".hostEsc($fields[0]).\"' AND refl_type = 'DSTAR'";
                 else
-                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$fields[0]."', ip4 = '".$fields[1]."', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '\".hostEsc($fields[0]).\"', ip4 = '\".hostEsc($fields[1]).\"', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
                 mysqli_free_result($result);
           //      echo $query."\n";
                 mysqli_query($mysql, $query);
@@ -193,12 +210,12 @@ function updateDSTARHosts()
             if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
             {
                 $fields = explode("\t", $lines[$x]);
-                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '".$fields[0]."'";
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '\".hostEsc($fields[0]).\"'";
                 $result = mysqli_query($mysql, $query);
                 if (mysqli_num_rows($result) > 0)
-                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$fields[1]."', port = 0 WHERE Nick = '".$fields[0]."' AND refl_type = 'DSTAR'";
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '\".hostEsc($fields[1]).\"', port = 0 WHERE Nick = '\".hostEsc($fields[0]).\"' AND refl_type = 'DSTAR'";
                 else
-                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$fields[0]."', ip4 = '".$fields[1]."', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '\".hostEsc($fields[0]).\"', ip4 = '\".hostEsc($fields[1]).\"', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
                 mysqli_free_result($result);
         //        echo $query."\n";
                 mysqli_query($mysql, $query);
@@ -216,12 +233,12 @@ function updateDSTARHosts()
             if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
             {
                 $fields = explode("\t", $lines[$x]);
-                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '".$fields[0]."'";
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DSTAR' AND Nick = '\".hostEsc($fields[0]).\"'";
                 $result = mysqli_query($mysql, $query);
                 if (mysqli_num_rows($result) > 0)
-                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$fields[1]."', port = 0 WHERE Nick = '".$fields[0]."' AND refl_type = 'DSTAR'";
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '\".hostEsc($fields[1]).\"', port = 0 WHERE Nick = '\".hostEsc($fields[0]).\"' AND refl_type = 'DSTAR'";
                 else
-                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$fields[0]."', ip4 = '".$fields[1]."', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '\".hostEsc($fields[0]).\"', ip4 = '\".hostEsc($fields[1]).\"', port = 0, refl_type = 'DSTAR', has_modules = 'yes'";
                 mysqli_free_result($result);
       //          echo $query."\n";
                 mysqli_query($mysql, $query);
@@ -245,12 +262,12 @@ function updateM17Hosts()
             if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
             {
                 $fields = explode("\t", $lines[$x]);
-                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'M17' AND Nick = '".$fields[0]."'";
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'M17' AND Nick = '\".hostEsc($fields[0]).\"'";
                 $result = mysqli_query($mysql, $query);
                 if (mysqli_num_rows($result) > 0)
-                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$fields[1]."', port = ".$fields[2]." WHERE Nick = '".$fields[0]."' AND refl_type = 'M17'";
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '\".hostEsc($fields[1]).\"', port = ".(int)$fields[2]." WHERE Nick = '\".hostEsc($fields[0]).\"' AND refl_type = 'M17'";
                 else
-                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$fields[0]."', ip4 = '".$fields[1]."', port = ".$fields[2].", refl_type = 'M17', has_modules = 'yes'";
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '\".hostEsc($fields[0]).\"', ip4 = '\".hostEsc($fields[1]).\"', port = ".(int)$fields[2].", refl_type = 'M17', has_modules = 'yes'";
                 mysqli_free_result($result);
               //  echo $query."\n";
                 mysqli_query($mysql, $query);
@@ -276,12 +293,12 @@ function updateDMRHosts()
             if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
             {
                 $fields = explode("\t", $lines[$x]);
-                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DMR' AND Nick = '".$fields[0]."'";
+                $query = "SELECT * FROM modem_host.reflectors WHERE refl_type = 'DMR' AND Nick = '\".hostEsc($fields[0]).\"'";
                 $result = mysqli_query($mysql, $query);
                 if (mysqli_num_rows($result) > 0)
-                    $query = "UPDATE modem_host.reflectors SET ip4 = '".$fields[1]."', port = ".$fields[2]." WHERE Nick = '".$fields[0]."' AND refl_type = 'DMR'";
+                    $query = "UPDATE modem_host.reflectors SET ip4 = '\".hostEsc($fields[1]).\"', port = ".(int)$fields[2]." WHERE Nick = '\".hostEsc($fields[0]).\"' AND refl_type = 'DMR'";
                 else
-                    $query = "INSERT INTO modem_host.reflectors SET Nick = '".$fields[0]."', ip4 = '".$fields[1]."', port = ".$fields[2].", refl_type = 'DMR'";
+                    $query = "INSERT INTO modem_host.reflectors SET Nick = '\".hostEsc($fields[0]).\"', ip4 = '\".hostEsc($fields[1]).\"', port = ".(int)$fields[2].", refl_type = 'DMR'";
                 mysqli_free_result($result);
               //  echo $query."\n";
                 mysqli_query($mysql, $query);
@@ -305,7 +322,7 @@ function updateDMRIds()
             if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
             {
                 $fields = explode("\t", $lines[$x]);
-                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '".$fields[0]."', Callsign = '".$fields[1]."', Name = '".$fields[2]."'";
+                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '\".hostEsc($fields[0]).\"', Callsign = '\".hostEsc($fields[1]).\"', Name = '\".hostEsc($fields[2]).\"'";
                 mysqli_query($mysql, $query);
                 echo ".";
             }
@@ -322,7 +339,7 @@ function updateDMRIds()
             if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
             {
                 $fields = explode(",", $lines[$x]);
-                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '".$fields[0]."', Callsign = '".$fields[1]."', Name = '".substr($fields[2], 0, 40)."'";
+                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '\".hostEsc($fields[0]).\"', Callsign = '\".hostEsc($fields[1]).\"', Name = '".hostEsc(substr($fields[2], 0, 40))."'";
                 mysqli_query($mysql, $query);
                 echo ".";
             }

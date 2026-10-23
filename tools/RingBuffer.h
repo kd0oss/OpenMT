@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 #ifndef RINGBUFFER_H
 #define RINGBUFFER_H
 

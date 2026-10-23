@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -20,6 +21,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <dsp_tools.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,20 +39,14 @@ extern "C" {
 #define NXDN_FILTER_SPAN            6U      /* symbols each side of the pulse */
 #define NXDN_FILTER_TAPS            (2U * NXDN_FILTER_SPAN * NXDN_SAMPLES_PER_SYMBOL + 1U)
 
-#define NXDN_SHAPE_RRC              0U
-#define NXDN_SHAPE_RC               1U
+#define NXDN_SHAPE_RRC              FSK4_SHAPE_RRC
+#define NXDN_SHAPE_RC               FSK4_SHAPE_RC
 
 /* Outer symbol (+-3) amplitude for 1.05 kHz deviation, in counts at txLevel 50 */
 #define NXDN_LEVEL_OUTER            735.0F
 
 /* Transmit */
-typedef struct
-{
-    float sym[NXDN_FILTER_SPAN * 2U + 1U];  /* newest first */
-    float level;                            /* amplitude of the +-3 symbol */
-    float taps[NXDN_FILTER_TAPS];
-    uint8_t shape;
-} NxdnTx;
+typedef Fsk4Tx NxdnTx;
 
 void nxdnTxInit(NxdnTx* tx, float level, uint8_t shape);
 void nxdnTxSetLevel(NxdnTx* tx, float level);
@@ -58,56 +55,13 @@ unsigned int nxdnTxFrame(NxdnTx* tx, const uint8_t* frame, int16_t* out);
 unsigned int nxdnTxFlush(NxdnTx* tx, int16_t* out);
 
 /* Receive */
-#define NXDN_RX_RING            8192U
-#define NXDN_RX_MAX_CAND        32U
+#define NXDN_RX_RING            FSK4_RX_RING
+#define NXDN_RX_MAX_CAND        FSK4_RX_MAX_CAND
 #define NXDN_RX_MAX_MISS        4U
 
-typedef void (*NxdnRxFrameFn)(void* ctx, const uint8_t* frame, bool lost);
-
-typedef struct
-{
-    uint64_t nb;
-    uint64_t due;
-    float r;
-} NxdnCand;
-
-typedef struct
-{
-    float taps[NXDN_FILTER_TAPS];
-    float inbuf[2U * NXDN_FILTER_TAPS];
-    unsigned int inpos;
-    float y[NXDN_RX_RING];
-    float r[NXDN_RX_RING];
-    uint64_t n;
-
-    NxdnCand cand[NXDN_RX_MAX_CAND];
-    unsigned int candCount;
-
-    bool tracking;
-    bool prov;                  /* locked on one frame, waiting for a second */
-    uint8_t provFrame[48];
-    uint64_t exp;               /* expected last FSW symbol of the next frame  */
-    uint64_t nb;                /* last FSW symbol of the frame being decoded */
-    uint64_t due;
-    bool dueValid;
-    bool windowDone;
-    bool found;
-    unsigned int miss;
-    float centre;
-    float amp;
-    float minAmp;               /* smallest outer symbol amplitude accepted */
-
-    NxdnRxFrameFn cb;
-    void* ctx;
-
-    uint32_t statCandidates;
-    uint32_t statLocks;
-    uint32_t statFrames;
-    uint32_t statLost;
-    uint32_t statDropped;
-    float statLastR;
-    float statAmp;
-} NxdnRx;
+typedef Fsk4FrameFn NxdnRxFrameFn;
+typedef Fsk4Cand NxdnCand;
+typedef Fsk4Rx NxdnRx;
 
 void nxdnRxInit(NxdnRx* rx, NxdnRxFrameFn cb, void* ctx, uint8_t shape);
 void nxdnRxSamples(NxdnRx* rx, const int16_t* samples, unsigned int length);
@@ -126,18 +80,7 @@ void nxdnRxReset(NxdnRx* rx);
  */
 #define NXDN_BIT_MAX_FRAMES         6U
 
-typedef struct
-{
-    bool inFrame;
-    uint32_t window;            /* last bits received */
-    uint8_t frame[48];
-    unsigned int ptr;           /* bits in the frame */
-    unsigned int lostCount;
-    NxdnRxFrameFn cb;
-    void* ctx;
-    uint32_t statFrames;
-    uint32_t statLost;
-} NxdnBitRx;
+typedef Fsk4BitRx NxdnBitRx;
 
 void nxdnBitRxInit(NxdnBitRx* rx, NxdnRxFrameFn cb, void* ctx);
 void nxdnBitRxReset(NxdnBitRx* rx);

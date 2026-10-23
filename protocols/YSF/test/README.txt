@@ -5,14 +5,14 @@ Contents
                                       voice FR), module "YSF", ports 18000+n-1 (modem) / 18500+n-1 (gateway)
   YSF_pkg/                           CMakeLists.txt, ysf-host.service
   gateway/                           ysf_gateway, CMakeLists.txt, ysf-gateway.service, YSFHostsUpdate.sh, README.txt
-  patched/                           modem host changes on top of nxdn/patched (apply after the NXDN patches):
-                                       Modem_Host.c.ysf.patch  modem/mmdvm.c.ysf.patch  modem/mmdvm.h.ysf.patch
-                                     and the patched files themselves (Modem_Host.c, modem/mmdvm.c, modem/mmdvm.h)
+  (modem host)                       modem/Modem_Host.c, modem/mmdvm.c and modem/mmdvm.h at the top of the OpenMT tree
+                                     already contain the NXDN and YSF support (enable/disable, queue space, frame pacing);
+                                     there is nothing to patch
   dashboard/updateHosts_ysf.patch    adds the YSF reflector list (refl_type 'YSF', Nick = id, Name = country-name)
   OPENMT_HS.txt                      modem notes
   test/                              unit tests and simulators (control, DSP loopback, host/modem, gateway)
   test/ysf_iq.c, ysf_gen.c            IQ test signal generator / decoder for HackRF and gqrx recordings (see test/README_iq.txt)
-  The shared tools/dsp_tools.c and dsp_tools.h at the top of this package have the new golay24128_correct23127().
+  The shared tools/fec_tools.c and fec_tools.h at the top of this package have the new golay24128_correct23127().
 
 Build: put ysf/ under protocols/YSF in the OpenMT tree, then
   cmake -S . -B build && cmake --build build         (in protocols/YSF and protocols/YSF/gateway)
@@ -23,7 +23,6 @@ What was verified (simulation only, no radio or modem hardware):
   - FICH and the data channel payload against G4KLX's MMDVMHost code, bit for bit (compiled and compared).
   - Control, DSP loopback (noise, offsets), host with simulated OpenMT / OpenMT_HS / MMDVM modems and gateway,
     gateway with a simulated reflector (links by id, name, JSON and text lists, polls, data both ways, unlink, NACK).
-  - The modem host patches compile; they apply cleanly to the NXDN-patched files.
 
 Limitations
   - Not tried on real YSF radios or an OpenMT_HS modem.

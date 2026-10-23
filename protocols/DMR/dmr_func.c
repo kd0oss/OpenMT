@@ -28,11 +28,25 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include "dsp_tools.h"
+#include "fec_tools.h"
 
-SLOTDATA slotData[2];
+SLOTDATA slotData[4];
 
-// The main decode function
+/*
+ * BPTC19696_decode()
+ *
+ * Decodes a BPTC (196,96) block, the error protected 96 bit payload carried
+ * in the 196 payload bits of a DMR burst.  The steps are: extract the raw
+ * bits, de-interleave, check and correct each row and column with the
+ * Hamming codes, and extract the 96 payload bits.
+ *
+ * Parameters:
+ *   in   - The 33 byte DMR burst.
+ *   out  - Receives the decoded payload (12 bytes).
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_decode(const unsigned char* in, unsigned char* out, const uint8_t slot)
 {
     assert(in != NULL);
@@ -51,7 +65,21 @@ void BPTC19696_decode(const unsigned char* in, unsigned char* out, const uint8_t
     BPTC19696_decodeExtractData(out, slot);
 }
 
-// The main encode function
+/*
+ * BPTC19696_encode()
+ *
+ * Encodes a 96 bit payload as a BPTC (196,96) block: the data is placed in
+ * the matrix, the Hamming row and column parity is added, and the bits are
+ * interleaved.
+ *
+ * Parameters:
+ *   in   - The 96 bit (12 byte) payload.
+ *   out  - Receives the 196 payload bits as bytes, ready to be placed in a
+ *          burst.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_encode(const unsigned char* in, unsigned char* out, const uint8_t slot)
 {
     assert(in != NULL);
@@ -70,6 +98,18 @@ void BPTC19696_encode(const unsigned char* in, unsigned char* out, const uint8_t
     BPTC19696_encodeExtractBinary(out, slot);
 }
 
+/*
+ * BPTC19696_decodeExtractBinary()
+ *
+ * Unpacks the 196 payload bits of the received burst into
+ * slotData[slot].rawData, most significant bit first.
+ *
+ * Parameters:
+ *   in   - The received burst bytes.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_decodeExtractBinary(const unsigned char* in, const uint8_t slot)
 {
     // First block
@@ -108,7 +148,17 @@ void BPTC19696_decodeExtractBinary(const unsigned char* in, const uint8_t slot)
     byteToBitsBE(in[32U], slotData[slot].rawData + 188U);
 }
 
-// Deinterleave the raw data
+/*
+ * BPTC19696_decodeDeInterleave()
+ *
+ * De-interleaves slotData[slot].rawData into slotData[slot].deInterData,
+ * using the index (a * 181) modulo 196.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_decodeDeInterleave(const uint8_t slot)
 {
     for (unsigned int i = 0U; i < 196U; i++)
@@ -124,7 +174,18 @@ void BPTC19696_decodeDeInterleave(const uint8_t slot)
     }
 }
 
-// Check each row with a Hamming (15,11,3) code and each column with a Hamming (13,9,3) code
+/*
+ * BPTC19696_decodeErrorCheck()
+ *
+ * Checks and corrects the de-interleaved bits.  Each row is checked with a
+ * Hamming (15,11,3) code and each column with a Hamming (13,9,3) code.  It
+ * repeats until no more errors are fixed or the pass limit is reached.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_decodeErrorCheck(const uint8_t slot)
 {
     bool fixing;
@@ -169,7 +230,18 @@ void BPTC19696_decodeErrorCheck(const uint8_t slot)
     } while (fixing && count < 5U);
 }
 
-// Extract the 96 bits of payload
+/*
+ * BPTC19696_decodeExtractData()
+ *
+ * Extracts the 96 payload bits from the corrected matrix and packs them into
+ * bytes.
+ *
+ * Parameters:
+ *   data - Receives the 12 payload bytes.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_decodeExtractData(unsigned char* data, const uint8_t slot)
 {
     bool bData[96U];
@@ -215,7 +287,18 @@ void BPTC19696_decodeExtractData(unsigned char* data, const uint8_t slot)
     bitsToByteBE(bData + 88U, &data[11U]);
 }
 
-// Extract the 96 bits of payload
+/*
+ * BPTC19696_encodeExtractData()
+ *
+ * Places the 96 payload bits into the encoding matrix
+ * (slotData[slot].deInterData).
+ *
+ * Parameters:
+ *   in   - The 12 payload bytes.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_encodeExtractData(const unsigned char* in, const uint8_t slot)
 {
     bool bData[96U];
@@ -264,7 +347,17 @@ void BPTC19696_encodeExtractData(const unsigned char* in, const uint8_t slot)
         slotData[slot].deInterData[a] = bData[pos];
 }
 
-// Check each row with a Hamming (15,11,3) code and each column with a Hamming (13,9,3) code
+/*
+ * BPTC19696_encodeErrorCheck()
+ *
+ * Adds the parity bits to the encoding matrix: a Hamming (15,11,3) code for
+ * each row and a Hamming (13,9,3) code for each column.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_encodeErrorCheck(const uint8_t slot)
 {
     // slotData[slot].Run through each of the 9 rows containing data
@@ -296,7 +389,17 @@ void BPTC19696_encodeErrorCheck(const uint8_t slot)
     }
 }
 
-// Interleave the raw data
+/*
+ * BPTC19696_encodeInterleave()
+ *
+ * Interleaves the encoding matrix into slotData[slot].rawData, using the
+ * index (a * 181) modulo 196.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_encodeInterleave(const uint8_t slot)
 {
     for (unsigned int i = 0U; i < 196U; i++)
@@ -312,6 +415,17 @@ void BPTC19696_encodeInterleave(const uint8_t slot)
     }
 }
 
+/*
+ * BPTC19696_encodeExtractBinary()
+ *
+ * Packs the interleaved bits of slotData[slot].rawData into bytes.
+ *
+ * Parameters:
+ *   data - Receives the packed bytes.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void BPTC19696_encodeExtractBinary(unsigned char* data, const uint8_t slot)
 {
     // First block
@@ -349,6 +463,22 @@ void BPTC19696_encodeExtractBinary(unsigned char* data, const uint8_t slot)
     bitsToByteBE(slotData[slot].rawData + 188U, &data[32U]);
 }
 
+/*
+ * CSBK_decode()
+ *
+ * Decodes a control signalling block (CSBK) from a burst.  The burst is BPTC
+ * decoded, the CRC (with its CSBK mask) is checked, and the fields of the
+ * block are stored in slotData[slot]: opcode, feature id and, depending on
+ * the opcode, the base station id, source id, destination id, group flag and
+ * other fields.
+ *
+ * Parameters:
+ *   bytes - The 33 byte DMR burst.
+ *   slot  - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: true if the CRC is correct and the block was decoded, false if
+ *   not.
+ */
 bool CSBK_decode(const unsigned char* bytes, const uint8_t slot)
 {
     assert(bytes != NULL);
@@ -476,6 +606,18 @@ bool CSBK_decode(const unsigned char* bytes, const uint8_t slot)
     return true;
 }
 
+/*
+ * CSBK_encode()
+ *
+ * Builds a CSBK burst from the fields held in slotData[slot]: the CRC is
+ * added (with its CSBK mask) and the block is BPTC encoded.
+ *
+ * Parameters:
+ *   bytes - Receives the 33 byte burst.
+ *   slot  - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void CSBK_encode(unsigned char* bytes, const uint8_t slot)
 {
     assert(bytes != NULL);
@@ -491,21 +633,63 @@ void CSBK_encode(unsigned char* bytes, const uint8_t slot)
     BPTC19696_encode(slotData[slot].tdata, bytes, slot);
 }
 
+/*
+ * CSBK_getCSBKO()
+ *
+ * Gets the opcode of the last decoded CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The CSBK opcode.
+ */
 unsigned int CSBK_getCSBKO(const uint8_t slot)
 {
     return slotData[slot].CSBK;
 }
 
+/*
+ * CSBK_getFID()
+ *
+ * Gets the feature id of the last decoded CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The feature id.
+ */
 unsigned char CSBK_getFID(const uint8_t slot)
 {
     return slotData[slot].FID;
 }
 
+/*
+ * CSBK_getOVCM()
+ *
+ * Gets the OVCM (open voice call mode) flag of the CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: true if the flag is set.
+ */
 bool CSBK_getOVCM(const uint8_t slot)
 {
     return slotData[slot].OVCM;
 }
 
+/*
+ * CSBK_setOVCM()
+ *
+ * Sets the OVCM flag of the CSBK.  It only has an effect on an UUVREQ or
+ * UUANSRSP block, where the flag is also written to the block's data.
+ *
+ * Parameters:
+ *   ovcm - New value of the flag.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void CSBK_setOVCM(bool ovcm, const uint8_t slot)
 {
     if (slotData[slot].CSBK == CSBKO_UUVREQ || slotData[slot].CSBK == CSBKO_UUANSRSP)
@@ -519,41 +703,130 @@ void CSBK_setOVCM(bool ovcm, const uint8_t slot)
     }
 }
 
+/*
+ * CSBK_getGI()
+ *
+ * Gets the group/individual flag of the CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: true for a group call, false for an individual call.
+ */
 bool CSBK_getGI(const uint8_t slot)
 {
     return slotData[slot].GI;
 }
 
+/*
+ * CSBK_getBSId()
+ *
+ * Gets the base station id of the CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The base station id.
+ */
 unsigned int CSBK_getBSId(const uint8_t slot)
 {
     return slotData[slot].bsId;
 }
 
+/*
+ * CSBK_getSrcId()
+ *
+ * Gets the source id of the CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The source id.
+ */
 unsigned int CSBK_getSrcId(const uint8_t slot)
 {
     return slotData[slot].srcId;
 }
 
+/*
+ * CSBK_getDstId()
+ *
+ * Gets the destination id of the CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The destination id.
+ */
 unsigned int CSBK_getDstId(const uint8_t slot)
 {
     return slotData[slot].dstId;
 }
 
+/*
+ * CSBK_getDataContent()
+ *
+ * Gets the data content flag of the CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: true if the block is followed by data.
+ */
 bool CSBK_getDataContent(const uint8_t slot)
 {
     return slotData[slot].dataContent;
 }
 
+/*
+ * CSBK_getCBF()
+ *
+ * Gets the CBF (counted blocks following) value of the CSBK.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The CBF value.
+ */
 unsigned char CSBK_getCBF(const uint8_t slot)
 {
     return slotData[slot].CBF;
 }
 
+/*
+ * CSBK_setCBF()
+ *
+ * Sets the CBF value of the CSBK, in the stored fields and in the block
+ * data.
+ *
+ * Parameters:
+ *   cbf  - New CBF value.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void CSBK_setCBF(unsigned char cbf, const uint8_t slot)
 {
     slotData[slot].CBF = slotData[slot].tdata[3U] = cbf;
 }
 
+/*
+ * DMRFullLC_decode()
+ *
+ * Decodes the full link control (LC) of a voice LC header or terminator
+ * burst.  The burst is BPTC decoded, the CRC mask for the burst type is
+ * removed and the Reed-Solomon (12,9) check is made.
+ *
+ * Parameters:
+ *   data   - The 33 byte DMR burst.
+ *   type   - Burst data type, DT_VOICE_LC_HEADER or DT_TERMINATOR_WITH_LC.
+ *   lcData - Receives the 12 bytes of link control.
+ *   slot   - Slot index (0 or 1) that selects which slotData[] entry is
+ *            used.
+ *
+ * Returns: true if the burst type is supported and the Reed-Solomon check
+ *   passes, false if not.
+ */
 bool DMRFullLC_decode(const unsigned char* data, unsigned char type, unsigned char* lcData, const uint8_t slot)
 {
     assert(data != NULL);
@@ -587,6 +860,21 @@ bool DMRFullLC_decode(const unsigned char* data, unsigned char type, unsigned ch
     return true;
 }
 
+/*
+ * DMRFullLC_encode()
+ *
+ * Builds the full link control of a voice LC header or terminator burst from
+ * the fields held in slotData[slot].  The Reed-Solomon (12,9) parity is
+ * added with the CRC mask for the burst type and the result is BPTC encoded.
+ * Nothing is written for an unsupported type.
+ *
+ * Parameters:
+ *   data - The 33 byte burst that receives the encoded block.
+ *   type - Burst data type, DT_VOICE_LC_HEADER or DT_TERMINATOR_WITH_LC.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRFullLC_encode(unsigned char* data, unsigned char type, const uint8_t slot)
 {
     assert(data != NULL);
@@ -619,6 +907,19 @@ void DMRFullLC_encode(unsigned char* data, unsigned char type, const uint8_t slo
     BPTC19696_encode(lcData, data, slot);
 }
 
+/*
+ * DMRLC_decode()
+ *
+ * Reads the link control fields (protect flag, reserved bit, FLCO, feature
+ * id, options, destination id and source id) from nine link control bytes
+ * into slotData[slot].
+ *
+ * Parameters:
+ *   bytes - The link control bytes.
+ *   slot  - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_decode(const unsigned char* bytes, uint8_t slot)
 {
 	assert(bytes != NULL);
@@ -636,6 +937,17 @@ void DMRLC_decode(const unsigned char* bytes, uint8_t slot)
 	slotData[slot].srcId = bytes[6U] << 16 | bytes[7U] << 8 | bytes[8U];
 }
 
+/*
+ * DMRLC_encodeBytes()
+ *
+ * Packs the link control fields held in slotData[slot] into bytes.
+ *
+ * Parameters:
+ *   bytes - Receives the link control bytes.
+ *   slot  - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_encodeBytes(unsigned char* bytes, const uint8_t slot)
 {
     assert(bytes != NULL);
@@ -661,6 +973,18 @@ void DMRLC_encodeBytes(unsigned char* bytes, const uint8_t slot)
     bytes[8U] = slotData[slot].srcId >> 0;
 }
 
+/*
+ * DMRLC_encodeBits()
+ *
+ * Packs the link control fields held in slotData[slot] into bits, most
+ * significant bit first.
+ *
+ * Parameters:
+ *   bits - Receives the link control bits.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_encodeBits(bool* bits, const uint8_t slot)
 {
     assert(bits != NULL);
@@ -679,41 +1003,127 @@ void DMRLC_encodeBits(bool* bits, const uint8_t slot)
     byteToBitsBE(bytes[8U], bits + 64U);
 }
 
+/*
+ * DMRLC_getPF()
+ *
+ * Gets the protect flag of the link control.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The protect flag.
+ */
 bool DMRLC_getPF(const uint8_t slot)
 {
     return slotData[slot].PF;
 }
 
+/*
+ * DMRLC_setPF()
+ *
+ * Sets the protect flag of the link control.
+ *
+ * Parameters:
+ *   pf   - New value.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_setPF(bool pf, const uint8_t slot)
 {
     slotData[slot].PF = pf;
 }
 
+/*
+ * DMRLC_getFLCO()
+ *
+ * Gets the full link control opcode.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The FLCO.
+ */
 unsigned int DMRLC_getFLCO(const uint8_t slot)
 {
     return slotData[slot].FLCO;
 }
 
+/*
+ * DMRLC_setFLCO()
+ *
+ * Sets the full link control opcode.
+ *
+ * Parameters:
+ *   flco - New FLCO.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_setFLCO(unsigned int flco, const uint8_t slot)
 {
     slotData[slot].FLCO = flco;
 }
 
+/*
+ * DMRLC_getFID()
+ *
+ * Gets the feature id of the link control.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The feature id.
+ */
 unsigned char DMRLC_getFID(const uint8_t slot)
 {
     return slotData[slot].FID;
 }
 
+/*
+ * DMRLC_setFID()
+ *
+ * Sets the feature id of the link control.
+ *
+ * Parameters:
+ *   fid  - New feature id.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_setFID(unsigned char fid, const uint8_t slot)
 {
     slotData[slot].FID = fid;
 }
 
+/*
+ * DMRLC_getOVCM()
+ *
+ * Gets the OVCM (open voice call mode) flag of the link control, which is
+ * bit 2 of the options byte.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: true if the flag is set.
+ */
 bool DMRLC_getOVCM(const uint8_t slot)
 {
     return (slotData[slot].options & 0x04U) == 0x04U;
 }
 
+/*
+ * DMRLC_setOVCM()
+ *
+ * Sets or clears the OVCM flag of the link control (bit 2 of the options
+ * byte).
+ *
+ * Parameters:
+ *   ovcm - New value of the flag.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_setOVCM(bool ovcm, const uint8_t slot)
 {
     if (ovcm)
@@ -722,26 +1132,82 @@ void DMRLC_setOVCM(bool ovcm, const uint8_t slot)
         slotData[slot].options &= 0xFBU;
 }
 
+/*
+ * DMRLC_getSrcId()
+ *
+ * Gets the source id of the link control.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The source id.
+ */
 unsigned int DMRLC_getSrcId(const uint8_t slot)
 {
     return slotData[slot].srcId;
 }
 
+/*
+ * DMRLC_setSrcId()
+ *
+ * Sets the source id of the link control.
+ *
+ * Parameters:
+ *   id   - New source id.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_setSrcId(unsigned int id, const uint8_t slot)
 {
     slotData[slot].srcId = id;
 }
 
+/*
+ * DMRLC_getDstId()
+ *
+ * Gets the destination id of the link control.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The destination id.
+ */
 unsigned int DMRLC_getDstId(const uint8_t slot)
 {
     return slotData[slot].dstId;
 }
 
+/*
+ * DMRLC_setDstId()
+ *
+ * Sets the destination id of the link control.
+ *
+ * Parameters:
+ *   id   - New destination id.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMRLC_setDstId(unsigned int id, const uint8_t slot)
 {
     slotData[slot].dstId = id;
 }
 
+/*
+ * addDMRAudioSync()
+ *
+ * Writes the voice sync pattern into the middle of a burst (bytes 13 to 19).
+ * A duplex (repeater) station uses the base station pattern, a simplex
+ * station the mobile station pattern.
+ *
+ * Parameters:
+ *   data   - The 33 byte burst, changed in place.
+ *   duplex - true for a duplex (base station) pattern, false for a simplex
+ *            (mobile station) pattern.
+ *
+ * Returns: nothing.
+ */
 void addDMRAudioSync(unsigned char* data, bool duplex)
 {
     assert(data != NULL);
@@ -758,6 +1224,20 @@ void addDMRAudioSync(unsigned char* data, bool duplex)
     }
 }
 
+/*
+ * addDMRDataSync()
+ *
+ * Writes the data sync pattern into the middle of a burst (bytes 13 to 19).
+ * A duplex (repeater) station uses the base station pattern, a simplex
+ * station the mobile station pattern.
+ *
+ * Parameters:
+ *   data   - The 33 byte burst, changed in place.
+ *   duplex - true for a duplex (base station) pattern, false for a simplex
+ *            (mobile station) pattern.
+ *
+ * Returns: nothing.
+ */
 void addDMRDataSync(unsigned char* data, bool duplex)
 {
     assert(data != NULL);
@@ -774,6 +1254,20 @@ void addDMRDataSync(unsigned char* data, bool duplex)
     }
 }
 
+/*
+ * DMREMB_decode()
+ *
+ * Decodes the embedded (EMB) field of a voice burst.  The field is taken
+ * from the nibbles on each side of the sync area, error corrected with the
+ * QR (16,7,6) code, and the colour code, privacy indicator and link control
+ * start/stop (LCSS) value are stored in slotData[slot].
+ *
+ * Parameters:
+ *   data - The 33 byte burst.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMREMB_decode(const unsigned char* data, const uint8_t slot)
 {
     assert(data != NULL);
@@ -791,6 +1285,19 @@ void DMREMB_decode(const unsigned char* data, const uint8_t slot)
     slotData[slot].LCSS      = (code >> 1) & 0x03U;
 }
 
+/*
+ * DMREMB_encode()
+ *
+ * Writes the EMB field into a voice burst: the colour code, privacy
+ * indicator and LCSS of slotData[slot] are encoded with the QR (16,7,6) code
+ * and placed on each side of the sync area.
+ *
+ * Parameters:
+ *   data - The 33 byte burst, changed in place.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMREMB_encode(unsigned char* data, const uint8_t slot)
 {
     assert(data != NULL);
@@ -809,6 +1316,19 @@ void DMREMB_encode(unsigned char* data, const uint8_t slot)
     data[19U] = (data[19U] & 0x0FU) | ((DMREMB[1U] << 4U) & 0xF0U);
 }
 
+/*
+ * DMREmbeddedData_encodeEmbeddedData()
+ *
+ * Encodes the embedded link control held in slotData[slot].EMB_data into the
+ * 128 bit embedded data block: the five bit checksum is added, then Hamming
+ * (16,11,4) row parity and column parity, and the bits are packed down the
+ * columns into slotData[slot].EMB_raw.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMREmbeddedData_encodeEmbeddedData(const uint8_t slot)
 {
     unsigned int crc;
@@ -858,7 +1378,19 @@ void DMREmbeddedData_encodeEmbeddedData(const uint8_t slot)
     }
 }
 
-// Unpack and error check an embedded LC
+/*
+ * DMREmbeddedData_decodeEmbeddedData()
+ *
+ * Unpacks and error checks a received embedded link control.  The 128 bits
+ * in slotData[slot].EMB_raw are put back in row order, the rows are checked
+ * with the Hamming (16,11,4) code and the five bit checksum is verified; if
+ * the data is valid FLCO_valid is set and the link control is stored.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void DMREmbeddedData_decodeEmbeddedData(const uint8_t slot)
 {
     // The data is unpacked downwards in columns
@@ -926,7 +1458,22 @@ void DMREmbeddedData_decodeEmbeddedData(const uint8_t slot)
     slotData[slot].FLCO = flco & 0x3FU;
 }
 
-// Add LC data (which may consist of 4 blocks) to the data store
+/*
+ * DMREmbeddedData_decode()
+ *
+ * Adds the embedded data of one voice burst to the store.  The embedded link
+ * control arrives in four bursts (marked by the LCSS value 1, 3, 3 and 2);
+ * when the fourth one arrives the whole block is decoded and, if valid,
+ * encoded again so it can be sent on.
+ *
+ * Parameters:
+ *   data - The 33 byte burst.
+ *   lcss - Link control start/stop value of the burst.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: true when a complete, valid embedded link control has just been
+ *   received, false if not.
+ */
 bool DMREmbeddedData_decode(const unsigned char* data, unsigned char lcss, const uint8_t slot)
 {
     assert(data != NULL);
@@ -996,6 +1543,18 @@ bool DMREmbeddedData_decode(const unsigned char* data, unsigned char lcss, const
     return false;
 }
 
+/*
+ * DMREmbeddedData_getRawData()
+ *
+ * Gets the 72 bits (nine bytes) of the embedded link control, once one has
+ * been decoded.
+ *
+ * Parameters:
+ *   data - Receives the link control bytes.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: true if a valid embedded link control is held, false if not.
+ */
 bool DMREmbeddedData_getRawData(unsigned char* data, const uint8_t slot)
 {
     assert(data != NULL);
@@ -1016,36 +1575,198 @@ bool DMREmbeddedData_getRawData(unsigned char* data, const uint8_t slot)
     return true;
 }
 
+/*
+ * DMREmbeddedData_setLC()
+ *
+ * Takes the link control held in slotData[slot] (the source and destination
+ * ids and the other fields) as the embedded link control to send, and
+ * encodes it into the 128 bit embedded data block, ready for
+ * DMREmbeddedData_getData().  Used to rebuild the embedded link control of
+ * the voice bursts of a call from the link control of its header.
+ *
+ * Parameters:
+ *   slot - Slot index that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
+void DMREmbeddedData_setLC(const uint8_t slot)
+{
+    DMRLC_encodeBits(slotData[slot].EMB_data, slot);
+    slotData[slot].FLCO_valid = true;
+    slotData[slot].FLCO       = DMRLC_getFLCO(slot);
+
+    DMREmbeddedData_encodeEmbeddedData(slot);
+}
+
+/*
+ * DMREmbeddedData_getData()
+ *
+ * Puts one 32 bit fragment of the embedded block into a voice burst, in the
+ * embedded signalling field.  Voice bursts B to E (n = 1 to 4) carry the four
+ * fragments of the embedded link control; for any other n (burst F) the field
+ * is cleared.
+ *
+ * Parameters:
+ *   data - The 33 byte voice burst, changed in place (bytes 14 to 18).
+ *   n    - Number of the voice burst in the superframe, 1 to 5.
+ *   slot - Slot index that selects which slotData[] entry is used.
+ *
+ * Returns: The link control start/stop value (LCSS) for the burst: 1 for the
+ *   first fragment, 3 for the second and third, 2 for the last, 0 if no
+ *   fragment was put in.
+ */
+unsigned char DMREmbeddedData_getData(unsigned char* data, unsigned char n, const uint8_t slot)
+{
+    assert(data != NULL);
+
+    if (n >= 1U && n < 5U)
+    {
+        n--;
+
+        bool bits[40U];
+        memset(bits, 0x00U, 40U * sizeof(bool));
+        memcpy(bits + 4U, slotData[slot].EMB_raw + n * 32U, 32U * sizeof(bool));
+
+        unsigned char bytes[5U];
+        bitsToByteBE(bits + 0U, &bytes[0U]);
+        bitsToByteBE(bits + 8U, &bytes[1U]);
+        bitsToByteBE(bits + 16U, &bytes[2U]);
+        bitsToByteBE(bits + 24U, &bytes[3U]);
+        bitsToByteBE(bits + 32U, &bytes[4U]);
+
+        data[14U] = (data[14U] & 0xF0U) | (bytes[0U] & 0x0FU);
+        data[15U] = bytes[1U];
+        data[16U] = bytes[2U];
+        data[17U] = bytes[3U];
+        data[18U] = (data[18U] & 0x0FU) | (bytes[4U] & 0xF0U);
+
+        switch (n)
+        {
+            case 0U:
+                return 1U;
+            case 3U:
+                return 2U;
+            default:
+                return 3U;
+        }
+    }
+
+    data[14U] &= 0xF0U;
+    data[15U] = 0x00U;
+    data[16U] = 0x00U;
+    data[17U] = 0x00U;
+    data[18U] &= 0x0FU;
+
+    return 0U;
+}
+
+/*
+ * getColorCode()
+ *
+ * Gets the colour code stored for the slot.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The colour code.
+ */
 uint8_t getColorCode(const uint8_t slot)
 {
 	return slotData[slot].colorCode;
 }
 
+/*
+ * setColorCode()
+ *
+ * Sets the colour code stored for the slot.
+ *
+ * Parameters:
+ *   code - New colour code.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void setColorCode(uint8_t code, const uint8_t slot)
 {
 	slotData[slot].colorCode = code;
 }
 
+/*
+ * getPI()
+ *
+ * Gets the privacy indicator stored for the slot.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The privacy indicator.
+ */
 bool getPI(const uint8_t slot)
 {
 	return slotData[slot].piFlag;
 }
 
+/*
+ * setPI()
+ *
+ * Sets the privacy indicator stored for the slot.
+ *
+ * Parameters:
+ *   pi   - New value.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void setPI(bool pi, const uint8_t slot)
 {
 	slotData[slot].piFlag = pi;
 }
 
+/*
+ * getLCSS()
+ *
+ * Gets the link control start/stop value stored for the slot.
+ *
+ * Parameters:
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: The LCSS value.
+ */
 uint8_t getLCSS(const uint8_t slot)
 {
 	return slotData[slot].LCSS;
 }
 
+/*
+ * setLCSS()
+ *
+ * Sets the link control start/stop value stored for the slot.
+ *
+ * Parameters:
+ *   lcss - New LCSS value.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void setLCSS(uint8_t lcss, const uint8_t slot)
 {
 	slotData[slot].LCSS = lcss;
 }
 
+/*
+ * decodeGPS()
+ *
+ * Starts to decode a GPS position report: it works out the position error
+ * class, longitude and latitude from the data bytes.  The values are worked
+ * out but are not stored or returned, so the function has no effect at
+ * present.
+ *
+ * Parameters:
+ *   data - The GPS report bytes.
+ *   slot - Slot index (0 or 1) that selects which slotData[] entry is used.
+ *
+ * Returns: nothing.
+ */
 void decodeGPS(const unsigned char* data,  const uint8_t slot)
 {
     unsigned int errorI = (data[2U] & 0x0E) >> 1U;
@@ -1289,9 +2010,16 @@ static const uint32_t DMR_DECODING_TABLE_1987[] =
 #define DMR_SLOTTYPE_GENPOL  0x00000c75U   /* generator polynomial, g(x) */
 
 /*
- * Compute the syndrome corresponding to the given pattern, i.e., the
- * remainder after dividing the pattern (when considering it as the vector
- * representation of a polynomial) by the generator polynomial, GENPOL.
+ * DMRSlotType_getSyndrome1987()
+ *
+ * Computes the syndrome of a 19 bit slot type pattern: the remainder
+ * after dividing the pattern, taken as a polynomial, by the generator
+ * polynomial.
+ *
+ * Parameters:
+ *   pattern - The 19 bit received pattern.
+ *
+ * Returns: The syndrome.
  */
 static uint32_t DMRSlotType_getSyndrome1987(uint32_t pattern)
 {
@@ -1311,6 +2039,18 @@ static uint32_t DMRSlotType_getSyndrome1987(uint32_t pattern)
     return pattern;
 }
 
+/*
+ * DMRSlotType_decode2087()
+ *
+ * Decodes a 20 bit slot type word: the syndrome is looked up in the decoding
+ * table and the error pattern is corrected.
+ *
+ * Parameters:
+ *   data - Three bytes holding the 20 bit word.
+ *
+ * Returns: The corrected 8 bit value (colour code in the upper four bits,
+ *   data type in the lower four).
+ */
 static uint8_t DMRSlotType_decode2087(const unsigned char* data)
 {
     uint32_t code = ((uint32_t)data[0U] << 11) + ((uint32_t)data[1U] << 3) + (data[2U] >> 5);
@@ -1323,6 +2063,19 @@ static uint8_t DMRSlotType_decode2087(const unsigned char* data)
     return (uint8_t)(code >> 11);
 }
 
+/*
+ * DMRSlotType_decode()
+ *
+ * Extracts the slot type field from a burst, corrects it and gives the
+ * colour code and data type.
+ *
+ * Parameters:
+ *   frame     - The 33 byte burst.
+ *   colorCode - Receives the colour code.
+ *   dataType  - Receives the data type.
+ *
+ * Returns: nothing.
+ */
 void DMRSlotType_decode(const unsigned char* frame, uint8_t* colorCode, uint8_t* dataType)
 {
     unsigned char slotType[3U];
@@ -1341,6 +2094,19 @@ void DMRSlotType_decode(const unsigned char* frame, uint8_t* colorCode, uint8_t*
     *dataType  = (code >> 0) & 0x0FU;
 }
 
+/*
+ * DMRSlotType_encode()
+ *
+ * Encodes a colour code and data type as the 20 bit slot type word and
+ * writes it into a burst, around the sync area.
+ *
+ * Parameters:
+ *   colorCode - Colour code.
+ *   dataType  - Data type.
+ *   frame     - The 33 byte burst, changed in place.
+ *
+ * Returns: nothing.
+ */
 void DMRSlotType_encode(uint8_t colorCode, uint8_t dataType, unsigned char* frame)
 {
     unsigned char slotType[3U];

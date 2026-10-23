@@ -40,8 +40,9 @@ target_link_libraries(dstar_host PRIVATE m)
 target_sources(dstar_host PRIVATE
     ./dstar_host.c
     ./dstar_gps.c
+    ./dstar_slowdata.c
     ../../tools/tools.c
-    ../../tools/dsp_tools.c
+    ../../tools/fec_tools.c
     ../../tools/string_builder.c
     ../../tools/CCITTChecksumReverse.c
     ../../tools/ADF7021.c

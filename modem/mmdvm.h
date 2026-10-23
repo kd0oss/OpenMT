@@ -107,7 +107,7 @@ void disableFM(const char* modem_name);
 void enableDMR(const char* modem_name);
 void disableDMR(const char* modem_name);
 bool openMTtoMMDVM(uint8_t mmdvm_in, char* openmt_out);
-bool mmdvmToOpenMT(const char* openmt_in, uint8_t mmdvm_out);
+bool mmdvmToOpenMT(const char* openmt_in, uint8_t* mmdvm_out);
 void setM17Space(uint8_t space);
 uint8_t getM17Space();
 void setDSTARSpace(uint8_t space);

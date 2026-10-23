@@ -31,10 +31,34 @@
 /* External variables from main dstar_host.c */
 extern bool debugM;
 
-/* GPS parsing implementation in pure C */
+/*
+ * dstar_parse_gps()
+ *
+ * Feeds one slow-speed data byte into the D-STAR "$$CRC" GPS sentence
+ * parser.  Bytes are collected in tgps until a line end or 200 bytes arrive.
+ * A sentence that starts with "$$C" and passes the CCITT checksum is split
+ * to get the sender callsign, then the DPRS position (latitude, longitude
+ * and, for some formats, altitude) is converted to decimal degrees.
+ * Position formats "DSTAR*:/", "DSTAR*:!" and "DSTAR*:;" are recognised.
+ *
+ * Parameters:
+ *   c            - Next slow-speed data byte; 0x00 (filler) is ignored.
+ *   tgps         - Caller's accumulation buffer, at least 200 bytes.
+ *   gpsidx_ptr   - Fill level of tgps; updated here and reset to 0 after a
+ *                  complete sentence or overflow.
+ *   sGPSCall_out - Receives the callsign of the sender (up to 255 characters
+ *                  plus the terminator).
+ *   fLat_out     - Receives latitude in degrees, negative for south.
+ *   fLong_out    - Receives longitude in degrees, negative for west.
+ *   altitude_out - Receives the altitude, or 0 when the sentence has none.
+ *
+ * Returns: true when a complete sentence with a valid checksum was parsed,
+ *   false otherwise (more bytes needed, or checksum failed).
+ */
 bool dstar_parse_gps(unsigned char c, char *tgps, int *gpsidx_ptr,
                      char *sGPSCall_out, float *fLat_out, float *fLong_out,
-                     uint16_t *altitude_out) {
+                     uint16_t *altitude_out)
+{
   int gpsidx = *gpsidx_ptr;
 
   if (c != 0x00) {

@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -20,6 +21,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <dsp_tools.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,8 +39,8 @@ extern "C" {
 #define YSF_FILTER_SPAN            6U      /* symbols each side of the pulse */
 #define YSF_FILTER_TAPS            (2U * YSF_FILTER_SPAN * YSF_SAMPLES_PER_SYMBOL + 1U)
 
-#define YSF_SHAPE_RRC              0U
-#define YSF_SHAPE_RC               1U
+#define YSF_SHAPE_RRC              FSK4_SHAPE_RRC
+#define YSF_SHAPE_RC               FSK4_SHAPE_RC
 
 /*
  * Outer symbol (+-3) amplitude in counts at txLevel 50: 2.7 kHz deviation for
@@ -48,13 +51,7 @@ extern "C" {
 #define YSF_LEVEL_OUTER_L           945.0F
 
 /* Transmit */
-typedef struct
-{
-    float sym[YSF_FILTER_SPAN * 2U + 1U];  /* newest first */
-    float level;                            /* amplitude of the +-3 symbol */
-    float taps[YSF_FILTER_TAPS];
-    uint8_t shape;
-} YsfTx;
+typedef Fsk4Tx YsfTx;
 
 void ysfTxInit(YsfTx* tx, float level, uint8_t shape);
 void ysfTxSetLevel(YsfTx* tx, float level);
@@ -63,58 +60,13 @@ unsigned int ysfTxFrame(YsfTx* tx, const uint8_t* frame, int16_t* out);
 unsigned int ysfTxFlush(YsfTx* tx, int16_t* out);
 
 /* Receive */
-#define YSF_RX_RING            8192U
-#define YSF_RX_MAX_CAND        32U
+#define YSF_RX_RING            FSK4_RX_RING
+#define YSF_RX_MAX_CAND        FSK4_RX_MAX_CAND
 #define YSF_RX_MAX_MISS        1U      /* one frame without a sync is still passed on, the second is a loss */
 
-typedef void (*YsfRxFrameFn)(void* ctx, const uint8_t* frame, bool lost);
-
-typedef struct
-{
-    uint64_t nb;
-    uint64_t due;
-    float r;
-} YsfCand;
-
-typedef struct
-{
-    float taps[YSF_FILTER_TAPS];
-    float inbuf[2U * YSF_FILTER_TAPS];
-    unsigned int inpos;
-    float y[YSF_RX_RING];
-    float r[YSF_RX_RING];
-    uint64_t n;
-
-    YsfCand cand[YSF_RX_MAX_CAND];
-    unsigned int candCount;
-
-    bool tracking;
-    bool prov;                  /* locked on one frame, waiting for a second */
-    uint8_t provFrame[120];
-    uint64_t exp;               /* expected last FSW symbol of the next frame  */
-    uint64_t nb;                /* last FSW symbol of the frame being decoded */
-    uint64_t due;
-    bool dueValid;
-    bool windowDone;
-    bool found;
-    bool held;                  /* a frame whose sync was missed, waiting for the next sync */
-    uint8_t heldFrame[120];
-    unsigned int miss;
-    float centre;
-    float amp;
-    float minAmp;               /* smallest outer symbol amplitude accepted */
-
-    YsfRxFrameFn cb;
-    void* ctx;
-
-    uint32_t statCandidates;
-    uint32_t statLocks;
-    uint32_t statFrames;
-    uint32_t statLost;
-    uint32_t statDropped;
-    float statLastR;
-    float statAmp;
-} YsfRx;
+typedef Fsk4FrameFn YsfRxFrameFn;
+typedef Fsk4Cand YsfCand;
+typedef Fsk4Rx YsfRx;
 
 void ysfRxInit(YsfRx* rx, YsfRxFrameFn cb, void* ctx, uint8_t shape);
 void ysfRxSamples(YsfRx* rx, const int16_t* samples, unsigned int length);
@@ -133,18 +85,7 @@ void ysfRxReset(YsfRx* rx);
  */
 #define YSF_BIT_MAX_FRAMES          2U
 
-typedef struct
-{
-    bool inFrame;
-    uint64_t window;            /* last bits received */
-    uint8_t frame[120];
-    unsigned int ptr;           /* bits in the frame */
-    unsigned int lostCount;
-    YsfRxFrameFn cb;
-    void* ctx;
-    uint32_t statFrames;
-    uint32_t statLost;
-} YsfBitRx;
+typedef Fsk4BitRx YsfBitRx;
 
 void ysfBitRxInit(YsfBitRx* rx, YsfRxFrameFn cb, void* ctx);
 void ysfBitRxReset(YsfBitRx* rx);

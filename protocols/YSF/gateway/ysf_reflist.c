@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -23,11 +24,32 @@
 #include <strings.h>
 #include <sys/stat.h>
 
+/*
+ * reflistInit()
+ *
+ * Clears a reflector list.  Use it before the first use; reflistFree()
+ * releases what the list holds.
+ *
+ * Parameters:
+ *   l - The list.
+ *
+ * Returns: nothing.
+ */
 void reflistInit(RefList* l)
 {
     memset(l, 0x00, sizeof(*l));
 }
 
+/*
+ * reflistFree()
+ *
+ * Frees the memory of the reflectors and FCS rooms of a list and empties it.
+ *
+ * Parameters:
+ *   l - The list.
+ *
+ * Returns: nothing.
+ */
 void reflistFree(RefList* l)
 {
     free(l->fcsRooms);
@@ -40,6 +62,19 @@ void reflistFree(RefList* l)
     l->capacity = 0U;
 }
 
+/*
+ * reflistAddFcsRoom()
+ *
+ * Adds an FCS room description to the list (the array grows when it is
+ * full).  Nothing is added when memory runs out.
+ *
+ * Parameters:
+ *   l    - The list.
+ *   id   - The room name, such as FCS001-01.
+ *   name - The description of the room.
+ *
+ * Returns: nothing.
+ */
 void reflistAddFcsRoom(RefList* l, const char* id, const char* name)
 {
     if (l->fcsCount == l->fcsCapacity)
@@ -59,6 +94,19 @@ void reflistAddFcsRoom(RefList* l, const char* id, const char* name)
     l->fcsCount++;
 }
 
+/*
+ * reflistReadFcsRooms()
+ *
+ * Reads FCS room descriptions from a text file with the lines
+ * "room;description".  Lines that start with # are skipped.  The rooms read
+ * before are forgotten.
+ *
+ * Parameters:
+ *   l    - The list.
+ *   path - The file.
+ *
+ * Returns: The number of rooms read, 0 if the file cannot be opened.
+ */
 unsigned int reflistReadFcsRooms(RefList* l, const char* path)
 {
     FILE* fp = fopen(path, "rt");
@@ -94,6 +142,17 @@ unsigned int reflistReadFcsRooms(RefList* l, const char* path)
     return count;
 }
 
+/*
+ * addItem()
+ *
+ * Makes room for one more reflector in the list (the array doubles when it
+ * is full, starting at 256) and clears it.
+ *
+ * Parameters:
+ *   l - The list.
+ *
+ * Returns: The new entry, or NULL when memory runs out.
+ */
 static Reflector* addItem(RefList* l)
 {
     if (l->count == l->capacity)
@@ -113,7 +172,20 @@ static Reflector* addItem(RefList* l)
     return &l->items[l->count++];
 }
 
-/* Copies 'text' into a field of 'width' characters, padded with spaces, 0 terminated */
+/*
+ * putField()
+ *
+ * Copies 'text' into a field of 'width' characters, padded with spaces, 0
+ * terminated.
+ *
+ * Parameters:
+ *   field - The field; width + 1 bytes.
+ *   width - Size of the field, without the terminator.
+ *   text  - The text.
+ *   upper - true to convert the text to upper case.
+ *
+ * Returns: nothing.
+ */
 static void putField(char* field, unsigned int width, const char* text, bool upper)
 {
     size_t len = strlen(text);
@@ -128,6 +200,18 @@ static void putField(char* field, unsigned int width, const char* text, bool upp
         field[i] = upper ? (char)toupper((unsigned char)text[i]) : text[i];
 }
 
+/*
+ * putId()
+ *
+ * Writes the five digit reflector id: the number in the text, modulo 100000,
+ * with leading zeroes.
+ *
+ * Parameters:
+ *   field - Receives the id and a terminator; 6 bytes.
+ *   text  - The number as text.
+ *
+ * Returns: nothing.
+ */
 static void putId(char* field, const char* text)
 {
     unsigned long v = strtoul(text, NULL, 10);
@@ -137,6 +221,17 @@ static void putId(char* field, const char* text)
     memcpy(field, tmp, 6U);
 }
 
+/*
+ * putCount()
+ *
+ * Writes the user count of a reflector as three digits, limited to 999.
+ *
+ * Parameters:
+ *   field - Receives the count and a terminator; 4 bytes.
+ *   text  - The number as text.
+ *
+ * Returns: nothing.
+ */
 static void putCount(char* field, const char* text)
 {
     unsigned long v = strtoul(text, NULL, 10);
@@ -147,7 +242,22 @@ static void putCount(char* field, const char* text)
     snprintf(field, 4U, "%03lu", v);
 }
 
-/* The text of a string or number member of a flat JSON object; false for null or when it is not there */
+/*
+ * jsonMember()
+ *
+ * The text of a string or number member of a flat JSON object; false for
+ * null or when it is not there.
+ *
+ * Parameters:
+ *   obj     - The object as text.
+ *   key     - The name of the member.
+ *   out     - Receives the value as a string (escaped characters are copied
+ *             without the backslash).
+ *   outSize - Size of out, in bytes.
+ *
+ * Returns: true if the member was found and has a string, number or boolean
+ *   value.
+ */
 static bool jsonMember(const char* obj, const char* key, char* out, size_t outSize)
 {
     char pattern[48];
@@ -200,6 +310,19 @@ static bool jsonMember(const char* obj, const char* key, char* out, size_t outSi
     return false;
 }
 
+/*
+ * loadJson()
+ *
+ * Adds the reflectors of a JSON hosts file.  Every object with a designator,
+ * name, ipv4 and port becomes a YSF reflector; names that begin with XLX are
+ * marked as doing Wires-X.
+ *
+ * Parameters:
+ *   l    - The list.
+ *   text - The contents of the file.
+ *
+ * Returns: nothing.
+ */
 static void loadJson(RefList* l, const char* text)
 {
     const char* p = text;
@@ -274,6 +397,19 @@ static void loadJson(RefList* l, const char* text)
     }
 }
 
+/*
+ * loadText()
+ *
+ * Adds the reflectors of a text hosts file.  Each line is
+ * "id;name;description;address;port;count"; lines that start with # or do
+ * not fit are skipped.
+ *
+ * Parameters:
+ *   l    - The list.
+ *   text - The contents of the file.
+ *
+ * Returns: nothing.
+ */
 static void loadText(RefList* l, const char* text)
 {
     const char* p = text;
@@ -332,6 +468,18 @@ static void loadText(RefList* l, const char* text)
     }
 }
 
+/*
+ * compareName()
+ *
+ * Comparison for qsort(): sorts reflectors by name.
+ *
+ * Parameters:
+ *   a - First reflector.
+ *   b - Second reflector.
+ *
+ * Returns: A negative value, 0 or a positive value, as the name of a is
+ *   before, equal to or after the name of b.
+ */
 static int compareName(const void* a, const void* b)
 {
     const Reflector* r1 = (const Reflector*)a;
@@ -340,6 +488,18 @@ static int compareName(const void* a, const void* b)
     return memcmp(r1->name, r2->name, 16U);
 }
 
+/*
+ * comparePtr()
+ *
+ * Comparison for qsort(): sorts an array of reflector pointers by name.
+ *
+ * Parameters:
+ *   a - Pointer to the first pointer.
+ *   b - Pointer to the second pointer.
+ *
+ * Returns: A negative value, 0 or a positive value, as the name of the first
+ *   is before, equal to or after the name of the second.
+ */
 static int comparePtr(const void* a, const void* b)
 {
     const Reflector* r1 = *(const Reflector* const*)a;
@@ -348,6 +508,17 @@ static int comparePtr(const void* a, const void* b)
     return memcmp(r1->name, r2->name, 16U);
 }
 
+/*
+ * idUsed()
+ *
+ * Tells if a reflector id is in use.
+ *
+ * Parameters:
+ *   l  - The list.
+ *   id - The id as a number.
+ *
+ * Returns: true if a reflector of the list has that id.
+ */
 static bool idUsed(const RefList* l, unsigned int id)
 {
     char text[16];
@@ -363,6 +534,20 @@ static bool idUsed(const RefList* l, unsigned int id)
     return false;
 }
 
+/*
+ * reflistLoad()
+ *
+ * Loads a hosts file (JSON or text, found by the first character), adds the
+ * FCS rooms (they take the free ids from 00010 up, in the order of the file)
+ * and sorts the list by name.
+ *
+ * Parameters:
+ *   l    - The list.
+ *   path - The file; larger than 8 MB is refused.
+ *
+ * Returns: true if the list has any entries, false if the file cannot be
+ *   read or is empty.
+ */
 bool reflistLoad(RefList* l, const char* path)
 {
     FILE* fp = fopen(path, "r");
@@ -444,6 +629,16 @@ bool reflistLoad(RefList* l, const char* path)
     return true;
 }
 
+/*
+ * reflistRefresh()
+ *
+ * Reloads the list when its file has changed.
+ *
+ * Parameters:
+ *   l - The list.
+ *
+ * Returns: true if the list was loaded again.
+ */
 bool reflistRefresh(RefList* l)
 {
     struct stat st;
@@ -454,6 +649,17 @@ bool reflistRefresh(RefList* l)
     return reflistLoad(l, l->path);
 }
 
+/*
+ * reflistFindById()
+ *
+ * Finds a reflector by its five digit id.
+ *
+ * Parameters:
+ *   l  - The list.
+ *   id - The five digit id.
+ *
+ * Returns: The reflector, or NULL if there is none with that id.
+ */
 Reflector* reflistFindById(RefList* l, const char* id)
 {
     for (unsigned int i = 0U; i < l->count; i++)
@@ -465,6 +671,18 @@ Reflector* reflistFindById(RefList* l, const char* id)
     return NULL;
 }
 
+/*
+ * reflistFindByName()
+ *
+ * Finds a reflector by its name as it is in the list (16 characters, upper
+ * case).
+ *
+ * Parameters:
+ *   l    - The list.
+ *   name - The name (not case sensitive).
+ *
+ * Returns: The reflector, or NULL if there is none with that name.
+ */
 Reflector* reflistFindByName(RefList* l, const char* name)
 {
     char full[17];
@@ -480,6 +698,18 @@ Reflector* reflistFindByName(RefList* l, const char* name)
     return NULL;
 }
 
+/*
+ * reflistFind()
+ *
+ * Finds a reflector by a number (the id), by its list name or by the name
+ * given in the file.  Trailing spaces are ignored.
+ *
+ * Parameters:
+ *   l   - The list.
+ *   key - The id or name.
+ *
+ * Returns: The reflector, or NULL if it is not found.
+ */
 Reflector* reflistFind(RefList* l, const char* key)
 {
     char trimmed[64];
@@ -528,6 +758,20 @@ Reflector* reflistFind(RefList* l, const char* key)
     return NULL;
 }
 
+/*
+ * reflistSearch()
+ *
+ * Searches the names of the reflectors for a text (the whole name is
+ * searched, as YSFReflectors does), and sorts the found ones by name.
+ *
+ * Parameters:
+ *   l    - The list.
+ *   text - The text to look for, not case sensitive.
+ *   out  - Receives pointers to the reflectors found.
+ *   max  - Size of out.
+ *
+ * Returns: The number of reflectors found.
+ */
 unsigned int reflistSearch(RefList* l, const char* text, const Reflector** out, unsigned int max)
 {
     char needle[64];

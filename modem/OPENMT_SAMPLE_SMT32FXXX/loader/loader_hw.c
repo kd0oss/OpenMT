@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  loader_hw.c - STM32F105 hardware layer and start-up of the serial loader.
  *
@@ -13,7 +14,15 @@
 
 /* ------------------------------------------------------------------ */
 /* Watchdog                                                           */
-/* ------------------------------------------------------------------ */
+/*
+ * ld_kick()
+ *
+ * Feeds the independent watchdog (harmless if it is not running).
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_kick(void)
 {
     IWDG->KR = 0xAAAAU;                 /* harmless if the IWDG is not running */
@@ -48,6 +57,15 @@ void ld_kick(void)
 
 #if LD_LED_PORT >= 0
 #define LED_GPIO        ((GPIO_TypeDef *)(GPIOA_BASE + 0x400UL * (uint32_t)LD_LED_PORT))
+/*
+ * ledInit()
+ *
+ * Sets up the optional status LED pin as an output and turns the LED on.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void ledInit(void)
 {
     volatile uint32_t *cr = (volatile uint32_t *)&LED_GPIO->CRL + (LD_LED_NUM >> 3);
@@ -57,10 +75,28 @@ static void ledInit(void)
     *cr = (*cr & ~(0xFUL << ((LD_LED_NUM & 7) * 4))) | (0x2UL << ((LD_LED_NUM & 7) * 4));
     LED_GPIO->BSRR = 1UL << LD_LED_NUM;
 }
+/*
+ * ledOff()
+ *
+ * Turns the status LED off.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void ledOff(void)
 {
     LED_GPIO->BSRR = 1UL << (LD_LED_NUM + 16);
 }
+/*
+ * ledOn()
+ *
+ * Turns the status LED on.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 __attribute__((unused)) static void ledOn(void)
 {
     LED_GPIO->BSRR = 1UL << LD_LED_NUM;
@@ -72,6 +108,16 @@ __attribute__((unused)) static void ledOn(void)
 #endif
 
 #if LDR_DEBUG && (LD_LED_PORT >= 0)
+/*
+ * pause()
+ *
+ * Busy-waits for roughly n * 15 ms while feeding the watchdog (debug aid).
+ *
+ * Parameters:
+ *   n - Number of 15 ms units.
+ *
+ * Returns: nothing.
+ */
 static void pause(uint32_t n)
 {
     volatile uint32_t i;
@@ -85,6 +131,17 @@ static void pause(uint32_t n)
     }
 }
 
+/*
+ * ledBlinks()
+ *
+ * Debug aid: after a pause, blinks the status LED n times to report why a
+ * received byte was not accepted as the host's 0x7F.
+ *
+ * Parameters:
+ *   n - Number of blinks.
+ *
+ * Returns: nothing.
+ */
 __attribute__((unused)) static void ledBlinks(uint32_t n)
 {
     pause(30);
@@ -101,6 +158,19 @@ __attribute__((unused)) static void ledBlinks(uint32_t n)
 #endif
 
 #if LD_FIXED_BAUD != 0
+/*
+ * ld_autobaud()
+ *
+ * Waits for the host's first byte (0x7F) on USART1 at the fixed baud rate
+ * the loader was built for (LD_FIXED_BAUD), 8 data bits, even parity.  A
+ * byte with a framing or parity error is ignored.  If the host does not
+ * appear within about 10 s and a valid application exists, the application
+ * is started.  The status LED goes off once the host has been heard.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_autobaud(void)
 {
     uint32_t sr;
@@ -173,6 +243,22 @@ void ld_autobaud(void)
     ledOff();
 }
 #else
+/*
+ * ld_autobaud()
+ *
+ * Measures the host's baud rate from its first byte (0x7F) and sets up
+ * USART1 for it (8 data bits, even parity).  The pin is watched directly:
+ * the time from the falling edge of the start bit to the next falling edge
+ * is 8 bit times, and the first low period must be one eighth of that.
+ * Edges are examined as a sliding window, so a glitch ahead of the real
+ * byte is rejected.  If no host appears within about 10 s and a valid
+ * application exists, the application is started.  The status LED goes off
+ * once the host has been heard.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 /* The host sends 0x7F: with 8E1 that is start(0) 1111111 0 parity(1) stop(1),
  * so the line goes low for one bit, high for seven, low again for one:
  * falling edge to the next falling edge is exactly 8 bit times and the first
@@ -265,6 +351,17 @@ void ld_autobaud(void)
 }
 #endif
 
+/*
+ * ld_getc()
+ *
+ * Waits for one byte from the host on the loader's UART, feeding the
+ * watchdog meanwhile.
+ *
+ * Parameters: none.
+ *
+ * Returns: The byte (0 to 255), or -1 if it arrived with an overrun, framing
+ *   or parity error.
+ */
 int ld_getc(void)
 {
     uint32_t sr;
@@ -288,6 +385,16 @@ int ld_getc(void)
     }
 }
 
+/*
+ * ld_putc()
+ *
+ * Sends one byte to the host, waiting until the transmit register is free.
+ *
+ * Parameters:
+ *   c - Byte to send.
+ *
+ * Returns: nothing.
+ */
 void ld_putc(uint8_t c)
 {
     while ((USART1->SR & USART_SR_TXE) == 0U)
@@ -297,6 +404,15 @@ void ld_putc(uint8_t c)
     USART1->DR = c;
 }
 
+/*
+ * ld_flush()
+ *
+ * Waits until everything written has been completely sent.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_flush(void)
 {
     while ((USART1->SR & USART_SR_TC) == 0U)
@@ -307,7 +423,16 @@ void ld_flush(void)
 
 /* ------------------------------------------------------------------ */
 /* Flash                                                              */
-/* ------------------------------------------------------------------ */
+/*
+ * flashWait()
+ *
+ * Waits for the flash controller to finish and clears its status flags.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 if the operation succeeded, -1 on a programming or write
+ *   protection error.
+ */
 static int flashWait(void)
 {
     uint32_t s;
@@ -321,6 +446,15 @@ static int flashWait(void)
     return ((s & (FLASH_SR_PGERR | FLASH_SR_WRPRTERR)) != 0U) ? -1 : 0;
 }
 
+/*
+ * flashUnlock()
+ *
+ * Unlocks the flash controller for programming and erasing, if it is locked.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void flashUnlock(void)
 {
     if ((FLASH->CR & FLASH_CR_LOCK) != 0U)
@@ -330,11 +464,30 @@ static void flashUnlock(void)
     }
 }
 
+/*
+ * flashLock()
+ *
+ * Locks the flash controller again.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void flashLock(void)
 {
     FLASH->CR |= FLASH_CR_LOCK;
 }
 
+/*
+ * ld_flash_erase_page()
+ *
+ * Erases one flash page.
+ *
+ * Parameters:
+ *   page - Page number counted from the start of flash.
+ *
+ * Returns: 0 on success, -1 on error.
+ */
 int ld_flash_erase_page(uint32_t page)
 {
     int r;
@@ -350,6 +503,18 @@ int ld_flash_erase_page(uint32_t page)
     return r;
 }
 
+/*
+ * ld_flash_program()
+ *
+ * Programs bytes into erased flash, one 16-bit half word at a time.
+ *
+ * Parameters:
+ *   addr - Flash address, half-word aligned.
+ *   d    - Data to program.
+ *   len  - Number of bytes; must be even.
+ *
+ * Returns: 0 on success, -1 on error.
+ */
 int ld_flash_program(uint32_t addr, const uint8_t *d, uint32_t len)
 {
     uint32_t i;
@@ -372,6 +537,18 @@ int ld_flash_program(uint32_t addr, const uint8_t *d, uint32_t len)
     return r;
 }
 
+/*
+ * ld_flash_read()
+ *
+ * Reads bytes from flash or RAM.
+ *
+ * Parameters:
+ *   addr - Address to read from.
+ *   d    - Receives the bytes.
+ *   len  - Number of bytes.
+ *
+ * Returns: nothing.
+ */
 void ld_flash_read(uint32_t addr, uint8_t *d, uint32_t len)
 {
     uint32_t i;
@@ -382,14 +559,32 @@ void ld_flash_read(uint32_t addr, uint8_t *d, uint32_t len)
     }
 }
 
-/* The marker is the first half word of its own page: 0xFFFF = application
- * complete, 0x0000 = an update is under way (programming 0 over an erased
- * half word needs no erase).  Committing erases the page again. */
+/*
+ * ld_marker_valid()
+ *
+ * Tells whether the "application complete" marker is set.  The marker is the
+ * first half word of its own flash page: 0xFFFF means the application is
+ * complete, 0x0000 means an update is under way.
+ *
+ * Parameters: none.
+ *
+ * Returns: 1 if the application is marked complete, 0 if not.
+ */
 int ld_marker_valid(void)
 {
     return *(volatile uint16_t *)LD_MARKER_ADDR == 0xFFFFU;
 }
 
+/*
+ * ld_marker_invalidate()
+ *
+ * Marks the application as incomplete by programming zero over the marker
+ * (this needs no erase).  Does nothing if it is already marked so.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 on success, non-zero on a flash error.
+ */
 int ld_marker_invalidate(void)
 {
     static const uint8_t zero[2] = { 0, 0 };
@@ -401,6 +596,16 @@ int ld_marker_invalidate(void)
     return ld_flash_program(LD_MARKER_ADDR, zero, 2);
 }
 
+/*
+ * ld_marker_commit()
+ *
+ * Marks the application as complete again by erasing the marker's page.
+ * Does nothing if it is already marked complete.
+ *
+ * Parameters: none.
+ *
+ * Returns: 0 on success, non-zero on a flash error.
+ */
 int ld_marker_commit(void)
 {
     if (ld_marker_valid())
@@ -410,6 +615,16 @@ int ld_marker_commit(void)
     return ld_flash_erase_page((LD_MARKER_ADDR - LD_FLASH_BASE) / LD_PAGE_SIZE);
 }
 
+/*
+ * ld_launch()
+ *
+ * Starts the application by resetting the chip; Reset_Handler() then jumps
+ * to it.  Does not return.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void ld_launch(void)
 {
     __DSB();
@@ -426,6 +641,16 @@ extern uint32_t _sbss;
 extern uint32_t _ebss;
 extern uint32_t _estack;
 
+/*
+ * jumpApp()
+ *
+ * Starts the application directly: loads the stack pointer and reset
+ * vector from the application's vector table and jumps to it.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing (does not return).
+ */
 static void __attribute__((noreturn)) jumpApp(void)
 {
     uint32_t sp = *(volatile uint32_t *)LD_APP_START;
@@ -440,6 +665,15 @@ static void __attribute__((noreturn)) jumpApp(void)
 void Reset_Handler(void);
 void Default_Handler(void);
 
+/*
+ * Default_Handler()
+ *
+ * Handler for unused interrupts; loops forever.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void Default_Handler(void)
 {
     for (;;)
@@ -465,6 +699,18 @@ const void * const vectorTable[16] =
     Default_Handler         /* SysTick    */
 };
 
+/*
+ * Reset_Handler()
+ *
+ * Loader entry point.  Jumps straight to the application if it is valid and
+ * no update was requested (the boot flag holds the magic value when the
+ * application asks for an update); otherwise clears the BSS and runs the
+ * loader.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void Reset_Handler(void)
 {
     volatile uint32_t *flag = (volatile uint32_t *)LD_BOOT_FLAG_ADDR;

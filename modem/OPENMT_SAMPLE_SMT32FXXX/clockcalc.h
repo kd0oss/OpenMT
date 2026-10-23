@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  clockcalc.h - pure calculations for the clock tree and sample timer
  *  (no register access, so they can be unit tested on a PC).

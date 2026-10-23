@@ -9,7 +9,7 @@
  * protected bits of that frame -- the same figure MMDVMHost uses for its BER.
  *
  * The Golay coding and the scrambling table (AMBE_PRNG_TABLE) are in
- * dsp_tools.  Only the D-Star specific part is here: the bit positions of the
+ * fec_tools.  Only the D-Star specific part is here: the bit positions of the
  * three groups.
  *
  * Based on MMDVMHost AMBEFEC.cpp:
@@ -22,7 +22,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <dsp_tools.h>
+#include <fec_tools.h>
 
 #define DSTAR_FEC_BITS_PER_FRAME 48U /* protected bits that are checked */
 

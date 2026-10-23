@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 #ifndef FAKEHW_H
 #define FAKEHW_H
 #include <stdint.h>

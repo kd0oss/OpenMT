@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -41,6 +42,17 @@ static const char NET_HEADER[] = "YSFD                    ALL      ";
 #define BUSY_MS         3000U
 #define TX_INTERVAL_MS  90U
 
+/*
+ * addCRC()
+ *
+ * Makes the check sum of Wires-X data: the sum of the bytes, modulo 256.
+ *
+ * Parameters:
+ *   in     - The bytes.
+ *   length - Number of bytes.
+ *
+ * Returns: The check sum.
+ */
 static uint8_t addCRC(const uint8_t* in, unsigned int length)
 {
     uint8_t crc = 0U;
@@ -51,6 +63,18 @@ static uint8_t addCRC(const uint8_t* in, unsigned int length)
     return crc;
 }
 
+/*
+ * padString()
+ *
+ * Copies a string into a field of 'width' characters padded with spaces.
+ *
+ * Parameters:
+ *   out   - The field; width + 1 bytes, 0 terminated.
+ *   width - Number of characters in the field.
+ *   text  - The text; cut off when longer than width.
+ *
+ * Returns: nothing.
+ */
 static void padString(char* out, unsigned int width, const char* text)
 {
     size_t len = strlen(text);
@@ -63,6 +87,23 @@ static void padString(char* out, unsigned int width, const char* text)
     out[width] = '\0';
 }
 
+/*
+ * wxInit()
+ *
+ * Prepares a Wires-X handler.  The node name is the callsign with the suffix
+ * after a dash.
+ *
+ * Parameters:
+ *   w          - The handler.
+ *   callsign   - The station callsign.
+ *   suffix     - The node suffix, or NULL or empty for none.
+ *   reflectors - The reflector list that the replies are made from.
+ *   send       - Called for every frame of a reply, when it is time to
+ *                transmit it.
+ *   ctx        - Passed to send.
+ *
+ * Returns: nothing.
+ */
 void wxInit(WiresX* w, const char* callsign, const char* suffix, RefList* reflectors, WxSendFn send, void* ctx)
 {
     char node[64];
@@ -85,6 +126,21 @@ void wxInit(WiresX* w, const char* callsign, const char* suffix, RefList* reflec
     w->ctx        = ctx;
 }
 
+/*
+ * wxSetInfo()
+ *
+ * Sets the name and the frequencies of the node and works out what depends
+ * on them: the five digit node id (a hash of the name), the callsign data of
+ * the frames and the header of the network packets.
+ *
+ * Parameters:
+ *   w           - The handler.
+ *   name        - The name of the node.
+ *   txFrequency - Transmit frequency in Hz.
+ *   rxFrequency - Receive frequency in Hz.
+ *
+ * Returns: nothing.
+ */
 void wxSetInfo(WiresX* w, const char* name, uint32_t txFrequency, uint32_t rxFrequency)
 {
     uint32_t hash = 0U;
@@ -124,33 +180,98 @@ void wxSetInfo(WiresX* w, const char* name, uint32_t txFrequency, uint32_t rxFre
     memcpy(w->header + 14U, w->node, 10U);
 }
 
+/*
+ * wxIsBusy()
+ *
+ * Tells if Wires-X is busy: a connect was asked for or answered less than 3
+ * seconds ago.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: true if busy.
+ */
 bool wxIsBusy(const WiresX* w)
 {
     return w->busy;
 }
 
+/*
+ * wxGetReflector()
+ *
+ * Gets the reflector that Wires-X reports as linked.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: The reflector that is linked, or NULL if there is none.
+ */
 const Reflector* wxGetReflector(const WiresX* w)
 {
     return w->reflector;
 }
 
+/*
+ * wxSetReflector()
+ *
+ * Sets the reflector that is reported as linked.
+ *
+ * Parameters:
+ *   w         - The handler.
+ *   reflector - The reflector, or NULL for none.
+ *
+ * Returns: nothing.
+ */
 void wxSetReflector(WiresX* w, const Reflector* reflector)
 {
     w->reflector = reflector;
 }
 
+/*
+ * startTimer()
+ *
+ * Starts the timer that delays a reply after the request.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void startTimer(WiresX* w)
 {
     w->timerMs      = 0U;
     w->timerRunning = true;
 }
 
+/*
+ * processDX()
+ *
+ * Handles the DX request: the node information is sent after the timer.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void processDX(WiresX* w)
 {
     w->status = WXSI_DX;
     startTimer(w);
 }
 
+/*
+ * processCategory()
+ *
+ * Handles the category request: collects the reflectors of the ids in it (up
+ * to 20), then the category list is sent after the timer.
+ *
+ * Parameters:
+ *   w    - The handler.
+ *   data - The request after the command: two digits for the number of ids,
+ *          then 5 digit ids.
+ *
+ * Returns: nothing.
+ */
 static void processCategory(WiresX* w, const uint8_t* data)
 {
     char buffer[8];
@@ -184,6 +305,19 @@ static void processCategory(WiresX* w, const uint8_t* data)
     startTimer(w);
 }
 
+/*
+ * processAll()
+ *
+ * Handles the request for the list of all reflectors (the list is sent from
+ * the number given) or for a search (the text is kept), then the answer is
+ * sent after the timer.
+ *
+ * Parameters:
+ *   w    - The handler.
+ *   data - The request after the command.
+ *
+ * Returns: nothing.
+ */
 static void processAll(WiresX* w, const uint8_t* data)
 {
     char buffer[4];
@@ -220,6 +354,17 @@ static void processAll(WiresX* w, const uint8_t* data)
 /* Replies                                                                   */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * calculateFT()
+ *
+ * Works out the frame total field for the rest of a reply.
+ *
+ * Parameters:
+ *   length - Length of the reply.
+ *   offset - How much of it was sent already.
+ *
+ * Returns: The frame total, 1 to 7.
+ */
 static uint8_t calculateFT(unsigned int length, unsigned int offset)
 {
     length -= offset;
@@ -234,6 +379,19 @@ static uint8_t calculateFT(unsigned int length, unsigned int offset)
     return 1U;
 }
 
+/*
+ * emit()
+ *
+ * Queues a frame of a reply for transmission, with the network header and
+ * the frame counter.  The frame is dropped if the queue is full.
+ *
+ * Parameters:
+ *   w       - The handler.
+ *   frame   - The frame, YSF_FRAME_LENGTH_BYTES bytes.
+ *   counter - The frame counter; an odd value marks the last frame.
+ *
+ * Returns: nothing.
+ */
 static void emit(WiresX* w, const uint8_t* frame, uint8_t counter)
 {
     unsigned int next = (w->qHead + 1U) % WX_TX_QUEUE;
@@ -251,6 +409,19 @@ static void emit(WiresX* w, const uint8_t* frame, uint8_t counter)
     w->qHead = next;
 }
 
+/*
+ * createReply()
+ *
+ * Makes the frames of a reply from its data: a header frame, data FR frames
+ * with the data in the callsign fields, and a terminator, and queues them.
+ *
+ * Parameters:
+ *   w      - The handler.
+ *   in     - The data of the reply.
+ *   length - Number of bytes in in.
+ *
+ * Returns: nothing.
+ */
 static void createReply(WiresX* w, const uint8_t* in, unsigned int length)
 {
     uint8_t data[1300];
@@ -378,6 +549,18 @@ static void createReply(WiresX* w, const uint8_t* in, unsigned int length)
     emit(w, frame, (uint8_t)(seqNo | 0x01U));
 }
 
+/*
+ * putFrequency()
+ *
+ * Writes the frequency fields of the DX reply: the transmit frequency and
+ * the offset to the receive frequency with its sign.
+ *
+ * Parameters:
+ *   w   - The handler.
+ *   out - Receives 23 characters.
+ *
+ * Returns: nothing.
+ */
 static void putFrequency(const WiresX* w, uint8_t* out)
 {
     unsigned int offset;
@@ -405,7 +588,20 @@ static void putFrequency(const WiresX* w, uint8_t* out)
     memcpy(out, freq, 23U);
 }
 
-/* The fields the DX, connect and disconnect replies share */
+/*
+ * putStation()
+ *
+ * Writes the fields that the DX, connect and disconnect replies share: the
+ * sequence number, the response type, the node id, the node name and the
+ * node description.
+ *
+ * Parameters:
+ *   w    - The handler.
+ *   data - The reply.
+ *   resp - The 4 byte response type.
+ *
+ * Returns: nothing.
+ */
 static void putStation(WiresX* w, uint8_t* data, const uint8_t* resp)
 {
     data[0] = w->seqNo;
@@ -415,6 +611,18 @@ static void putStation(WiresX* w, uint8_t* data, const uint8_t* resp)
     memcpy(data + 20U, w->name, 14U);
 }
 
+/*
+ * putReflector()
+ *
+ * Writes the fields of a reflector into a reply: id, name, user count and
+ * description.
+ *
+ * Parameters:
+ *   data - The reply.
+ *   r    - The reflector.
+ *
+ * Returns: nothing.
+ */
 static void putReflector(uint8_t* data, const Reflector* r)
 {
     memcpy(data + 36U, r->id, 5U);
@@ -426,6 +634,17 @@ static void putReflector(uint8_t* data, const Reflector* r)
     memcpy(data + 70U, r->desc, 14U);
 }
 
+/*
+ * sendDXReply()
+ *
+ * Makes the DX reply: the node information with the reflector that is
+ * linked, or none.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void sendDXReply(WiresX* w)
 {
     uint8_t data[150];
@@ -462,6 +681,17 @@ static void sendDXReply(WiresX* w)
     w->seqNo++;
 }
 
+/*
+ * sendConnectReply()
+ *
+ * Makes the reply to a connect request, with the reflector.  Nothing is sent
+ * when there is no reflector.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void sendConnectReply(WiresX* w)
 {
     uint8_t data[110];
@@ -493,6 +723,18 @@ static void sendConnectReply(WiresX* w)
     w->seqNo++;
 }
 
+/*
+ * sendOfflineReply()
+ *
+ * Makes a reply for a node without a link (connect failed or disconnected).
+ *
+ * Parameters:
+ *   w     - The handler.
+ *   resp  - The 4 byte response type.
+ *   state - The state character: '0' offline, '2' disconnected.
+ *
+ * Returns: nothing.
+ */
 static void sendOfflineReply(WiresX* w, const uint8_t* resp, char state)
 {
     uint8_t data[110];
@@ -517,17 +759,48 @@ static void sendOfflineReply(WiresX* w, const uint8_t* resp, char state)
     w->seqNo++;
 }
 
+/*
+ * sendConnectFailedReply()
+ *
+ * Makes the reply that tells the radio that the connect failed.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void sendConnectFailedReply(WiresX* w)
 {
     sendOfflineReply(w, CONN_RESP, '0');
 }
 
+/*
+ * sendDisconnectReply()
+ *
+ * Makes the reply that tells the radio that the node is disconnected.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void sendDisconnectReply(WiresX* w)
 {
     sendOfflineReply(w, DISC_RESP, '2');
 }
 
-/* One 50 byte list entry */
+/*
+ * putEntry()
+ *
+ * Writes one 50 byte list entry: kind, id, name, user count and description.
+ *
+ * Parameters:
+ *   out  - Receives the 50 bytes.
+ *   kind - '5' for the list of all reflectors or '1' for a search result.
+ *   r    - The reflector.
+ *
+ * Returns: nothing.
+ */
 static void putEntry(uint8_t* out, char kind, const Reflector* r)
 {
     memset(out, ' ', 50U);
@@ -544,7 +817,20 @@ static void putEntry(uint8_t* out, char kind, const Reflector* r)
     out[49] = 0x0DU;
 }
 
-/* The tail of a list reply: padding to byte 1029, the end marker and the sum */
+/*
+ * finishList()
+ *
+ * Finishes a list reply: pads it to byte 1029 (with a carriage return at the
+ * end of each 50 byte entry), adds the end marker and the check sum, and
+ * makes the reply.
+ *
+ * Parameters:
+ *   w      - The handler.
+ *   data   - The reply.
+ *   offset - Number of bytes made so far.
+ *
+ * Returns: nothing.
+ */
 static void finishList(WiresX* w, uint8_t* data, unsigned int offset)
 {
     unsigned int k = 1029U - offset;
@@ -567,6 +853,18 @@ static void finishList(WiresX* w, uint8_t* data, unsigned int offset)
     w->seqNo++;
 }
 
+/*
+ * sendAllReply()
+ *
+ * Makes the reply with a page of 20 of the list of all reflectors, from the
+ * number that was asked for.  The list is read again when it is the first
+ * page.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void sendAllReply(WiresX* w)
 {
     uint8_t data[1100];
@@ -610,6 +908,16 @@ static void sendAllReply(WiresX* w)
     finishList(w, data, offset);
 }
 
+/*
+ * sendSearchNotFoundReply()
+ *
+ * Makes the reply that tells the radio that a search found nothing.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void sendSearchNotFoundReply(WiresX* w)
 {
     uint8_t data[70];
@@ -642,6 +950,16 @@ static void sendSearchNotFoundReply(WiresX* w)
     w->seqNo++;
 }
 
+/*
+ * sendSearchReply()
+ *
+ * Makes the reply with a page of 20 of the reflectors found by the search.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void sendSearchReply(WiresX* w)
 {
     uint8_t data[1100];
@@ -703,6 +1021,16 @@ static void sendSearchReply(WiresX* w)
     finishList(w, data, offset);
 }
 
+/*
+ * sendCategoryReply()
+ *
+ * Makes the reply with the reflectors of a category (up to 20).
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 static void sendCategoryReply(WiresX* w)
 {
     uint8_t data[1100];
@@ -742,6 +1070,18 @@ static void sendCategoryReply(WiresX* w)
 /* Requests                                                                  */
 /* ------------------------------------------------------------------------ */
 
+/*
+ * wxProcessConnect()
+ *
+ * Handles a request for a link that did not come from the radio (the
+ * dashboard): the connect reply is sent after the timer.
+ *
+ * Parameters:
+ *   w         - The handler.
+ *   reflector - The reflector that is linked.
+ *
+ * Returns: nothing.
+ */
 void wxProcessConnect(WiresX* w, const Reflector* reflector)
 {
     w->busy   = true;
@@ -753,6 +1093,17 @@ void wxProcessConnect(WiresX* w, const Reflector* reflector)
     startTimer(w);
 }
 
+/*
+ * wxProcessDisconnect()
+ *
+ * Handles an unlink: the reflector is forgotten and the disconnect reply is
+ * sent after the timer.
+ *
+ * Parameters:
+ *   w - The handler.
+ *
+ * Returns: nothing.
+ */
 void wxProcessDisconnect(WiresX* w)
 {
     w->reflector = NULL;
@@ -761,6 +1112,19 @@ void wxProcessDisconnect(WiresX* w)
     startTimer(w);
 }
 
+/*
+ * processConnect()
+ *
+ * Handles the connect request of the radio.  When the reflector is not in
+ * the list, the failure is answered at once.
+ *
+ * Parameters:
+ *   w    - The handler.
+ *   data - The request after the command: the 5 digit reflector id.
+ *
+ * Returns: WX_CONNECT_YSF or WX_CONNECT_FCS for the kind of reflector,
+ *   WX_DISCONNECT if it is not found.
+ */
 static WxStatus processConnect(WiresX* w, const uint8_t* data)
 {
     char id[6];
@@ -788,6 +1152,22 @@ static WxStatus processConnect(WiresX* w, const uint8_t* data)
     return w->reflector->type == REFL_FCS ? WX_CONNECT_FCS : WX_CONNECT_YSF;
 }
 
+/*
+ * wxProcess()
+ *
+ * Looks at a frame from the radio.  Data FR frames are collected into a
+ * command; when it is complete and the check sum is good, the command (DX,
+ * list, search, connect, disconnect or category) is handled.
+ *
+ * Parameters:
+ *   w      - The handler.
+ *   frame  - The frame, YSF_FRAME_LENGTH_BYTES bytes.
+ *   source - Not used.
+ *
+ * Returns: WX_RECONNECT_CURRENT for a DX request, WX_CONNECT_YSF or
+ *   WX_CONNECT_FCS for a connect, WX_DISCONNECT for a disconnect or failed
+ *   connect, and WX_NONE for anything else.
+ */
 WxStatus wxProcess(WiresX* w, const uint8_t* frame, const uint8_t* source)
 {
     YsfFich fich;
@@ -877,6 +1257,18 @@ WxStatus wxProcess(WiresX* w, const uint8_t* frame, const uint8_t* source)
     return WX_NONE;
 }
 
+/*
+ * wxClock()
+ *
+ * Advances the timers: sends the reply when its timer has run out, sends one
+ * queued frame every 90 ms and ends the busy state.
+ *
+ * Parameters:
+ *   w  - The handler.
+ *   ms - Time since the last call, in milliseconds.
+ *
+ * Returns: nothing.
+ */
 void wxClock(WiresX* w, uint32_t ms)
 {
     if (w->timerRunning)
@@ -940,7 +1332,19 @@ void wxClock(WiresX* w, uint32_t ms)
     }
 }
 
-/* The frames of a request as a radio makes them (the same data FR frames as the replies), for tests */
+/*
+ * wxCreateCommand()
+ *
+ * The frames of a request as a radio makes them (the same data FR frames as
+ * the replies), for tests.
+ *
+ * Parameters:
+ *   w      - The handler.
+ *   data   - The data of the request.
+ *   length - Number of bytes in data.
+ *
+ * Returns: nothing.
+ */
 void wxCreateCommand(WiresX* w, const uint8_t* data, unsigned int length)
 {
     createReply(w, data, length);

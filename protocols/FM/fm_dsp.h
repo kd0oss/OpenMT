@@ -99,6 +99,36 @@ typedef struct
     bool     active;
 } FmCw;
 
+#define FM_LINK_FS 8000
+#define FM_LINK_DECIM (FM_FS / FM_LINK_FS)
+#define FM_DTMF_N 205
+
+/* Converts the 24 kSa/s audio to 8 kSa/s for the EchoLink gateway. */
+typedef struct
+{
+    FmBiquad lp[2];
+    uint8_t  phase;
+} FmDecim;
+
+/* Converts 8 kSa/s EchoLink audio to the 24 kSa/s transmit rate. */
+typedef struct
+{
+    FmBiquad lp[2];
+} FmInterp;
+
+/* DTMF decoder: eight Goertzel filters over blocks of FM_DTMF_N samples at 8 kSa/s. */
+typedef struct
+{
+    float    s1[8];
+    float    s2[8];
+    float    energy;
+    uint16_t count;
+    char     block;
+    uint8_t  run;
+    bool     reported;
+    bool     active;
+} FmDtmf;
+
 void  fmBiquadLowPass(FmBiquad* b, float fc, float q);
 void  fmBiquadHighPass(FmBiquad* b, float fc, float q);
 float fmBiquadRun(FmBiquad* b, float x);
@@ -121,6 +151,15 @@ float fmToneNext(FmTone* t);
 
 void fmCwStart(FmCw* c, const char* text, uint8_t wpm, float freq);
 bool fmCwNext(FmCw* c, float* out);
+
+void fmDecimInit(FmDecim* d);
+bool fmDecimPush(FmDecim* d, float x, float* out);
+
+void fmInterpInit(FmInterp* i);
+void fmInterpRun(FmInterp* i, float x, float out[FM_LINK_DECIM]);
+
+void fmDtmfInit(FmDtmf* d);
+char fmDtmfPush(FmDtmf* d, float x);
 
 #ifdef __cplusplus
 }

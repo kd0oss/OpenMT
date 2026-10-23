@@ -1,0 +1,8 @@
+# build output
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.o
+*.a
+*.log

@@ -171,76 +171,34 @@ dmr_network_t* g_dmr_network = NULL;
 
 void* txThread(void* arg);
 
-// error - wrapper for perror
+/*
+ * error()
+ *
+ * Reports a message with reportError() and ends the program with exit status 1.
+ *
+ * Parameters:
+ *   msg - Text printed in front of the system error message.
+ *
+ * Returns: nothing.
+ */
 void error(char* msg)
 {
-    perror(msg);
+    reportError(modemName, "DMR gateway", "%s: %s", msg, strerror(errno));
     exit(1);
 }
 
-// Wait for 'delay' miroseconds
-void delay(uint32_t delay)
-{
-    struct timespec req, rem;
-    req.tv_sec  = 0;
-    req.tv_nsec = delay * 1000;
-    nanosleep(&req, &rem);
-};
+;
 
-// Print debug data.
-// From MMDVM project by Jonathan Naylor G4KLX.
-void dump(char* text, unsigned char* data, unsigned int length)
-{
-    struct timespec ts;
-    uint64_t milliseconds;
-    unsigned int offset = 0U;
-    unsigned int i;
-
-    // Get the current time with nanosecond precision
-    if (clock_gettime(CLOCK_REALTIME, &ts) == -1)
-    {
-        perror("clock_gettime");
-        return;
-    }
-
-    // Convert to milliseconds
-    milliseconds = (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
-
-    fprintf(stdout, "%s: %llu\n", text, milliseconds);
-
-    while (length > 0U)
-    {
-        unsigned int bytes = (length > 16U) ? 16U : length;
-
-        fprintf(stdout, "%04X:  ", offset);
-
-        for (i = 0U; i < bytes; i++) fprintf(stdout, "%02X ", data[offset + i]);
-
-        for (i = bytes; i < 16U; i++) fputs("   ", stdout);
-
-        fputs("   *", stdout);
-
-        for (i = 0U; i < bytes; i++)
-        {
-            unsigned char c = data[offset + i];
-
-            if (isprint(c))
-                fputc(c, stdout);
-            else
-                fputc('.', stdout);
-        }
-
-        fputs("*\n", stdout);
-
-        offset += 16U;
-
-        if (length >= 16U)
-            length -= 16U;
-        else
-            length = 0U;
-    }
-}
-
+/*
+ * set_nonblocking()
+ *
+ * Puts a file descriptor into non-blocking mode.
+ *
+ * Parameters:
+ *   fd - The file descriptor.
+ *
+ * Returns: The result of fcntl(), or -1 on failure.
+ */
 static int set_nonblocking(int fd)
 {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -248,6 +206,15 @@ static int set_nonblocking(int fd)
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+/*
+ * now_ms()
+ *
+ * Reads the real time clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: Time in milliseconds.
+ */
 static uint64_t now_ms(void)
 {
     struct timespec ts;
@@ -255,6 +222,17 @@ static uint64_t now_ms(void)
     return (uint64_t)ts.tv_sec * 1000ULL + ts.tv_nsec / 1000000ULL;
 }
 
+/*
+ * send_login()
+ *
+ * Sends the Homebrew login request (RPTL) with the repeater id to the
+ * network master.
+ *
+ * Parameters:
+ *   net - Network connection.
+ *
+ * Returns: true if the packet was sent, false if not.
+ */
 static bool send_login(dmr_network_t* net)
 {
     uint8_t buffer[8];
@@ -270,7 +248,35 @@ static bool send_login(dmr_network_t* net)
     return (sent == 8);
 }
 
-dmr_network_t* dmr_network_open(const char* host, uint16_t port, uint32_t repeater_id, const char* password, const char* callsign, uint32_t rx_freq, uint32_t tx_freq, double latitude, double longitude, uint16_t height, uint8_t power, uint8_t color_code, const char slots)
+/*
+ * dmr_network_open()
+ *
+ * Opens the UDP connection to a Homebrew protocol DMR master such as
+ * BrandMeister, stores the settings and sends the login request.  The
+ * password defaults to "passw0rd" and the callsign to "N0CALL" when none is
+ * given.  The location and description are sent to the master in the
+ * configuration packet; they are cut to 20 and 19 characters.
+ *
+ * Parameters:
+ *   host        - Address of the master.
+ *   port        - UDP port of the master.
+ *   repeater_id - DMR id of this repeater.
+ *   password    - Password for the master (may be NULL).
+ *   callsign    - Callsign of the station (may be NULL).
+ *   rx_freq     - Receive frequency in Hz.
+ *   tx_freq     - Transmit frequency in Hz.
+ *   latitude    - Latitude in degrees.
+ *   longitude   - Longitude in degrees.
+ *   height      - Antenna height in metres.
+ *   power       - Transmit power.
+ *   location    - Location text for the master (may be NULL for none).
+ *   description - Description text for the master (may be NULL for none).
+ *   color_code  - DMR colour code.
+ *   slots       - Slot setting sent in the configuration packet.
+ *
+ * Returns: The new connection, or NULL on failure.
+ */
+dmr_network_t* dmr_network_open(const char* host, uint16_t port, uint32_t repeater_id, const char* password, const char* callsign, uint32_t rx_freq, uint32_t tx_freq, double latitude, double longitude, uint16_t height, uint8_t power, const char* location, const char* description, uint8_t color_code, const char slots)
 {
     dmr_network_t* net = calloc(1, sizeof(*net));
     if (!net) return NULL;
@@ -335,8 +341,8 @@ dmr_network_t* dmr_network_open(const char* host, uint16_t port, uint32_t repeat
     net->url[0]     = 0;
     strcpy(net->modem_type, "MMDVM");
     strcpy(net->software_version, "20260319");
-    strcpy(net->location, "New London, IA");
-    strcpy(net->description, "KD0OSS Repeater");
+    snprintf(net->location, sizeof(net->location), "%.20s", (location != NULL) ? location : "");
+    snprintf(net->description, sizeof(net->description), "%.19s", (description != NULL) ? description : "");
 
     // Start login process
     send_login(net);
@@ -348,11 +354,32 @@ dmr_network_t* dmr_network_open(const char* host, uint16_t port, uint32_t repeat
     return net;
 }
 
+/*
+ * dmr_network_is_connected()
+ *
+ * Tells whether the network connection has completed its login.
+ *
+ * Parameters:
+ *   net - Network connection.
+ *
+ * Returns: 1 if the connection is up and running, 0 if not (or net is NULL).
+ */
 int dmr_network_is_connected(const dmr_network_t* net)
 {
     return (net && net->status == STATUS_RUNNING) ? 1 : 0;
 }
 
+/*
+ * send_authorization()
+ *
+ * Sends the authorisation packet (RPTK): a SHA-256 hash of the salt from the
+ * master followed by the password.
+ *
+ * Parameters:
+ *   net - Network connection.
+ *
+ * Returns: true if the packet was sent, false if not.
+ */
 static bool send_authorization(dmr_network_t* net)
 {
     // Build: salt (4 bytes) + password
@@ -381,6 +408,17 @@ static bool send_authorization(dmr_network_t* net)
     return (sent == 40);
 }
 
+/*
+ * send_config()
+ *
+ * Sends the configuration packet (RPTC): callsign, frequencies, power,
+ * colour code, position, location, description and software details.
+ *
+ * Parameters:
+ *   net - Network connection.
+ *
+ * Returns: true if the packet was sent, false if not.
+ */
 static bool send_config(dmr_network_t* net)
 {
     char buffer[302];
@@ -430,6 +468,16 @@ static bool send_config(dmr_network_t* net)
     return (sent == 302);
 }
 
+/*
+ * send_ping()
+ *
+ * Sends the keep-alive packet (RPTPING) with the repeater id.
+ *
+ * Parameters:
+ *   net - Network connection.
+ *
+ * Returns: true if the packet was sent, false if not.
+ */
 static bool send_ping(dmr_network_t* net)
 {
     uint8_t buffer[11];
@@ -444,6 +492,21 @@ static bool send_ping(dmr_network_t* net)
     return (sent == 11);
 }
 
+/*
+ * dmr_network_keepalive()
+ *
+ * Keeps the network connection going.  Every 10 seconds the packet for the
+ * current login state is sent again (login, authorisation or configuration)
+ * and, once logged in, a ping is sent.  Incoming packets are read:
+ * acknowledgements (RPTACK) move the login to its next step, and a pong
+ * (MSTPONG) shows the connection is alive.  Data packets are left for
+ * dmr_network_recv().
+ *
+ * Parameters:
+ *   net - Network connection.
+ *
+ * Returns: nothing.
+ */
 void dmr_network_keepalive(dmr_network_t* net)
 {
     if (!net) return;
@@ -522,7 +585,7 @@ void dmr_network_keepalive(dmr_network_t* net)
         }
         else if (memcmp(buffer, HOMEBREW_MSTNAK, 6) == 0)
         {
-            fprintf(stderr, "[DMR Network] Received MSTNAK - connection failed!\n");
+            reportError(modemName, "DMR gateway", "[DMR Network] Received MSTNAK - connection failed!");
             // Start login process
             net->seq               = 0;
             net->status            = STATUS_WAITING_CONNECT;
@@ -544,6 +607,24 @@ void dmr_network_keepalive(dmr_network_t* net)
     }
 }
 
+/*
+ * dmr_network_send()
+ *
+ * Sends one DMR voice or data frame (DMRD packet) to the master.
+ *
+ * Parameters:
+ *   net         - Network connection.
+ *   dmr_payload - The 33 byte DMR burst.
+ *   slot        - Time slot, 1 or 2.
+ *   src_id      - Source DMR id.
+ *   dst_id      - Destination id (talkgroup or radio id).
+ *   is_group    - Non-zero for a group call, 0 for a private call.
+ *   frame_type  - Frame type and number bits for the packet.
+ *   stream_id   - Id of the stream the frame belongs to.
+ *
+ * Returns: -1 if the connection is not running or an argument is missing,
+ *   otherwise the result of the send.
+ */
 int dmr_network_send(dmr_network_t* net, const uint8_t* dmr_payload, uint8_t slot, uint32_t src_id, uint32_t dst_id, uint8_t is_group, uint8_t frame_type, uint32_t stream_id)
 {
     if (!net || !dmr_payload || net->status != STATUS_RUNNING) return -1;
@@ -614,6 +695,26 @@ int dmr_network_send(dmr_network_t* net, const uint8_t* dmr_payload, uint8_t slo
     return (sent == 55) ? 0 : -1;
 }
 
+/*
+ * dmr_network_recv()
+ *
+ * Reads one DMR frame (DMRD packet) from the master without waiting, and
+ * splits it into its fields.
+ *
+ * Parameters:
+ *   net          - Network connection.
+ *   dmr_payload  - Receives the 33 byte DMR burst.
+ *   stream_id    - Receives the stream id.
+ *   frame_number - Receives the sequence number of the packet.
+ *   slot         - Receives the time slot, 1 or 2.
+ *   src_id       - Receives the source DMR id.
+ *   dst_id       - Receives the destination id.
+ *   is_group     - Receives 1 for a group call, 0 for a private call.
+ *   frame_type   - Receives the frame type bits.
+ *
+ * Returns: 0 if a frame was read, -1 if there was nothing to read (or the
+ *   packet was not a DMRD packet), -2 if the connection is not running.
+ */
 int dmr_network_recv(dmr_network_t* net, uint8_t* dmr_payload, uint32_t* stream_id, uint8_t* frame_number, uint8_t* slot, uint32_t* src_id, uint32_t* dst_id, uint8_t* is_group, uint8_t* frame_type)
 {
     if (!net || net->status != STATUS_RUNNING) return -2;
@@ -645,7 +746,20 @@ int dmr_network_recv(dmr_network_t* net, uint8_t* dmr_payload, uint32_t* stream_
     return 0;
 }
 
-// Subscribe to a talkgroup on BrandMeister
+/*
+ * dmr_network_subscribe_tg()
+ *
+ * Subscribes a time slot to a talkgroup on BrandMeister by sending an
+ * options packet (RPTO) with the text "TSn=talkgroup".
+ *
+ * Parameters:
+ *   net       - Network connection.
+ *   talkgroup - Talkgroup number.
+ *   slot      - Time slot, 1 or 2.
+ *
+ * Returns: -1 if the connection is not running, otherwise the result of the
+ *   send.
+ */
 int dmr_network_subscribe_tg(dmr_network_t* net, uint32_t talkgroup, uint8_t slot)
 {
     if (!net || net->status != STATUS_RUNNING) return -1;
@@ -675,7 +789,19 @@ int dmr_network_subscribe_tg(dmr_network_t* net, uint32_t talkgroup, uint8_t slo
     return -1;
 }
 
-// Unsubscribe from current TG on a timeslot
+/*
+ * dmr_network_unsubscribe_tg()
+ *
+ * Removes the talkgroup subscription of a time slot by sending an options
+ * packet (RPTO) with an empty talkgroup.
+ *
+ * Parameters:
+ *   net  - Network connection.
+ *   slot - Time slot, 1 or 2.
+ *
+ * Returns: -1 if the connection is not running, otherwise the result of the
+ *   send.
+ */
 int dmr_network_unsubscribe_tg(dmr_network_t* net, uint8_t slot)
 {
     if (!net || net->status != STATUS_RUNNING) return -1;
@@ -705,6 +831,16 @@ int dmr_network_unsubscribe_tg(dmr_network_t* net, uint8_t slot)
     return -1;
 }
 
+/*
+ * dmr_network_close()
+ *
+ * Closes the network socket and frees the connection.
+ *
+ * Parameters:
+ *   net - Network connection (may be NULL).
+ *
+ * Returns: nothing.
+ */
 void dmr_network_close(dmr_network_t* net)
 {
     if (!net) return;
@@ -712,6 +848,23 @@ void dmr_network_close(dmr_network_t* net)
     free(net);
 }
 
+/*
+ * startDMRNetwork()
+ *
+ * Thread that runs the link to the DMR master (BrandMeister).  It reads the
+ * master's settings from the database, opens the connection, and starts
+ * txThread() to send to the DMR host.  Then in a loop it takes frames from
+ * the master with dmr_network_recv() and queues them for the host as DMD1 or
+ * DMD2 frames, and takes frames from the host (bmTxBuffer) and sends them to
+ * the master with dmr_network_send(), keeping a stream id for each slot.
+ * When there is nothing to do it calls dmr_network_keepalive().
+ *
+ * Parameters:
+ *   arg - Socket of the connection to the DMR host, passed as a pointer
+ *         sized integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* startDMRNetwork(void* arg)
 {
     uint8_t dmr_payload[33];
@@ -738,19 +891,24 @@ void* startDMRNetwork(void* arg)
     uint32_t current_src[2]  = {0, 0}; /* Track current transmission source */
 
     char tmp[15];
+    char location[41] = "";
+    char description[41] = "";
     readHostConfig(modemName, "config", "rxFrequency", tmp);
     rx_freq = atol(tmp);
     readHostConfig(modemName, "config", "txFrequency", tmp);
     tx_freq = atol(tmp);
-    readHostConfig(modemName, "config", "latitude", tmp);
+    /* The station position and text are saved by the dashboard in "main". */
+    readHostConfig(modemName, "main", "latitude", tmp);
     latitude = atof(tmp);
-    readHostConfig(modemName, "config", "longitude", tmp);
+    readHostConfig(modemName, "main", "longitude", tmp);
     longitude = atof(tmp);
+    readHostConfig(modemName, "main", "location", location);
+    readHostConfig(modemName, "main", "description", description);
     readHostConfig(modemName, "DMR", "colorCode", tmp);
     color_code = atoi(tmp);
     readHostConfig(modemName, "DMR", "slots", slots);
 
-    g_dmr_network = dmr_network_open(bmAddress, bmPort, dmr_id, bmPass, callsign, rx_freq, tx_freq, latitude, longitude, height, power, color_code, slots[0]);
+    g_dmr_network = dmr_network_open(bmAddress, bmPort, dmr_id, bmPass, callsign, rx_freq, tx_freq, latitude, longitude, height, power, location, description, color_code, slots[0]);
 
     if (g_dmr_network)
     {
@@ -765,13 +923,13 @@ void* startDMRNetwork(void* arg)
     }
     else
     {
-        fprintf(stderr, "Failed to initialize DMR network\n");
+        reportError(modemName, "DMR gateway", "Failed to initialize DMR network");
     }
 
     pthread_t txid;
     int err = pthread_create(&(txid), NULL, &txThread, (void*)(intptr_t)sockfd);
     if (err != 0)
-        fprintf(stderr, "Can't create DMR TX thread :[%s]", strerror(err));
+        reportError(modemName, "DMR gateway", "Can't create DMR TX thread :[%s]", strerror(err));
     else
     {
         if (debugM)
@@ -811,9 +969,9 @@ void* startDMRNetwork(void* arg)
 
             fprintf(stderr, "[DMR Network RX] [SLOT%u PKT#%u FRM#%u] ", slot, packet_count[slot - 1], frame_number);
 
-            /* Only dump first 3 packets per transmission - dump() is VERY slow! */
+            /* Only dump first 3 packets per transmission - hexDump() is VERY slow! */
             //      if (tx_packet_count <= 3)
-            //          dump((char*)"DMR", dmr_payload, 33);
+            //          hexDump((char*)"DMR", dmr_payload, 33);
 
             if (frame_type == 0x21 && !frame_started[slot - 1])
             {
@@ -1002,7 +1160,7 @@ void* startDMRNetwork(void* arg)
             static int error_count = 0;
             if (error_count < 5)
             {
-                fprintf(stderr, "[DMR Network RX] Error receiving: result=%d\n", result);
+                reportError(modemName, "DMR gateway", "[DMR Network RX] Error receiving: result=%d", result);
                 error_count++;
             }
             frame_started[0] = false;
@@ -1012,13 +1170,23 @@ void* startDMRNetwork(void* arg)
     }
 
     fprintf(stderr, "DMR network thread exited.\n");
-    int iRet  = 200;
     connected = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return 0;
 }
 
-// Thread used to send data to DMR host.
+/*
+ * txThread()
+ *
+ * Thread that sends data to the DMR host.  At regular intervals it checks
+ * txBuffer and, when a complete frame is waiting, writes it to the host
+ * socket.
+ *
+ * Parameters:
+ *   arg - Socket of the host connection, passed as a pointer sized integer.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* txThread(void* arg)
 {
     int sockfd    = (intptr_t)arg;
@@ -1054,7 +1222,7 @@ void* txThread(void* arg)
                     if (write(sockfd, buf, len) < 0)
                     {
                         pthread_mutex_unlock(&txBufMutex);
-                        fprintf(stderr, "ERROR: remote disconnect\n");
+                        reportError(modemName, "DMR gateway", "remote disconnect");
                         break;
                     }
                 }
@@ -1065,13 +1233,24 @@ void* txThread(void* arg)
         }
     }
     fprintf(stderr, "TX thread exited.\n");
-    int iRet  = 500;
     connected = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
     return NULL;
 }
 
-// Start up connection to DMR service.
+/*
+ * startClient()
+ *
+ * Thread that connects to the DMR host service, starts startDMRNetwork() and
+ * then reads the packets sent by the host: commands, connect, disconnect and
+ * status packets are handled, and DMR data and lost frames of slot 1 and
+ * slot 2 are passed to the network side.
+ *
+ * Parameters:
+ *   arg - Address of the DMR host, as a text string.
+ *
+ * Returns: Nothing useful; the thread ends by calling pthread_exit().
+ */
 void* startClient(void* arg)
 {
     int sockfd = 0;
@@ -1082,14 +1261,14 @@ void* startClient(void* arg)
     // Create socket file descriptor
     if ((sockfd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
     {
-        perror("Socket creation error");
+        reportError(modemName, "DMR gateway", "Socket creation error: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
     int flags = fcntl(sockfd, F_GETFL, 0);
     if (flags == -1)
     {
-        perror("fcntl F_GETFL");
+        reportError(modemName, "DMR gateway", "fcntl F_GETFL: %s", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
@@ -1101,9 +1280,9 @@ void* startClient(void* arg)
     serv_addr.sin_port   = htons(clientPort);
 
     // Convert IPv4 and IPv6 addresses from text to binary form
-    if (inet_pton(AF_INET, hostAddress, &serv_addr.sin_addr) <= 0)
+    if (!hostToAddress(hostAddress, &serv_addr.sin_addr))
     {  // Connect to localhost
-        perror("Invalid address/ Address not supported");
+        reportError(modemName, "DMR gateway", "Invalid address/ Address not supported");
         exit(EXIT_FAILURE);
     }
 
@@ -1112,7 +1291,7 @@ void* startClient(void* arg)
     {
         if (errno != EINPROGRESS)
         {
-            perror("connection failed");
+            reportError(modemName, "DMR gateway", "connection failed: %s", strerror(errno));
             exit(EXIT_FAILURE);
         }
     }
@@ -1123,10 +1302,9 @@ void* startClient(void* arg)
     int err = pthread_create(&(bmNetid), NULL, &startDMRNetwork, (void*)(intptr_t)sockfd);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create DMR Network thread :[%s]", strerror(err));
-        int iRet  = 100;
+        reportError(modemName, "DMR gateway", "Can't create DMR Network thread :[%s]", strerror(err));
         connected = false;
-        pthread_exit(&iRet);
+        pthread_exit(NULL);
     }
     else
     {
@@ -1156,7 +1334,7 @@ void* startClient(void* arg)
 
         if (len != 1)
         {
-            fprintf(stderr, "DMR_Gateway: error when reading from DMR host, errno=%d\n", errno);
+            reportError(modemName, "DMR gateway", "DMR_Gateway: error when reading from DMR host, errno=%d", errno);
             break;
         }
 
@@ -1201,7 +1379,7 @@ void* startClient(void* arg)
         memcpy(type, buffer + 4, typeLen);
 
         if (debugM)
-            dump((char*)"DMR Service data:", (unsigned char*)buffer, respLen);
+            hexDump((char*)"DMR Service data:", (unsigned char*)buffer, respLen);
 
         if (memcmp(type, TYPE_COMMAND, typeLen) == 0)
         {
@@ -1288,18 +1466,32 @@ void* startClient(void* arg)
 
     fprintf(stderr, "Client thread exited.\n");
     close(sockfd);
-    int iRet  = 100;
     connected = false;
-    pthread_exit(&iRet);
+    pthread_exit(NULL);
 }
 
+/*
+ * main()
+ *
+ * Program entry.  Parses the command line (-m modem number 1 to 10, which
+ * also selects the TCP port; -d daemon; -x debug; -v version), reads the
+ * master settings (BM_Name, BM_pass, BM_Address, BM_port, ID and callsign)
+ * from the database, starts the client thread and then runs until the
+ * program is stopped.
+ *
+ * Parameters:
+ *   argc - Number of command line arguments.
+ *   argv - Command line arguments.
+ *
+ * Returns: 0 on exit, 1 on a bad argument.
+ */
 int main(int argc, char** argv)
 {
     bool daemon = false;
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
     {
         switch (c)
         {
@@ -1308,7 +1500,7 @@ int main(int argc, char** argv)
                 modemId = atoi(optarg);
                 if (modemId < 1 || modemId > 10)
                 {
-                    fprintf(stderr, "Invalid modem number.\n");
+                    reportError(modemName, "DMR gateway", "Invalid modem number.");
                     return 1;
                 }
                 sprintf(modemName, "modem%d", modemId);
@@ -1316,8 +1508,11 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 'a':
+                snprintf(DMRHost, sizeof(DMRHost), "%s", optarg);   /* where the protocol service runs */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -1329,7 +1524,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: DMR_Gateway [-m modem_number (1-10)] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: DMR_Gateway [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
                 return 1;
         }
     }
@@ -1340,7 +1535,7 @@ int main(int argc, char** argv)
 
         if (pid < 0)
         {
-            fprintf(stderr, "DMR_Gateway: error in fork(), exiting\n");
+            reportError(modemName, "DMR gateway", "DMR_Gateway: error in fork(), exiting");
             return 1;
         }
 
@@ -1372,7 +1567,7 @@ int main(int argc, char** argv)
     int err = pthread_create(&(clientid), NULL, &startClient, DMRHost);
     if (err != 0)
     {
-        fprintf(stderr, "Can't create DMR host thread :[%s]", strerror(err));
+        reportError(modemName, "DMR gateway", "Can't create DMR host thread :[%s]", strerror(err));
         return 1;
     }
     else

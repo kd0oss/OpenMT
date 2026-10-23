@@ -1,4 +1,5 @@
 #!/bin/bash
+# Created by Rick KD0OSS
 # Turns a list of NXDN ids into SQL for modem_host.nxdn_ids.  Input lines are
 #   id,callsign,name...   or   id<TAB>callsign<TAB>name...      (# starts a comment)
 #   bash nxdn_ids_to_sql.sh NXDN.csv | mysql -u root -p modem_host

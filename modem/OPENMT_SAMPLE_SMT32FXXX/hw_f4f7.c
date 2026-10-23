@@ -1,3 +1,4 @@
+/* Created by Rick KD0OSS */
 /*
  *  hw_f4f7.c - STM32F446 and STM32F722 hardware layer.
  *
@@ -72,11 +73,33 @@
 #define PULL_UP             1U
 #define PULL_DOWN           2U
 
+/*
+ * gpioOf()
+ *
+ * Gets the GPIO port register block for a pin number (port number in the
+ * high nibble: 0 = A, 1 = B, ...).
+ *
+ * Parameters:
+ *   pin - Pin number encoded as (port << 4) | bit.
+ *
+ * Returns: Pointer to the port's registers.
+ */
 static GPIO_TypeDef *gpioOf(uint8_t pin)
 {
     return (GPIO_TypeDef *)(GPIOA_BASE + ((uint32_t)(pin >> 4) * 0x400U));
 }
 
+/*
+ * gpioClock()
+ *
+ * Turns on the clock of the pin's GPIO port and waits for it to take effect.
+ * Does nothing for PIN_NONE.
+ *
+ * Parameters:
+ *   pin - Pin number encoded as (port << 4) | bit.
+ *
+ * Returns: nothing.
+ */
 static void gpioClock(uint8_t pin)
 {
     if (pin != PIN_NONE)
@@ -86,6 +109,22 @@ static void gpioClock(uint8_t pin)
     }
 }
 
+/*
+ * gpioConfig()
+ *
+ * Configures a pin: mode, alternate function (for alternate function mode),
+ * push-pull output type, fast speed and pull resistor.  The port clock is
+ * enabled first.  Does nothing for PIN_NONE.
+ *
+ * Parameters:
+ *   pin  - Pin number encoded as (port << 4) | bit.
+ *   mode - Pin mode (input, output, alternate function or analog).
+ *   af   - Alternate function number, used only when mode is the alternate
+ *          function mode.
+ *   pull - Pull resistor setting.
+ *
+ * Returns: nothing.
+ */
 static void gpioConfig(uint8_t pin, uint32_t mode, uint32_t af, uint32_t pull)
 {
     GPIO_TypeDef *g = gpioOf(pin);
@@ -114,6 +153,18 @@ static void gpioConfig(uint8_t pin, uint32_t mode, uint32_t af, uint32_t pull)
     g->MODER = (g->MODER & ~(3UL << (n * 2U))) | (mode << (n * 2U));
 }
 
+/*
+ * gpioWrite()
+ *
+ * Drives a pin high or low using the atomic set/reset register.  Does
+ * nothing for PIN_NONE.
+ *
+ * Parameters:
+ *   pin   - Pin number encoded as (port << 4) | bit.
+ *   level - true for high, false for low.
+ *
+ * Returns: nothing.
+ */
 static void gpioWrite(uint8_t pin, bool level)
 {
     GPIO_TypeDef *g = gpioOf(pin);
@@ -126,6 +177,16 @@ static void gpioWrite(uint8_t pin, bool level)
     g->BSRR = level ? (1UL << n) : (1UL << (n + 16U));
 }
 
+/*
+ * gpioRead()
+ *
+ * Reads the level of a pin.
+ *
+ * Parameters:
+ *   pin - Pin number encoded as (port << 4) | bit.
+ *
+ * Returns: true if the pin is high.
+ */
 static bool gpioRead(uint8_t pin)
 {
     return (gpioOf(pin)->IDR & (1UL << (pin & 0x0FU))) != 0U;
@@ -142,21 +203,61 @@ static uint32_t timClk2Hz;                  /* TIM1 input clock          */
 
 static volatile uint32_t msTicks;
 
+/*
+ * SysTick_Handler()
+ *
+ * 1 ms system tick interrupt; counts milliseconds for hw_millis().
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void SysTick_Handler(void)
 {
     msTicks++;
 }
 
+/*
+ * hw_chip_id()
+ *
+ * Reads the chip's debug ID code (DBGMCU_IDCODE).
+ *
+ * Parameters: none.
+ *
+ * Returns: The ID code.
+ */
 uint32_t hw_chip_id(void)
 {
     return *(volatile uint32_t *)0xE0042000UL;      /* DBGMCU_IDCODE */
 }
 
+/*
+ * hw_millis()
+ *
+ * Gets the time since start-up.
+ *
+ * Parameters: none.
+ *
+ * Returns: Milliseconds (wraps after about 49 days).
+ */
 uint32_t hw_millis(void)
 {
     return msTicks;
 }
 
+/*
+ * waitFlag()
+ *
+ * Waits, for a limited time, for bits in a register to be set or cleared.
+ *
+ * Parameters:
+ *   reg  - Register to watch.
+ *   mask - Bits to test.
+ *   set  - true to wait until any masked bit is set, false until all are
+ *          clear.
+ *
+ * Returns: true if the condition was met, false on timeout.
+ */
 static bool waitFlag(volatile uint32_t *reg, uint32_t mask, bool set)
 {
     uint32_t t = 400000U;
@@ -171,6 +272,16 @@ static bool waitFlag(volatile uint32_t *reg, uint32_t mask, bool set)
     return false;
 }
 
+/*
+ * ppreBits()
+ *
+ * Converts an APB divider to the value of the PPRE register field.
+ *
+ * Parameters:
+ *   div - Divider (1, 2, 4, 8 or 16).
+ *
+ * Returns: Field value; 0 for a divider of 1.
+ */
 static uint32_t ppreBits(uint32_t div)
 {
     switch (div)
@@ -189,7 +300,16 @@ static const clk_pll_limits_t pllLimits =
     OVERDRIVE_ABOVE_HZ, MIN_VCO_HZ, 432000000UL
 };
 
-/* Back to the HSI with the PLL stopped and all dividers at 1 */
+/*
+ * pllOff()
+ *
+ * Goes back to the internal oscillator as system clock with the PLL stopped
+ * and all bus dividers at 1.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void pllOff(void)
 {
     RCC->CR |= RCC_CR_HSION;
@@ -201,7 +321,21 @@ static void pllOff(void)
     waitFlag(&RCC->CR, RCC_CR_PLLRDY, false);
 }
 
-/* Program the PLL from the plan and switch SYSCLK to it */
+/*
+ * runOnPll()
+ *
+ * Programs the PLL from a plan, sets the bus dividers, starts the PLL,
+ * switches on over-drive if the plan needs it, sets the flash wait states
+ * and finally switches SYSCLK to the PLL.
+ *
+ * Parameters:
+ *   plan    - PLL plan from clk_plan_pll().
+ *   fromHse - true if the PLL source is the crystal, false for the internal
+ *             oscillator.
+ *
+ * Returns: true on success, false if the PLL, over-drive or flash setting
+ *   was not accepted in time.
+ */
 static bool runOnPll(const clk_pll_plan_t *plan, bool fromHse)
 {
     uint32_t keep = 0x3FFFFUL | (1UL << 22) | (0xFUL << 24);
@@ -247,6 +381,16 @@ static bool runOnPll(const clk_pll_plan_t *plan, bool fromHse)
     return waitFlag(&RCC->CFGR, RCC_CFGR_SWS_PLL, true);
 }
 
+/*
+ * takePlan()
+ *
+ * Stores the system, bus and timer clock frequencies of a plan.
+ *
+ * Parameters:
+ *   plan - Plan that is now running.
+ *
+ * Returns: nothing.
+ */
 static void takePlan(const clk_pll_plan_t *plan)
 {
     sysclkHz = plan->sysHz;
@@ -256,11 +400,34 @@ static void takePlan(const clk_pll_plan_t *plan)
     timClk2Hz = plan->timClk2Hz;
 }
 
+/*
+ * sampleTimerOnApb2()
+ *
+ * Tells whether the sample timer is on the APB2 bus (TIM1 is; the others are
+ * on APB1).
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the sample timer is on APB2.
+ */
 static bool sampleTimerOnApb2(void)
 {
     return SAMPLE_TIM_N == 1;
 }
 
+/*
+ * clockRun()
+ *
+ * Plans and starts the PLL from the given source.
+ *
+ * Parameters:
+ *   srcHz   - Source frequency in Hz.
+ *   fromHse - true if the source is the crystal, false for the internal
+ *             oscillator.
+ *
+ * Returns: true if the clock now runs from the PLL, false if no plan fits or
+ *   the switch failed.
+ */
 static bool clockRun(uint32_t srcHz, bool fromHse)
 {
     clk_pll_plan_t plan;
@@ -278,6 +445,17 @@ static bool clockRun(uint32_t srcHz, bool fromHse)
     return true;
 }
 
+/*
+ * clockInit()
+ *
+ * Sets up the system clock: tries the crystal first (when configured), then
+ * the internal oscillator with the PLL, and if both fail runs directly from
+ * the internal 16 MHz oscillator.  Finally starts the 1 ms SysTick.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void clockInit(void)
 {
     bool ok = false;
@@ -320,7 +498,16 @@ static void clockInit(void)
 /* ------------------------------------------------------------------ */
 /* PTT, inhibit and LEDs                                              */
 /* ------------------------------------------------------------------ */
-/* Short critical section (PRIMASK) - the sample interrupt also touches PTT */
+/*
+ * irqSave()
+ *
+ * Starts a short critical section by disabling interrupts, because the
+ * sample interrupt also touches PTT.
+ *
+ * Parameters: none.
+ *
+ * Returns: The previous interrupt mask, to pass to irqRestore().
+ */
 static inline uint32_t irqSave(void)
 {
     uint32_t primask;
@@ -329,6 +516,16 @@ static inline uint32_t irqSave(void)
     return primask;
 }
 
+/*
+ * irqRestore()
+ *
+ * Ends a critical section started by irqSave().
+ *
+ * Parameters:
+ *   primask - Value returned by irqSave().
+ *
+ * Returns: nothing.
+ */
 static inline void irqRestore(uint32_t primask)
 {
     __asm volatile ("msr primask, %0" : : "r" (primask) : "memory");
@@ -337,6 +534,16 @@ static inline void irqRestore(uint32_t primask)
 static volatile bool pttWanted;
 static volatile bool pttInvert;
 
+/*
+ * inhibited()
+ *
+ * Tells whether the PTT inhibit input is active.  An inhibit pin is
+ * optional.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the inhibit pin is configured and at its active level.
+ */
 static bool inhibited(void)
 {
     if (INHIBIT_PIN == PIN_NONE)
@@ -346,9 +553,19 @@ static bool inhibited(void)
     return gpioRead(INHIBIT_PIN) == (INHIBIT_ACTIVE_HIGH != 0);
 }
 
-/* Reads the wanted state and writes the pin in one critical section, so
- * the sample interrupt (which unkeys at the end of a transmission) can
- * never be overtaken by a stale write from the main loop. */
+/*
+ * pttApply()
+ *
+ * Drives the PTT pin from the wanted state, the inhibit input, the
+ * configured polarity and the host's PTT invert flag.  The state is read and
+ * the pin written inside one critical section so the sample interrupt, which
+ * un-keys at the end of a transmission, can never be overtaken by a stale
+ * write from the main loop.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void pttApply(void)
 {
     uint32_t primask = irqSave();
@@ -363,18 +580,51 @@ static void pttApply(void)
     irqRestore(primask);
 }
 
+/*
+ * hw_ptt()
+ *
+ * Keys or un-keys the transmitter.  The request is remembered, but the pin
+ * stays un-keyed while the inhibit input is active.
+ *
+ * Parameters:
+ *   on - true to transmit.
+ *
+ * Returns: nothing.
+ */
 void hw_ptt(bool on)
 {
     pttWanted = on;
     pttApply();
 }
 
+/*
+ * hw_set_ptt_invert()
+ *
+ * Sets the PTT invert flag from the host's configuration and updates the
+ * pin.
+ *
+ * Parameters:
+ *   invert - true to invert the PTT output.
+ *
+ * Returns: nothing.
+ */
 void hw_set_ptt_invert(bool invert)
 {
     pttInvert = invert;
     pttApply();
 }
 
+/*
+ * hw_ptt_state()
+ *
+ * Reports what the PTT pin is really doing, for diagnostics.
+ *
+ * Parameters: none.
+ *
+ * Returns: Bit 0: PTT wanted, bit 1: output latch high, bit 2: pin reads
+ *   high, bit 3: inhibit active, bit 4: host PTT invert set.  0 if there is no
+ *   PTT pin.
+ */
 uint8_t hw_ptt_state(void)
 {
     GPIO_TypeDef *g = gpioOf(PTT_PIN);
@@ -393,6 +643,16 @@ uint8_t hw_ptt_state(void)
     return s;
 }
 
+/*
+ * hw_poll()
+ *
+ * Slow housekeeping for the main loop: when the inhibit input changes, re-
+ * applies PTT so it is dropped or restored.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void hw_poll(void)
 {
     static bool lastInhibit;
@@ -410,6 +670,18 @@ static const uint8_t ledPins[NUM_LEDS] =
     LED0_PIN, LED1_PIN, LED2_PIN, LED3_PIN, LED4_PIN, LED5_PIN, LED6_PIN, LED7_PIN
 };
 
+/*
+ * hw_led()
+ *
+ * Switches an LED on or off, taking the LED polarity into account.  Numbers
+ * outside the LED range are ignored.
+ *
+ * Parameters:
+ *   n  - LED number (0 to NUM_LEDS - 1).
+ *   on - true to light the LED.
+ *
+ * Returns: nothing.
+ */
 void hw_led(uint8_t n, bool on)
 {
     if (n < NUM_LEDS)
@@ -553,7 +825,17 @@ void hw_led(uint8_t n, bool on)
 
 #define DMA_STREAM(n)   ((DMA_Stream_TypeDef *)(UART_DMA_BASE + 0x18U * (n)))
 
-/* Per stream flag position inside LISR/HISR (and LIFCR/HIFCR) */
+/*
+ * dmaShift()
+ *
+ * Gets the bit position of a DMA stream's flags inside the low or high
+ * status register.
+ *
+ * Parameters:
+ *   s - Stream number.
+ *
+ * Returns: Bit position (0, 6, 16 or 22).
+ */
 static uint32_t dmaShift(uint32_t s)
 {
     static const uint8_t sh[4] = {0, 6, 16, 22};
@@ -561,11 +843,32 @@ static uint32_t dmaShift(uint32_t s)
     return sh[s & 3U];
 }
 
+/*
+ * dmaStatus()
+ *
+ * Reads a DMA stream's status flags, shifted to the bottom of the value.
+ *
+ * Parameters:
+ *   s - Stream number.
+ *
+ * Returns: The stream's flags.
+ */
 static uint32_t dmaStatus(uint32_t s)
 {
     return ((s < 4U) ? UART_DMA->LISR : UART_DMA->HISR) >> dmaShift(s);
 }
 
+/*
+ * dmaClear()
+ *
+ * Clears all of a DMA stream's flags (transfer complete, half transfer,
+ * error and FIFO flags).
+ *
+ * Parameters:
+ *   s - Stream number.
+ *
+ * Returns: nothing.
+ */
 static void dmaClear(uint32_t s)
 {
     uint32_t mask = 0x3DUL << dmaShift(s);          /* TC HT TE DME FE   */
@@ -598,26 +901,77 @@ static uint16_t          uartTxTail;
 static uint16_t          uartTxInFlight;
 static volatile uint32_t uartErr;
 
+/*
+ * rxHeadIndex()
+ *
+ * Gets the position where the DMA will write the next received UART byte.
+ *
+ * Parameters: none.
+ *
+ * Returns: Index into the UART receive ring.
+ */
 static uint16_t rxHeadIndex(void)
 {
     return (uint16_t)((UART_RX_SIZE - DMA_STREAM(UART_RX_STREAM)->NDTR) & (UART_RX_SIZE - 1U));
 }
 
+/*
+ * hw_uart_rx_available()
+ *
+ * Gets the number of received bytes waiting in the UART receive ring.
+ *
+ * Parameters: none.
+ *
+ * Returns: Number of bytes.
+ */
 uint16_t hw_uart_rx_available(void)
 {
     return (uint16_t)((rxHeadIndex() - uartRxTail) & (UART_RX_SIZE - 1U));
 }
 
+/*
+ * hw_uart_rx_peek()
+ *
+ * Reads a received byte without removing it.
+ *
+ * Parameters:
+ *   offset - Position counted from the oldest unread byte.
+ *
+ * Returns: The byte.
+ */
 uint8_t hw_uart_rx_peek(uint16_t offset)
 {
     return uartRx[(uartRxTail + offset) & (UART_RX_SIZE - 1U)];
 }
 
+/*
+ * hw_uart_rx_consume()
+ *
+ * Removes bytes from the front of the UART receive ring.
+ *
+ * Parameters:
+ *   count - Number of bytes to remove.
+ *
+ * Returns: nothing.
+ */
 void hw_uart_rx_consume(uint16_t count)
 {
     uartRxTail = (uint16_t)((uartRxTail + count) & (UART_RX_SIZE - 1U));
 }
 
+/*
+ * hw_uart_poll()
+ *
+ * Keeps the UART transmit DMA running and counts UART errors (an error
+ * condition counts once until it clears on the F446; on the F722 each error
+ * flag found is counted and cleared).  When the DMA has finished a block,
+ * the sent bytes are released and the next contiguous block of the transmit
+ * ring is started.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void hw_uart_poll(void)
 {
     DMA_Stream_TypeDef *tx = DMA_STREAM(UART_TX_STREAM);
@@ -685,6 +1039,19 @@ void hw_uart_poll(void)
     }
 }
 
+/*
+ * hw_uart_tx()
+ *
+ * Queues bytes for sending to the host.  Either all the bytes are queued or
+ * none.
+ *
+ * Parameters:
+ *   data - Bytes to send.
+ *   len  - Number of bytes.
+ *
+ * Returns: true if the bytes were queued, false if there was not enough
+ *   room.
+ */
 bool hw_uart_tx(const uint8_t *data, uint16_t len)
 {
     uint16_t freeBytes = (uint16_t)((uartTxTail - uartTxHead - 1U) & (UART_TX_SIZE - 1U));
@@ -703,11 +1070,32 @@ bool hw_uart_tx(const uint8_t *data, uint16_t len)
     return true;
 }
 
+/*
+ * hw_uart_errors()
+ *
+ * Gets the number of UART overrun, framing and noise errors seen.
+ *
+ * Parameters: none.
+ *
+ * Returns: Error count.
+ */
 uint32_t hw_uart_errors(void)
 {
     return uartErr;
 }
 
+/*
+ * uartInit()
+ *
+ * Sets up the UART at the configured baud rate with DMA: a circular DMA
+ * stream receives into the receive ring and a second stream sends from the
+ * transmit ring.  The UART and DMA clocks and the TX and RX pins (with a
+ * pull-up on RX) are set up as well.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void uartInit(void)
 {
     DMA_Stream_TypeDef *rx = DMA_STREAM(UART_RX_STREAM);
@@ -770,6 +1158,17 @@ static void uartInit(void)
 /* ------------------------------------------------------------------ */
 #define ADC_CR2_RUN     (ADC_CR2_ADON | ADC_CR2_SWSTART)
 
+/*
+ * adcInit()
+ *
+ * Sets up ADC1 for single conversions of the receive audio channel: chooses
+ * the ADC clock divider to stay at or below 36 MHz and sets the sample time
+ * and the channel.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void adcInit(void)
 {
     uint32_t adcpre;
@@ -818,6 +1217,15 @@ static void adcInit(void)
     ADC1->CR2 = ADC_CR2_RUN;                        /* first conversion  */
 }
 
+/*
+ * dacInit()
+ *
+ * Enables the DAC channel for the transmit audio and sets it to mid-scale.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void dacInit(void)
 {
     RCC->APB1ENR |= RCC_APB1ENR_DACEN;
@@ -890,6 +1298,18 @@ static bool              usingInternal;
 static uint32_t          lastTickSeen;
 static uint32_t          lastTickMs;
 
+/*
+ * timerInternal()
+ *
+ * Programs the sample timer to run from the chip's own clock at the sample
+ * rate and enables its update interrupt.  With SAMPLE_TRIM_PPM set, the
+ * period is trimmed by a whole number plus a fraction of a tick (see
+ * tim_plan_trim()), which the interrupt applies on every sample.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void timerInternal(void)
 {
     tim_plan_t plan;
@@ -918,6 +1338,17 @@ static void timerInternal(void)
 }
 
 #if EXT_CLK_HZ > 0
+/*
+ * timerExternal()
+ *
+ * Programs the sample timer to run from an external clock input (external
+ * clock mode 2) divided to the sample rate and enables its update interrupt.
+ * With SAMPLE_TRIM_PPM set, the period is trimmed as in timerInternal().
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void timerExternal(void)
 {
     /* External clock mode 2: ETR -> ETPS -> counter */
@@ -948,6 +1379,17 @@ static void timerExternal(void)
 }
 #endif
 
+/*
+ * timerInit()
+ *
+ * Enables the sample timer clock and sets it up from the external clock if
+ * one is configured (including its input pin), otherwise from the internal
+ * clock.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void timerInit(void)
 {
     SAMPLE_TIM_CLK();
@@ -962,6 +1404,17 @@ static void timerInit(void)
 #endif
 }
 
+/*
+ * SAMPLE_ISR()
+ *
+ * Sample timer interrupt: applies the sample clock trim (if enabled), reads
+ * the ADC result of the previous conversion, starts the next conversion,
+ * calls engine_sample_tick() and writes its result to the DAC.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void SAMPLE_ISR(void)
 {
     uint16_t raw;
@@ -987,6 +1440,17 @@ void SAMPLE_ISR(void)
     sampleTicks++;
 }
 
+/*
+ * hw_start_sampling()
+ *
+ * Starts the sample timer: sets the interrupt to the highest priority,
+ * discards the interrupt left pending by the timer's update event, enables
+ * the interrupt and starts the counter.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void hw_start_sampling(void)
 {
     NVIC_SetPriority(SAMPLE_TIM_IRQn, 0);
@@ -996,6 +1460,19 @@ void hw_start_sampling(void)
     SAMPLE_TIM->CR1 |= TIM_CR1_CEN;
 }
 
+/*
+ * hw_ext_clock_missing()
+ *
+ * Checks that the sample interrupt is still running from the external clock.
+ * If it stops for more than 250 ms, the external clock is reported missing
+ * and, if EXT_CLK_FALLBACK is set, the timer is switched to the internal
+ * clock.  Without an external clock configured it always returns false.
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the external clock is missing or the internal clock is in
+ *   use.
+ */
 bool hw_ext_clock_missing(void)
 {
 #if EXT_CLK_HZ > 0
@@ -1033,7 +1510,18 @@ bool hw_ext_clock_missing(void)
 
 /* ------------------------------------------------------------------ */
 /* Watchdog                                                           */
-/* ------------------------------------------------------------------ */
+/*
+ * hw_enter_bootloader()
+ *
+ * Restarts the chip into the ROM boot loader: switches PTT off, lets the
+ * UART send the pending ACK for 20 ms, stores the boot magic value and
+ * resets.  Reset_Handler() sees the magic value and jumps to the boot
+ * loader.  Does not return.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void hw_enter_bootloader(void)
 {
     extern uint32_t bootMagic;
@@ -1053,6 +1541,16 @@ void hw_enter_bootloader(void)
     }
 }
 
+/*
+ * hw_watchdog_kick()
+ *
+ * Restarts the watchdog countdown (does nothing if the watchdog is
+ * disabled).
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void hw_watchdog_kick(void)
 {
 #if WATCHDOG_ENABLE
@@ -1060,6 +1558,16 @@ void hw_watchdog_kick(void)
 #endif
 }
 
+/*
+ * watchdogInit()
+ *
+ * Starts the independent watchdog with a timeout of about 1 second.  The
+ * watchdog is stopped while a debugger halts the chip.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 static void watchdogInit(void)
 {
 #if WATCHDOG_ENABLE
@@ -1073,7 +1581,16 @@ static void watchdogInit(void)
 
 /* ------------------------------------------------------------------ */
 /* Init                                                               */
-/* ------------------------------------------------------------------ */
+/*
+ * hw_init()
+ *
+ * Initialises the hardware: PTT, LED and inhibit pins, the system clock,
+ * UART, ADC, DAC, sample timer and watchdog.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
 void hw_init(void)
 {
     uint8_t i;

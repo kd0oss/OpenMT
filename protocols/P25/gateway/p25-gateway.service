@@ -7,8 +7,8 @@ Requires=p25-host.service
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/OpenMT/protocols/P25
-ExecStart=/home/pi/OpenMT/protocols/P25/build/p25_gateway
+WorkingDirectory=/home/pi/OpenMT/protocols/P25/gateway
+ExecStart=/home/pi/OpenMT/protocols/P25/gateway/build/p25_gateway
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
