@@ -710,8 +710,8 @@ static void onRxFrame(void* c, const uint8_t* frame, bool lost)
  */
 static bool findNxdnId(unsigned int id, char* callsign, size_t callsignSize, char* name, size_t nameSize)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     char query[128];
     bool found = false;
     MYSQL* conn;
@@ -725,7 +725,7 @@ static bool findNxdnId(unsigned int id, char* callsign, size_t callsignSize, cha
 
     if (conn != NULL)
     {
-        if (mysql_real_connect(conn, dbhost, "openmt", passwd, "", 0, NULL, 0) != NULL)
+        if (mysql_real_connect(conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) != NULL)
         {
             snprintf(query, sizeof(query), "SELECT Callsign, Name FROM modem_host.nxdn_ids WHERE NXDN_Id = %u LIMIT 1", id);
 
@@ -2030,7 +2030,7 @@ int main(int argc, char** argv)
     bool daemonize = false;
     int  c;
 
-    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:s:u:p:c:dxv")) != -1)
     {
         switch (c)
         {
@@ -2049,6 +2049,12 @@ int main(int argc, char** argv)
             case 'a':
                 snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
                 break;
+            case 's':
+            case 'u':
+            case 'p':
+            case 'c':
+                dbOption(c, optarg);   /* database server, user, password, configuration file */
+                break;
             case ':':
                 fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
@@ -2062,7 +2068,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: NXDN_Service [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: NXDN_Service [-m modem_number (1-10)] [-a address] [-s dbserver] [-u dbuser] [-p dbpassword] [-c configfile] [-d] [-v] [-x]\n");
                 return 1;
         }
     }

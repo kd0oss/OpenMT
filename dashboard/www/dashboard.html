@@ -1612,6 +1612,8 @@ async function manageDelete()
    The list of services comes from the database (modem_host.services), so this page knows nothing about
    any RF mode. A button only writes a request; the service manager on the Pi carries it out. */
 var servicesTimer = null;
+var servicesSeq = 0;        /* number of the newest getServices request */
+var servicesLast = null;    /* the last list that was drawn */
 var servicesBusy = {};      /* unit name -> true while a request for it is being carried out */
 
 /* Show the tab: load the list now and keep it fresh while the tab is open */
@@ -1620,7 +1622,7 @@ function servicesInit()
   if (servicesTimer != null)
     clearInterval(servicesTimer);
   servicesReload(false);
-  servicesTimer = setInterval(function () { servicesReload(true); }, 3000);
+  servicesTimer = setInterval(function () { servicesReload(true); }, 2000);
   servicesPowerLoad();
   hostUpdLoad(false);
 }
@@ -1727,11 +1729,14 @@ async function servicesReload(quiet)
     return;
   }
   var res;
+  var seq = ++servicesSeq;      /* only the newest answer is drawn: an older, slower one must not undo it */
+  if (!servicesTimer)           /* the page keeps itself up to date as long as the tab is showing */
+    servicesTimer = setInterval(function () { servicesReload(true); }, 2000);
   if (quiet)
   {
     try
     {
-      var resp = await fetch("data_query.php?command=getServices");
+      var resp = await fetch("data_query.php?command=getServices", { cache: 'no-store' });
       var txt = await resp.text();
       if (txt == "unauthorized")
       {
@@ -1748,9 +1753,10 @@ async function servicesReload(quiet)
     }
   }
   else
-    res = await manageFetch("data_query.php?command=getServices");
-  if (res == null)
+    res = await manageFetch("data_query.php?command=getServices", { cache: 'no-store' });
+  if (res == null || seq != servicesSeq)
     return;
+  servicesLast = res;
   servicesDraw(res);
 }
 
@@ -2034,12 +2040,60 @@ async function servicesAction(svc, action)
       result = null;
     }
   }
-  delete servicesBusy[svc.unit];
   if (result === null)
     alert("The service manager did not answer. Check that it is running on the Pi.");
   else if (result != 'ok')
     alert(svc.label + ": " + action + " was not done (" + result + ").");
+  else
+    await servicesSettle(svc, action);
+  delete servicesBusy[svc.unit];
   servicesReload(false);
+}
+
+/* True when the state reported for a unit is what the action should have led to */
+function servicesReached(row, action)
+{
+  if (row == null)
+    return true;
+  if (action == 'start' || action == 'restart')
+    return row.active == 'active' || row.active == 'failed';
+  if (action == 'stop')
+    return row.active == 'inactive' || row.active == 'failed';
+  if (action == 'enable')
+    return row.enabled != 'disabled';
+  if (action == 'disable')
+    return row.enabled == 'disabled';
+  return true;
+}
+
+/* After the service manager has carried out a request, a service can still be starting or stopping.  Read the
+   list every second (up to 12 seconds) until the unit shows its new state, so the row is right without another
+   click. */
+async function servicesSettle(svc, action)
+{
+  for (var i = 0; i < 12; i++)
+  {
+    var row = null;
+    try
+    {
+      var seq = ++servicesSeq;
+      var resp = await fetch("data_query.php?command=getServices", { cache: 'no-store' });
+      var res = JSON.parse(await resp.text());
+      if (seq == servicesSeq)
+      {
+        servicesLast = res;
+        servicesDraw(res);
+      }
+      res.services.forEach(function (r) { if (r.unit == svc.unit) row = r; });
+    }
+    catch (err)
+    {
+      row = null;
+    }
+    if (row != null && servicesReached(row, action))
+      return;
+    await new Promise(function (r) { setTimeout(r, 1000); });
+  }
 }
 
 /* Show "n more" / "n above" under a section when part of it is scrolled out of sight */

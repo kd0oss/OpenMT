@@ -149,10 +149,15 @@ uint8_t countBits64(uint64_t bits)
  */
 char* readConfig(const char* section, const char* key, char* value)
 {
-    FILE* file = fopen("/etc/openmt.ini", "r");
+    /* command line option or environment variable wins over the file */
+    if (dbConfigOverride(section, key, value))
+        return value;
+
+    const char* path = configFilePath();
+    FILE* file = fopen(path, "r");
     if (file == NULL)
     {
-        perror("Error opening configuration file [/etc/openmt.ini]");
+        fprintf(stderr, "Error opening configuration file [%s]: %s\n", path, strerror(errno));
         return NULL;
     }
 
@@ -315,8 +320,8 @@ static void sbAppendEscaped(StringBuilder* sb, MYSQL* conn, const char* str)
 bool saveHistory(const char* modem_name, const char* mode, const char* type, const char* src, const char* suffix,
                 const char* dst, float loss_BER, const char* message, uint16_t duration)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     char tmp[10];
     StringBuilder query;
 
@@ -331,7 +336,7 @@ bool saveHistory(const char* modem_name, const char* mode, const char* type, con
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "saveHistory: %s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -417,8 +422,8 @@ bool saveHistory(const char* modem_name, const char* mode, const char* type, con
 bool saveLastCall(uint8_t pos, const char* modem_name, const char* mode, const char* type, const char* src, const char* suffix,
                  const char* dst, const char* message, const char* sms, const char* gps, bool isTx)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
     char tmp[12];
 
@@ -433,7 +438,7 @@ bool saveLastCall(uint8_t pos, const char* modem_name, const char* mode, const c
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -586,8 +591,8 @@ bool saveLastCall(uint8_t pos, const char* modem_name, const char* mode, const c
  */
 bool setHostConfig(const char* modem_name, const char* module_name, const char* key, const char* display_type, const char* value)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -601,7 +606,7 @@ bool setHostConfig(const char* modem_name, const char* module_name, const char* 
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -695,8 +700,8 @@ bool setHostConfig(const char* modem_name, const char* module_name, const char* 
  */
 bool readHostConfigN(const char* modem_name, const char* module_name, const char* key, char* value, size_t size)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -710,7 +715,7 @@ bool readHostConfigN(const char* modem_name, const char* module_name, const char
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1023,8 +1028,8 @@ bool delGateway(const char* modem_name, const char* module_name, const char* mod
  */
 bool addHostConfigDefault(const char* modem_name, const char* module_name, const char* key, const char* display_type, const char* value)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
     bool ok;
 
@@ -1039,7 +1044,7 @@ bool addHostConfigDefault(const char* modem_name, const char* module_name, const
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1093,8 +1098,8 @@ bool addHostConfigDefault(const char* modem_name, const char* module_name, const
  */
 bool readDashbCommand(const char* modem_name, const char* command, char* value)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1108,7 +1113,7 @@ bool readDashbCommand(const char* modem_name, const char* command, char* value)
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1181,8 +1186,8 @@ bool readDashbCommand(const char* modem_name, const char* command, char* value)
  */
 bool ackDashbCommand(const char* modem_name, const char* command, const char* result)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1195,7 +1200,7 @@ bool ackDashbCommand(const char* modem_name, const char* command, const char* re
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "AckDash: %s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1237,8 +1242,8 @@ bool ackDashbCommand(const char* modem_name, const char* command, const char* re
  */
 bool clearDashbCommands(const char* modem_name)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1251,7 +1256,7 @@ bool clearDashbCommands(const char* modem_name)
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1290,8 +1295,8 @@ bool clearDashbCommands(const char* modem_name)
  */
 bool clearReflectorList(const char* type)
 {
-   char dbhost[20] = "localhost";
-    char passwd[30] = "";
+   char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1304,7 +1309,7 @@ bool clearReflectorList(const char* type)
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1343,8 +1348,8 @@ bool clearReflectorList(const char* type)
  */
 bool delReflector(const char* type, const char* name)
 {
-   char dbhost[20] = "localhost";
-    char passwd[30] = "";
+   char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1357,7 +1362,7 @@ bool delReflector(const char* type, const char* name)
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1405,8 +1410,8 @@ bool delReflector(const char* type, const char* name)
 bool addReflector(const char* type, const char* name, const char* ip4Addr, const char* ip6Addr, uint16_t port,
                   const char* dashboardURL, const char* refl_title, const char* country)
 {
-   char dbhost[20] = "localhost";
-    char passwd[30] = "";
+   char dbhost[128] = "localhost";
+    char passwd[128] = "";
     char tmp[6];
     StringBuilder query;
 
@@ -1420,7 +1425,7 @@ bool addReflector(const char* type, const char* name, const char* ip4Addr, const
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1484,8 +1489,8 @@ bool addReflector(const char* type, const char* name, const char* ip4Addr, const
  */
 bool findReflector(const char* type, const char* name, char* ip4, uint16_t* port)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1498,7 +1503,7 @@ bool findReflector(const char* type, const char* name, char* ip4, uint16_t* port
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1569,8 +1574,8 @@ bool findReflector(const char* type, const char* name, char* ip4, uint16_t* port
  */
 bool findDMRId(const unsigned int DMRId, char* callsign, size_t callsignSize, char* name, size_t nameSize)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     char idStr[12];
     StringBuilder query;
 
@@ -1584,7 +1589,7 @@ bool findDMRId(const unsigned int DMRId, char* callsign, size_t callsignSize, ch
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1655,8 +1660,8 @@ bool findDMRId(const unsigned int DMRId, char* callsign, size_t callsignSize, ch
  */
 bool setReflectorStatus(const char* modem_name, const char* module, const char* name, bool linked)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1669,7 +1674,7 @@ bool setReflectorStatus(const char* modem_name, const char* module, const char* 
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1728,8 +1733,8 @@ bool setReflectorStatus(const char* modem_name, const char* module, const char* 
  */
 bool clearReflLinkStatus(const char* modem_name, const char* module)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1742,7 +1747,7 @@ bool clearReflLinkStatus(const char* modem_name, const char* module)
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -1785,8 +1790,8 @@ bool clearReflLinkStatus(const char* modem_name, const char* module)
  */
 bool logError(const char* modem_name, const char* module, const char* message)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -1799,7 +1804,7 @@ bool logError(const char* modem_name, const char* module, const char* message)
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -2038,8 +2043,8 @@ void errorFlush(void)
  */
 bool setStatus(const char* modem_name, const char* module, const char* property, const char* value)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -2052,7 +2057,7 @@ bool setStatus(const char* modem_name, const char* module, const char* property,
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -2154,8 +2159,8 @@ bool setStatus(const char* modem_name, const char* module, const char* property,
  */
 bool readStatus(const char* modem_name, const char* module, const char* property, char* value)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -2168,7 +2173,7 @@ bool readStatus(const char* modem_name, const char* module, const char* property
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -2232,8 +2237,8 @@ bool readStatus(const char* modem_name, const char* module, const char* property
  */
 bool delStatus(const char* modem_name, const char* module, const char* property)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     StringBuilder query;
 
     readConfig("database", "host", dbhost);
@@ -2246,7 +2251,7 @@ bool delStatus(const char* modem_name, const char* module, const char* property)
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -2294,8 +2299,8 @@ bool delStatus(const char* modem_name, const char* module, const char* property)
 bool addGPS(const int id, const float latitude, const float longitude,
             const uint16_t altitude, const uint16_t bearing, const uint16_t speed)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
 
     readConfig("database", "host", dbhost);
     readConfig("database", "passwd", passwd);
@@ -2307,7 +2312,7 @@ bool addGPS(const int id, const float latitude, const float longitude,
         exit(1);
     }
 
-    if (mysql_real_connect(mysql_conn, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "%s\n", mysql_error(mysql_conn));
         mysql_close(mysql_conn);
@@ -3043,3 +3048,138 @@ bool hostToAddress(const char* host, struct in_addr* out)
     freeaddrinfo(res);
     return true;
 }  /** end hostToAddress **/
+
+/*
+ * Database settings given on the command line.  A setting given there wins over the environment variable of the
+ * same purpose, and that wins over the [database] section of the configuration file.
+ */
+static char dbOptHost[128]   = "";
+static char dbOptUser[64]    = "";
+static char dbOptPasswd[128] = "";
+static char dbOptConfig[256] = "";
+static char dbUserBuf[64]    = "";
+
+/*
+ * dbOption()
+ *
+ * Handles one of the database command line options of the hosts, gateways and Modem_Host.  Call it from the
+ * option switch with the option letter and its argument:
+ *     -s  database server (address or name)     -u  database user name
+ *     -p  database password                     -c  path of the configuration file
+ * The password is overwritten in the argument list after it is copied, so it does not stay visible in ps.
+ *
+ * opt - The option letter.
+ * arg - The option's argument.
+ *
+ * Returns true if the option was one of these and was taken.
+ */
+bool dbOption(int opt, char* arg)
+{
+    if (arg == NULL)
+        return false;
+
+    switch (opt)
+    {
+        case 's':
+            snprintf(dbOptHost, sizeof(dbOptHost), "%s", arg);
+            return true;
+        case 'u':
+            snprintf(dbOptUser, sizeof(dbOptUser), "%s", arg);
+            return true;
+        case 'p':
+            snprintf(dbOptPasswd, sizeof(dbOptPasswd), "%s", arg);
+            memset(arg, '*', strlen(arg));
+            return true;
+        case 'c':
+            snprintf(dbOptConfig, sizeof(dbOptConfig), "%s", arg);
+            return true;
+    }
+    return false;
+}  /** end dbOption **/
+
+/*
+ * configFilePath()
+ *
+ * Gives the path of the configuration file: the -c option, else the OPENMT_INI environment variable, else
+ * /etc/openmt.ini.
+ *
+ * Returns the path.
+ */
+const char* configFilePath(void)
+{
+    const char* env;
+
+    if (dbOptConfig[0] != '\0')
+        return dbOptConfig;
+    env = getenv("OPENMT_INI");
+    if (env != NULL && env[0] != '\0')
+        return env;
+    return "/etc/openmt.ini";
+}  /** end configFilePath **/
+
+/*
+ * dbConfigOverride()
+ *
+ * Used by readConfig() before it opens the file.  For the database host, user and password it looks for a
+ * command line option, then an environment variable (OPENMT_DB_HOST, OPENMT_DB_USER, OPENMT_DB_PASSWD).
+ *
+ * section - Section name given to readConfig().
+ * key     - Key name given to readConfig().
+ * value   - Receives the setting when one is found.  It must be large enough for the value, as for readConfig().
+ *
+ * Returns true if a setting was found and stored in value.
+ */
+bool dbConfigOverride(const char* section, const char* key, char* value)
+{
+    const char* opt = NULL;
+    const char* env = NULL;
+
+    if (strcmp(section, "database") != 0)
+        return false;
+
+    if (strcmp(key, "host") == 0)
+    {
+        opt = dbOptHost;
+        env = getenv("OPENMT_DB_HOST");
+    }
+    else if (strcmp(key, "user") == 0)
+    {
+        opt = dbOptUser;
+        env = getenv("OPENMT_DB_USER");
+    }
+    else if (strcmp(key, "passwd") == 0)
+    {
+        opt = dbOptPasswd;
+        env = getenv("OPENMT_DB_PASSWD");
+    }
+    else
+        return false;
+
+    if (opt[0] != '\0')
+        snprintf(value, 128, "%s", opt);
+    else if (env != NULL && env[0] != '\0')
+        snprintf(value, 128, "%s", env);
+    else
+        return false;
+    return true;
+}  /** end dbConfigOverride **/
+
+/*
+ * dbUser()
+ *
+ * Gives the database user name: the -u option, the OPENMT_DB_USER environment variable, "user=" in the [database]
+ * section of the configuration file, else "openmt".
+ *
+ * Returns the user name.
+ */
+const char* dbUser(void)
+{
+    if (dbUserBuf[0] == '\0')
+    {
+        char user[128] = "openmt";
+
+        readConfig("database", "user", user);
+        snprintf(dbUserBuf, sizeof(dbUserBuf), "%s", user);
+    }
+    return dbUserBuf;
+}  /** end dbUser **/

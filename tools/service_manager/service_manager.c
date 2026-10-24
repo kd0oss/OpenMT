@@ -64,11 +64,14 @@
 #define SM_MAX_UNITS      64
 #define SM_STATUS_MS      3000
 #define SM_POLL_US        500000
+#define SM_FAST_STATUS_MS 1000      /* refresh interval for a while after a request, to follow a service that is starting or stopping */
+#define SM_FAST_S         15        /* how long that lasts */
 #define SM_RUN_TIMEOUT_S  60
 #define SM_OUT_MAX        16384
 
 static volatile sig_atomic_t smStop = 0;
 static const char*           smSystemctl = "/usr/bin/systemctl";
+static time_t                smFastUntil = 0;      /* until then the states are refreshed more often */
 static unsigned              smPowerDelayS = 3;    /* seconds between reporting a power request done and doing it */
 
 /*
@@ -615,6 +618,11 @@ static void smDoCommand(MYSQL* db, long id, const char* unit, const char* action
         snprintf(result, sizeof(result), "ok");
     else
         snprintf(result, sizeof(result), "failed (code %d)", rc);
+
+    /* The new state is stored before the request is reported as done: the dashboard reads the states as soon
+       as it sees the result, and would otherwise show the old state until the next refresh. */
+    smFastUntil = time(NULL) + SM_FAST_S;
+    smRefreshStatus(db);
     smSetResult(db, id, result);
 }
 
@@ -743,7 +751,7 @@ static MYSQL* smConnect(void)
 
     if (db == NULL)
         return NULL;
-    if (mysql_real_connect(db, dbhost, "openmt", passwd, "", 0, NULL, 0) == NULL)
+    if (mysql_real_connect(db, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
     {
         fprintf(stderr, "service_manager: cannot connect to the database: %s\n", mysql_error(db));
         mysql_close(db);
@@ -796,7 +804,7 @@ int main(int argc, char** argv)
             lastRefresh = 0;
         }
 
-        bool refresh = time(NULL) - lastRefresh >= SM_STATUS_MS / 1000;
+        bool refresh = time(NULL) - lastRefresh >= (time(NULL) < smFastUntil ? SM_FAST_STATUS_MS : SM_STATUS_MS) / 1000;
 
         if (!smCycle(db, refresh))
         {

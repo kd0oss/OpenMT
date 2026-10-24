@@ -1491,7 +1491,7 @@ int main(int argc, char** argv)
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:s:u:p:c:dxv")) != -1)
     {
         switch (c)
         {
@@ -1511,6 +1511,12 @@ int main(int argc, char** argv)
             case 'a':
                 snprintf(DMRHost, sizeof(DMRHost), "%s", optarg);   /* where the protocol service runs */
                 break;
+            case 's':
+            case 'u':
+            case 'p':
+            case 'c':
+                dbOption(c, optarg);   /* database server, user, password, configuration file */
+                break;
             case ':':
                 fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
@@ -1524,7 +1530,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: DMR_Gateway [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: DMR_Gateway [-m modem_number (1-10)] [-a address] [-s dbserver] [-u dbuser] [-p dbpassword] [-c configfile] [-d] [-v] [-x]\n");
                 return 1;
         }
     }

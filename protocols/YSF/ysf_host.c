@@ -745,8 +745,8 @@ static void trimCall(char* out, size_t size, const char* field)
  */
 static bool findCallName(const char* callsign, char* name, size_t nameSize)
 {
-    char dbhost[20] = "localhost";
-    char passwd[30] = "";
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
     char escaped[64];
     char query[200];
     char base[24];
@@ -773,7 +773,7 @@ static bool findCallName(const char* callsign, char* name, size_t nameSize)
     if (conn == NULL)
         return false;
 
-    if (mysql_real_connect(conn, dbhost, "openmt", passwd, "", 0, NULL, 0) != NULL)
+    if (mysql_real_connect(conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) != NULL)
     {
         mysql_real_escape_string(conn, escaped, base, (unsigned long)strlen(base));
         snprintf(query, sizeof(query), "SELECT name FROM modem_host.dmr_ids WHERE callsign = '%s' LIMIT 1", escaped);
@@ -2089,7 +2089,7 @@ int main(int argc, char** argv)
     bool daemonize = false;
     int  c;
 
-    while ((c = getopt(argc, argv, ":m:a:dxv")) != -1)
+    while ((c = getopt(argc, argv, ":m:a:s:u:p:c:dxv")) != -1)
     {
         switch (c)
         {
@@ -2108,6 +2108,12 @@ int main(int argc, char** argv)
             case 'a':
                 snprintf(modemHost, sizeof(modemHost), "%s", optarg);   /* where the modem host runs */
                 break;
+            case 's':
+            case 'u':
+            case 'p':
+            case 'c':
+                dbOption(c, optarg);   /* database server, user, password, configuration file */
+                break;
             case ':':
                 fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
@@ -2121,7 +2127,7 @@ int main(int argc, char** argv)
                 debugM = true;
                 break;
             default:
-                fprintf(stderr, "Usage: YSF_Service [-m modem_number (1-10)] [-a address] [-d] [-v] [-x]\n");
+                fprintf(stderr, "Usage: YSF_Service [-m modem_number (1-10)] [-a address] [-s dbserver] [-u dbuser] [-p dbpassword] [-c configfile] [-d] [-v] [-x]\n");
                 return 1;
         }
     }

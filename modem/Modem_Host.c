@@ -3686,7 +3686,7 @@ int main(int argc, char** argv)
     int ret;
     int c;
 
-    while ((c = getopt(argc, argv, ":m:dxvr")) != -1)
+    while ((c = getopt(argc, argv, ":m:s:u:p:c:dxvr")) != -1)
     {
         switch (c)
         {
@@ -3703,8 +3703,14 @@ int main(int argc, char** argv)
                 fprintf(stderr, "Modem name: %s\n", modemName);
             }
             break;
+            case 's':
+            case 'u':
+            case 'p':
+            case 'c':
+                dbOption(c, optarg);   /* database server, user, password, configuration file */
+                break;
             case ':':
-                fprintf(stderr, "Option 'm' requires modem number.\n");
+                fprintf(stderr, "Option '-%c' requires a value.\n", optopt);
                 return 1;
             case 'd':
                 daemon = true;
@@ -3719,7 +3725,7 @@ int main(int argc, char** argv)
                 realtime = true;
                 break;
             default:
-                fprintf(stderr, "Usage: Modem_Host [-m modem_number (1-10)] [-d] [-v] [-x] [-r]\n");
+                fprintf(stderr, "Usage: Modem_Host [-m modem_number (1-10)] [-s dbserver] [-u dbuser] [-p dbpassword] [-c configfile] [-d] [-v] [-x] [-r]\n");
                 return 1;
         }
     }

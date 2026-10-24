@@ -76,6 +76,21 @@ sudo nano /etc/openmt.ini
 passwd=dvpass123
 host=localhost
 # Ctrl+x to save and close editor.
+# host= is the machine that runs the database (an address or a name). Every program, the dashboard and
+# the service manager read it from this file, so a PC that runs only some of the programs sets host= to
+# the machine that has the database. That machine's MariaDB must accept it: set bind-address to its LAN
+# address in the MariaDB configuration and grant the openmt user access from the other machine.
+# No /etc/openmt.ini (another OS, or a machine without that folder)? Every host, gateway and Modem_Host
+# takes the database settings on the command line instead:
+#     -s <server>   database server (address or name)       -u <user>   database user (default openmt)
+#     -p <password> database password                       -c <file>   use another configuration file
+#     p25_host -a 192.168.1.50 -s 192.168.1.50 -u openmt -p dvpass123
+# The same settings can come from the environment: OPENMT_DB_HOST, OPENMT_DB_USER, OPENMT_DB_PASSWD and
+# OPENMT_INI (path of the configuration file). A command line option wins over the environment, and the
+# environment wins over the file. A password on the command line is visible to other users in the
+# process list for a moment (the program overwrites it after reading it); the environment variable or a
+# configuration file with mode 640 is the safer choice, in a systemd service use Environment= or
+# EnvironmentFile=. The dashboard (PHP) still reads /etc/openmt.ini.
 # The file holds the database password. The web server user (www-data) and the user that runs the
 # programs (pi) must be able to read it, nobody else needs to:
 sudo chown pi:www-data /etc/openmt.ini

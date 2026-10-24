@@ -153,6 +153,10 @@ void     timerTickN(uint8_t id, uint32_t ticks);
 uint32_t timerElapsedMs(uint64_t* last);
 void     sleepUntilNext(uint64_t* next, uint32_t periodMs);
 bool     hostToAddress(const char* host, struct in_addr* out);
+bool     dbOption(int opt, char* arg);
+const char* configFilePath(void);
+bool     dbConfigOverride(const char* section, const char* key, char* value);
+const char* dbUser(void);
 
 PiSystemInfo interrogate_pi();
 

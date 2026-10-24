@@ -11,15 +11,15 @@ Description and status:
 - [x] P25 gateway for P25 service. **(beta)**
 - [x] DMR service to work with modem host. **(beta)**
 - [x] DMR gateway to Brandmeister for DMR service. **(beta)**
-- [ ] Fusion service to work with modem host. **(TODO)**
-- [ ] Fusion gateway for Fusion service. **(TODO)**
-- [ ] NXDN service to work with modem host. **(TODO)**
-- [ ] NXDN gateway for NXDN service. **(TODO)**
+- [x] Fusion service to work with modem host. **(beta)**
+- [x] Fusion gateway for Fusion service. **(beta)**
+- [x] NXDN service to work with modem host. **(beta)**
+- [x] NXDN gateway for NXDN service. **(beta)**
 - [x] FM repeater service to work with modem host. **(beta)**
 - [x] EchoLink gateway for FM service, outgoing and incoming, DTMF control. **(beta, not tried on the live EchoLink network)**
 - [x] HTML based Dashboard for status and configuration. **(beta)**
 - [x] SQL database for logging, status and configuration. **(beta)**
-- [ ] Update IRCDDBGateway to use database instead of config file. **(TODO)**
+- [x] Update IRCDDBGateway to use database instead of config file. **(beta)**
 - [ ] System startup and monitoring using systemd. **(in progress)**
 - [ ] Firmware configure and build via dashboard. **(TODO)**
 - [ ] Monitor multiple modems with one dashboard. **(in progress)**
