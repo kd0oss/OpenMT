@@ -7,9 +7,9 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=pi
+User=root
 WorkingDirectory=/home/pi/OpenMT
-ExecStart=/home/pi/OpenMT/modem/build/Modem_Host
+ExecStart=/home/pi/OpenMT/modem/build/Modem_Host -r
 Restart=always
 RestartSec=5
 StandardOutput=journal
