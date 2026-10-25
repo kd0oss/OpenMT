@@ -20,8 +20,8 @@ Description and status:
 - [x] HTML based Dashboard for status and configuration. **(beta)**
 - [x] SQL database for logging, status and configuration. **(beta)**
 - [x] Update IRCDDBGateway to use database instead of config file. **(beta)**
-- [ ] System startup and monitoring using systemd. **(in progress)**
+- [x] System startup and monitoring using systemd. **(beta)**
 - [ ] Firmware configure and build via dashboard. **(TODO)**
 - [ ] Monitor multiple modems with one dashboard. **(in progress)**
-- [ ] New firmware to replace MMDVM and MMDVM_HS. **(in progress)**
+- [x] New firmware to replace MMDVM and MMDVM_HS. **(beta)**
 - [ ] Stay alive long enough to actually do this. **(in progress)**
