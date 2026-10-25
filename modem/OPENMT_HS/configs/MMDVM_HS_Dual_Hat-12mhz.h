@@ -67,22 +67,6 @@
 // I2C host address:
 #define I2C_ADDR 0x22
 
-// Enable mode detection:
-#define ENABLE_SCAN_MODE
-
-// Send RSSI value:
-#define SEND_RSSI_DATA
-
-// Enable Nextion LCD serial port repeater on USART2 (ZUMspot Libre Kit and ZUMspot RPi):
-#define SERIAL_REPEATER
-#define SERIAL_REPEATER_BAUD 9600
-
-// Enable Nextion LCD serial port repeater on USART1 (Do not use with STM32_USART1_HOST enabled):
-// #define SERIAL_REPEATER_USART1
-
-// Enable P25 Wide modulation:
-// #define ENABLE_P25_WIDE
-
 // Disable mode LEDs blink during scan mode:
 // #define QUIET_MODE_LEDS
 
@@ -112,8 +96,5 @@
 
 // Disable frequency restrictions (satellite, ISS, etc)
 // #define DISABLE_FREQ_BAN
-
-// Enable UDID feature
-#define ENABLE_UDID
 
 #endif

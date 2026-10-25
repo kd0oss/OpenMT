@@ -612,6 +612,56 @@ if ($command == "saveModeOption")
 }
 
 else
+if ($command == "getRxOffsets")
+{
+    /* The RX frequency offset of every mode of the modem (openmths): mode \x1D offset, rows split by \x1E */
+    global $mysql;
+
+    if (isset($_GET['modem_name']))
+    {
+        /* Only the modes whose protocol service is running now (Modem_Host keeps them in activeModes); the offsets of the
+           others stay in the table for the next time they run. */
+        $act = db_select($mysql, "SELECT value FROM modem_host.config WHERE modem_name = ? AND module = 'main' AND parameter = 'activeModes'", "s", array($_GET['modem_name']));
+        $running = array();
+        if (count($act) > 0)
+            foreach (explode(",", $act[0][0]) as $m)
+                $running[strtolower(trim($m))] = true;
+        $rows = db_select($mysql, "SELECT module, value FROM modem_host.config WHERE modem_name = ? AND parameter = 'rxOffset' ORDER BY module", "s", array($_GET['modem_name']));
+        $data = "";
+        foreach ($rows as $row)
+        {
+            if (!isset($running[strtolower($row[0])])) continue;
+            if ($data != "") $data .= "\x1E";
+            $data .= $row[0]."\x1D".$row[1];
+        }
+        echo ($data != "") ? $data : "none";
+    }
+    else
+        echo "error";
+}
+else
+if ($command == "setRxOffset")
+{
+    /* Saves the RX offset of one mode, in Hz. Modem_Host loads it with the dashboard command "reloadOffsets". */
+    global $mysql;
+
+    if (isset($_GET['modem_name']) && isset($_GET['mode']) && isset($_GET['hz']) &&
+        preg_match('/^[A-Za-z0-9]{1,10}$/', $_GET['mode']) && preg_match('/^-?[0-9]{1,5}$/', $_GET['hz']) &&
+        abs((int)$_GET['hz']) <= 20000)
+    {
+        $hz = (string)((int)$_GET['hz']);
+        $stmt = mysqli_prepare($mysql, "UPDATE modem_host.config SET value = ? WHERE modem_name = ? AND module = ? AND parameter = 'rxOffset'");
+        mysqli_stmt_bind_param($stmt, "sss", $hz, $_GET['modem_name'], $_GET['mode']);
+        if (mysqli_stmt_execute($stmt) && mysqli_stmt_errno($stmt) == 0)
+            echo "success";
+        else
+            echo "failed";
+        mysqli_stmt_close($stmt);
+    }
+    else
+        echo "failed";
+}
+else
 if ($command == "getMiscOptions")
 {
     global $mysql;

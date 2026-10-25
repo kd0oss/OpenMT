@@ -2,14 +2,15 @@
 [Unit]
 Description=YSF Gateway
 After=ysf-host.service
-Requires=ysf-host.service
+Wants=ysf-host.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/OpenMT/protocols/YSF
 ExecStart=/home/pi/OpenMT/protocols/YSF/gateway/build/ysf_gateway
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

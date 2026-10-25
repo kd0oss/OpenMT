@@ -81,6 +81,8 @@ bool delGateway(const char* modem_name, const char* module_name, const char* mod
 bool readDashbCommand(const char* modem_name, const char* command, char* value);
 bool ackDashbCommand(const char* modem_name, const char* command, const char* result);
 bool clearDashbCommands(const char* modem_name);
+bool sendDashbCommand(const char* modem_name, const char* command, const char* parameter, char* result, size_t size,
+                      int timeoutSec);
 
 /* Database functions - Reflector management */
 bool clearReflectorList(const char* type);

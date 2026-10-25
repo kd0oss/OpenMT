@@ -17,7 +17,7 @@ sudo raspi-config
 # Select Finish to exit.
 
 # Edit /boot/firmware/cmdline.txt and add dwc_otg.lpm_enable=0, elevator=deadline and noswap.
-# Edit /boot/firmware/config.txt and add dtoverlay=miniuart-bt to [all] section.
+# Edit /boot/firmware/config.txt and add force_turbo=1 dtoverlay=miniuart-bt to [all] section.
 
 sudo apt install git
 sudo apt install nginx
@@ -212,6 +212,11 @@ The initial run of the host will populate the database with default configuratio
 # listen on all addresses; open the ports in a firewall only on a network you trust, because the
 # links between the programs are not encrypted or authenticated.
 
+# For an ADF7021 hotspot board (MMDVM_HS compatible) running the OPENMT_HS firmware, choose the device
+# type OpenMT_HS (openmths) in the dashboard and set the modem's serial port. The firmware is in
+# modem/OPENMT_HS, see its README.md for building, flashing and the settings that must match
+# (the TCXO frequency and the serial speed).
+
 # Only for the OpenMT SX1255 radio: the bridge program talks to the radio and gives the modem host
 # a serial port (a PTY). See modem/sx1255-openmt-bridge/INSTALL_SERVICE.txt to run it as a service,
 # and set the modem host's serial port (modemtty) to /dev/sx1255modem.
@@ -261,7 +266,11 @@ sudo cp protocols/P25/gateway/p25-gateway.service /etc/systemd/system/
 # Edit the paths and the User= line in each file if OpenMT is not in /home/pi/OpenMT.
 # The user must be allowed to use the serial port (sudo usermod -aG dialout pi) or the modem host
 # service can run as root. A gateway needs its host and a host needs the modem host: the files say
-# Requires=, so starting a gateway starts everything below it.
+# Wants= and After=, so starting a gateway starts everything below it, in order. Every program is
+# restarted whenever it ends (Restart=always), also after a clean exit such as a gateway whose host
+# connection was dropped while the Pi was starting; only systemctl stop (or the Services tab) keeps one
+# stopped. The modem host starts after the database (mariadb.service). After changing these files run
+# sudo cp again and sudo systemctl daemon-reload.
 sudo systemctl daemon-reload
 sudo systemctl enable --now modem-host p25-host p25-gateway
 
@@ -283,3 +292,13 @@ sudo systemctl enable --now openmt-service-manager
 # (php-cli) and the box shows the progress. Only one update can run at a time.
 # If the dashboard reports that it cannot start the update, check that "php -v" works for the
 # web server user and that exec() is not disabled in php.ini.
+
+# Calibrating the RX frequency of an OPENMT_HS board (optional)
+# Build the tool:   cd tools/calibrate && mkdir -p build && cd build && cmake .. && make
+# Set the modem Mode to Simplex first (a duplex hotspot repeats what it hears and cannot be measured).
+# Key a reference transmitter on the mode's RX frequency (-50 to -100 dBm) before the measurement and keep
+# it keyed until the result is shown, then de-key. Run
+#   ./openmt_cal auto DMR
+# or use the Calibration tab in the dashboard settings. Offsets are saved per modem and
+# mode in the database and are applied the next time the mode connects.
+

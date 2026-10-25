@@ -322,6 +322,78 @@ span.psw
   background-color: #f4b6b6;
 }
 
+#caltab
+{
+  background-color: #c7e9c0;
+}
+
+/* Calibration tab: RX frequency offset per mode */
+.cal_wrap
+{
+  padding: 8px;
+  color: black;
+  font-size: 17px;
+}
+
+.cal_note
+{
+  max-width: 900px;
+  margin-bottom: 10px;
+}
+
+.cal_steps
+{
+  margin: 6px 0 0 0;
+  padding-left: 24px;
+}
+
+.cal_steps li
+{
+  margin-bottom: 4px;
+}
+
+.cal_warn
+{
+  max-width: 900px;
+  margin-bottom: 10px;
+  padding: 8px;
+  background-color: #fff3cd;
+  color: #664d03;
+  border: 1px solid #ffecb5;
+}
+
+.cal_table
+{
+  border-collapse: collapse;
+  background-color: white;
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+.cal_table th
+{
+  background-color: green;
+  color: yellow;
+  padding: 3px 10px;
+  border: 1px solid #555;
+  text-align: left;
+}
+
+.cal_table td
+{
+  padding: 4px 10px;
+  border: 1px solid #aaa;
+}
+
+.cal_table input
+{
+  width: 80px;
+}
+
+.cal_status
+{
+  min-width: 340px;
+}
+
 #servicestab
 {
   background-color: #b9e3f5;
@@ -1016,7 +1088,7 @@ span.psw
 
 /* Modes tab: scrolls when the host/gateway sections are taller than the tab.
    The height is refined by resizeModeTab(); the calc() is the fallback. */
-#modetab, #misctab
+#modetab, #misctab, #caltab
 {
   height: calc(100vh - 205px);
   overflow-y: auto;
@@ -1139,6 +1211,11 @@ function openPage(tabln,tab,pageName,elmnt,color)
   updateModeHints();
   if (pageName == "misctab")
     loadMisc();
+  if (pageName == "caltab")
+  {
+    updateCalTab();
+    calLoad();
+  }
   if (pageName == "managetab")
     manageInit();
   if (pageName == "servicestab")
@@ -1179,7 +1256,7 @@ function initDashBd()
 /* Fit the Modes tab to the window so that it scrolls when the sections do not fit */
 function resizeModeTab()
 {
-  var ids = ['modetab', 'misctab', 'managetab', 'servicestab'];
+  var ids = ['modetab', 'misctab', 'caltab', 'managetab', 'servicestab'];
   for (var i=0;i<ids.length;i++)
   {
     var div = document.getElementById(ids[i]);
@@ -2368,6 +2445,7 @@ async function getConfig()
       modemFields += fields[0];
     }
     document.getElementById('modemExtras').innerHTML = modemExtras;
+    updateCalTab();
   }
   catch (err)
   {
@@ -2933,7 +3011,11 @@ async function saveModem()
       alert("New config failed to download to modem!");
     }
     else
+    {
+      modem = newDevice;
+      updateCalTab();
       alert("Saved successfully.");
+    }
   }
 }
 
@@ -3203,6 +3285,267 @@ function addMessage(source, message)
   newCell.style.backgroundColor = "#00610D";
   newCell.textContent = source;
 }
+
+/* ---- Calibration tab: RX frequency offset per mode ---- */
+var calBusy = false;
+
+/* The tab is only there for the OpenMT_HS modem type; the duplex warning follows the Mode setting */
+function updateCalTab()
+{
+  var btn = document.getElementById('calTabBtn');
+  var tab = document.getElementById('caltab');
+  if (!btn)
+    return;
+  var show = (String(modem).toLowerCase() == 'openmths');
+  btn.style.display = show ? '' : 'none';
+  if (!show && tab && tab.style.display == 'block')
+  {
+    var home = document.getElementById('General');
+    if (home)
+      home.click();
+  }
+  var warn = document.getElementById('calWarn');
+  var sel = document.getElementById('mode');
+  if (warn && sel)
+    warn.style.display = (sel.value == 'duplex') ? 'block' : 'none';
+}
+
+/* While the tab is showing it picks up modes that register later */
+setInterval(function ()
+{
+  var tab = document.getElementById('caltab');
+  if (tab && tab.style.display == "block" && !document.hidden)
+    calLoad(true);
+}, 5000);
+
+/* Send a command to Modem_Host through the dashboard command table, returns its answer */
+async function calHostCommand(parameter)
+{
+  var url = "data_query.php?command=dashbCom&modem_name="+encodeURIComponent(modemName)+"&action=modemHost&parameter="+encodeURIComponent(parameter);
+  var resp = await fetchWithTimeout(url, 20000);
+  if (!resp.ok)
+    return "failed";
+  return (await resp.text()).trim();
+}
+
+function calSetBusy(busy)
+{
+  calBusy = busy;
+  var buttons = document.querySelectorAll('#calBody button');
+  for (var i=0;i<buttons.length;i++)
+    buttons[i].disabled = busy;
+  document.body.style.cursor = busy ? 'wait' : 'default';
+}
+
+/* Loads the table. With refresh set (the timer) the rows that are showing are kept, with what the person typed
+   and the last result, and only new modes are added and unchanged offsets updated. */
+async function calLoad(refresh)
+{
+  var body = document.getElementById('calBody');
+  if (calBusy)
+    return;
+  try
+  {
+    var url = "data_query.php?command=getRxOffsets&modem_name="+encodeURIComponent(modemName);
+    var resp = await fetchWithTimeout(url, 8000);
+    if (!resp.ok)
+      return;
+    var txt = await resp.text();
+
+    if (calBusy)
+      return;
+    if (refresh === true && body.querySelector('input') != null && txt != "none" && txt != "" && txt != "error")
+    {
+      var rl = txt.split('\x1E');
+      var present = {};
+      for (var k=0;k<rl.length;k++)
+      {
+        var g = rl[k].split('\x1D');
+        if (g.length < 2)
+          continue;
+        present[g[0]] = true;
+        var off = parseInt(g[1], 10) || 0;
+        var inp = document.getElementById('calOff_'+g[0]);
+        if (inp == null)
+          calAddRow(body, g[0], off);
+        else if (!inp.dataset.dirty && document.activeElement != inp)
+          inp.value = off;
+      }
+      /* a service that has stopped takes its row away */
+      for (var r=body.rows.length-1;r>=0;r--)
+      {
+        var ri = body.rows[r].querySelector('input');
+        if (ri != null && !present[ri.id.substring(7)])
+          body.deleteRow(r);
+      }
+      return;
+    }
+    if (refresh === true && txt == "error")
+      return;
+
+    body.textContent = "";
+    if (txt == "none" || txt == "" || txt == "error")
+    {
+      var row = body.insertRow(-1);
+      var cell = row.insertCell(0);
+      cell.colSpan = 4;
+      cell.textContent = "No protocol service is running. Start the service of the mode you want to calibrate (its row appears here).";
+      return;
+    }
+    var lines = txt.split('\x1E');
+    for (var i=0;i<lines.length;i++)
+    {
+      var f = lines[i].split('\x1D');
+      if (f.length < 2)
+        continue;
+      calAddRow(body, f[0], parseInt(f[1], 10) || 0);
+    }
+  }
+  catch (err)
+  {
+    console.warn("calLoad failed:", err.message);
+  }
+}
+
+function calAddRow(body, mode, offset)
+{
+  var row = body.insertRow(-1);
+  row.insertCell(0).textContent = mode;
+
+  var input = document.createElement('input');
+  input.type = 'number';
+  input.min = -20000;
+  input.max = 20000;
+  input.value = offset;
+  input.id = 'calOff_'+mode;
+  input.addEventListener('input', function () { input.dataset.dirty = '1'; });
+  row.insertCell(1).appendChild(input);
+
+  var cell = row.insertCell(2);
+  var status = row.insertCell(3);
+  status.className = 'cal_status';
+  status.id = 'calRes_'+mode;
+
+  var actions = [["Measure", function () { calMeasure(mode); }],
+                 ["Calibrate", function () { calAuto(mode); }],
+                 ["Save", function () { calSave(mode); }],
+                 ["Reset", function () { document.getElementById('calOff_'+mode).value = 0; calSave(mode); }]];
+  for (var i=0;i<actions.length;i++)
+  {
+    var b = document.createElement('button');
+    b.textContent = actions[i][0];
+    b.onclick = actions[i][1];
+    cell.appendChild(b);
+    cell.appendChild(document.createTextNode(" "));
+  }
+}
+
+function calShow(mode, text)
+{
+  var el = document.getElementById('calRes_'+mode);
+  if (el)
+    el.textContent = text;
+}
+
+/* One measurement; returns {err, off, rssi} or null (the reason is shown) */
+async function calMeasureOnce(mode)
+{
+  var res = await calHostCommand("calibrate "+mode);
+  var m = /^ok err=(-?\d+) off=(-?\d+) rssi=(\d+)/.exec(res);
+  if (!m)
+  {
+    calShow(mode, res == "failed" ? "No answer from Modem_Host." : res);
+    return null;
+  }
+  return { err: parseInt(m[1], 10), off: parseInt(m[2], 10), rssi: parseInt(m[3], 10) };
+}
+
+async function calMeasure(mode)
+{
+  if (calBusy)
+    return;
+  calSetBusy(true);
+  calShow(mode, "Measuring...");
+  var m = await calMeasureOnce(mode);
+  if (m)
+    calShow(mode, "Error "+(m.err >= 0 ? "+" : "")+m.err+" Hz with offset "+m.off+" Hz, signal -"+m.rssi+" dBm.");
+  calSetBusy(false);
+}
+
+/* Save the offset of the mode and have Modem_Host load the mode again. Returns true on success. */
+async function calStore(mode, hz)
+{
+  var url = "data_query.php?command=setRxOffset&modem_name="+encodeURIComponent(modemName)+"&mode="+encodeURIComponent(mode)+"&hz="+encodeURIComponent(hz);
+  var resp = await fetchWithTimeout(url, 8000);
+  if (!resp.ok || (await resp.text()) != "success")
+  {
+    calShow(mode, "Saving the offset failed (the limit is +-20000 Hz).");
+    return false;
+  }
+  var res = await calHostCommand("reloadOffsets");
+  if (res.indexOf("success") != 0)
+  {
+    calShow(mode, "Saved, but Modem_Host did not load it ("+res+").");
+    return false;
+  }
+  var saved = document.getElementById('calOff_'+mode);
+  saved.value = hz;
+  delete saved.dataset.dirty;
+  return true;
+}
+
+async function calSave(mode)
+{
+  if (calBusy)
+    return;
+  var hz = parseInt(document.getElementById('calOff_'+mode).value, 10);
+  if (isNaN(hz) || Math.abs(hz) > 20000)
+  {
+    calShow(mode, "The offset must be between -20000 and 20000 Hz.");
+    return;
+  }
+  calSetBusy(true);
+  calShow(mode, "Saving...");
+  if (await calStore(mode, hz))
+    calShow(mode, "Offset "+hz+" Hz saved and loaded.");
+  calSetBusy(false);
+}
+
+/* Measure, add the error to the offset, check again, until the error is below 30 Hz (4 passes at most) */
+async function calAuto(mode)
+{
+  if (calBusy)
+    return;
+  calSetBusy(true);
+  var done = false;
+  for (var pass=1; pass<=4 && !done; pass++)
+  {
+    calShow(mode, "Pass "+pass+": measuring...");
+    var m = await calMeasureOnce(mode);
+    if (!m)
+      break;
+    if (Math.abs(m.err) <= 30)
+    {
+      calShow(mode, "Calibrated: offset "+m.off+" Hz, error "+(m.err >= 0 ? "+" : "")+m.err+" Hz, signal -"+m.rssi+" dBm.");
+      document.getElementById('calOff_'+mode).value = m.off;
+      done = true;
+      break;
+    }
+    var next = m.off + m.err;
+    if (Math.abs(next) > 20000)
+    {
+      calShow(mode, "The offset would be "+next+" Hz, more than +-20000 Hz. Check the reference and the TCXO.");
+      break;
+    }
+    calShow(mode, "Pass "+pass+": error "+(m.err >= 0 ? "+" : "")+m.err+" Hz, setting offset "+next+" Hz...");
+    if (!await calStore(mode, next))
+      break;
+    await new Promise(function (r) { setTimeout(r, 3000); });
+    if (pass == 4)
+      calShow(mode, "Not within 30 Hz after 4 passes, offset "+next+" Hz.");
+  }
+  calSetBusy(false);
+}
 </script>
 
 <!-- ################################## End Script ###################################################### -->
@@ -3343,12 +3686,13 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 
 <div id='settingstab' class='tabcontent'>
 <div class='stabs'>
-<button id='General' class="stablink" onclick="openPage('stablink', 'genset', 'generaltab', this, 'orange')">General</button>
-<button class='stablink' onclick="openPage('stablink', 'genset', 'modemtab', this, 'yellow')">Modem</button>
-<button class='stablink' onclick="openPage('stablink', 'genset', 'modetab', this, 'lightblue')">Modes</button>
-<button class='stablink' style='width:20%' onclick="openPage('stablink', 'genset', 'misctab', this, '#d9b3ff')">Miscellaneous</button>
+<button id='General' class="stablink" style='width:11%' onclick="openPage('stablink', 'genset', 'generaltab', this, 'orange')">General</button>
+<button class='stablink' style='width:10%' onclick="openPage('stablink', 'genset', 'modemtab', this, 'yellow')">Modem</button>
+<button class='stablink' style='width:10%' onclick="openPage('stablink', 'genset', 'modetab', this, 'lightblue')">Modes</button>
+<button class='stablink' style='width:18%' onclick="openPage('stablink', 'genset', 'misctab', this, '#d9b3ff')">Miscellaneous</button>
+<button id='calTabBtn' class='stablink' style='width:14%;display:none' onclick="openPage('stablink', 'genset', 'caltab', this, '#c7e9c0')">Calibration</button>
 <button class='stablink' style='width:17%' onclick="openPage('stablink', 'genset', 'managetab', this, '#f4b6b6')">Manage Data</button>
-<button class='stablink' style='width:15%' onclick="openPage('stablink', 'genset', 'servicestab', this, '#b9e3f5')">Services</button>
+<button class='stablink' style='width:14%' onclick="openPage('stablink', 'genset', 'servicestab', this, '#b9e3f5')">Services</button>
 </div>
 <div id='generaltab' class='genset'>
 <span class='genSettings'>
@@ -3415,7 +3759,7 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 <option value="921600">921600</option>
 </select>
 <label for='mode'>Mode:</label>
-<select id='mode' name='mode'>
+<select id='mode' name='mode' onchange='updateCalTab()'>
 <option value="simplex">Simplex</option>
 <option value="duplex">Duplex</option>
 </select><br><br>
@@ -3427,6 +3771,32 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 <div id='modetab' class='genset'>
 </div>
 <div id='misctab' class='genset'>
+</div>
+<div id='caltab' class='genset'>
+<div class='cal_wrap'>
+<div class='cal_note'>RX frequency calibration, per mode (OpenMT_HS modem). The modem measures how far the received signal is from the
+receive frequency of a mode; the offset is added to the receive frequency of that mode only.
+<ol class='cal_steps'>
+<li><b>Simplex:</b> set Mode to <b>Simplex</b> on the Modem tab and press Save. A duplex hotspot repeats what it hears, so its
+transmitter is keyed while you transmit and it cannot be measured.</li>
+<li><b>Service:</b> start the protocol service of the mode. Its row appears below once it has registered.</li>
+<li><b>Reference:</b> use a transmitter with an accurate frequency on the receive frequency of the mode (normal modulation of that
+mode or a plain carrier), at a level of -50 to -100 dBm at the hotspot. The level is shown in the result.</li>
+<li><b>Key the transmitter first</b>, then press <b>Measure</b> or <b>Calibrate</b>, and <b>keep it keyed until the result is
+shown</b>. Measure takes a few seconds, Calibrate up to about 30 seconds. If your radio has a time-out timer, key again before it
+ends. <b>De-key after the result.</b></li>
+<li><b>Measure</b> only shows the error. <b>Calibrate</b> measures, saves the offset and measures again until the error is small.
+<b>Save</b> stores an offset you typed, <b>Reset</b> sets it to 0.</li>
+<li>When you are done, set Mode back to Duplex if you use it.</li>
+</ol></div>
+<div class='cal_warn' id='calWarn' style='display:none'>The modem is set to <b>Duplex</b>: the hotspot repeats your transmission, and
+the measurement is refused while its transmitter is keyed ("the transmitter is keyed"). Set Mode to Simplex on the Modem tab and
+press Save first.</div>
+<table class='cal_table'>
+<thead><tr><th>Mode</th><th>RX offset (Hz)</th><th></th><th>Result</th></tr></thead>
+<tbody id='calBody'></tbody>
+</table>
+</div>
 </div>
 <div id='servicestab' class='genset'>
 <div class='svc_wrap'>

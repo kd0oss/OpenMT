@@ -69,6 +69,7 @@ OpenMT			-- project root
 		...	-- other protocols as needed
 
 ***** Some code based on or copied from MMDVM by Jonathan Naylor G4KLX.
+***** The OPENMT_HS firmware is a port of MMDVM_HS by Andy Uribe CA6JAU.
 ```
 SQL Server (MariaDB)
 ========================================================================
@@ -86,9 +87,11 @@ This software is intended to work with 4 modem types:
                        compatiable modems. It will be a bare bones
                        system that will stream ADC/DAC samples to and
                        from the host. This will make it protocol agnostic.
-    4. OPENMT_HS    // This will be new firmware that will run on MMDVM_HS
-                       compatiable hardware with the same intention of
-                       creating a protocol agnostic modem.
+    4. OPENMT_HS    // Firmware for MMDVM_HS compatible hardware (ADF7021
+                       hotspot boards) with the same intention of creating
+                       a protocol agnostic modem. It exchanges raw bits
+                       with the host. See modem/OPENMT_HS/README.md. It is
+                       a port of MMDVM_HS by Andy Uribe CA6JAU.
 
 ```
 
@@ -151,3 +154,23 @@ with regards to adding new radio protocols and services.
 - **Hosts and gateways on other machines**:
 	Every host and gateway takes `-a <address>` (dotted IPv4 address or host name, default `127.0.0.1`).
 	A host uses it to find Modem_Host, a gateway to find its protocol host, so the pieces can run on different machines.
+
+RX frequency calibration (OPENMT_HS)
+========================================================================
+Per-mode RX frequency offsets are stored in the database (modem_host.config,
+parameter rxOffset) and applied by Modem_Host. Set the modem to Simplex first (a duplex
+hotspot repeats what it hears and cannot be measured), put a reference carrier on the
+mode's RX frequency, key it before the measurement and keep it keyed until the result is shown, then either use the dashboard Settings -> Calibration tab
+or the command line tool built from tools/calibrate:
+
+    openmt_cal list                 show the offsets
+    openmt_cal measure DMR          one reading, nothing saved
+    openmt_cal auto DMR             measure, correct and save until within -t Hz
+    openmt_cal manual DMR           step the offset with the keyboard
+    openmt_cal raw DMR              raw readback words (to check the AFC readback)
+    openmt_cal sweep DMR            AFC word over time and frequency offset (diagnostic)
+    openmt_cal set DMR 350          save an offset in Hz
+    openmt_cal reset all            clear the offsets
+    options: -m modem number, -t tolerance Hz, -r readings, -n passes,
+             -s -u -p -c database options
+

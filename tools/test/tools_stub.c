@@ -158,6 +158,29 @@ bool readHostConfig(const char* modem_name, const char* module_name, const char*
         return true;
     }
 
+    /* a value that a test changes while the program runs: the file /tmp/<protocol>_stub_cfg_<key> (first line) */
+    {
+        char path[100];
+        FILE* f;
+
+        snprintf(path, sizeof(path), STUB_TMP "cfg_%s", key);
+        f = fopen(path, "r");
+        if (f != NULL)
+        {
+            char line[40] = "";
+
+            if (fgets(line, sizeof(line), f) != NULL)
+            {
+                line[strcspn(line, "\r\n")] = '\0';
+                strncpy(value, line, 31);
+                value[31] = '\0';
+                fclose(f);
+                return true;
+            }
+            fclose(f);
+        }
+    }
+
     snprintf(name, sizeof(name), STUB_ENV "%s", key);
     env = getenv(name);
 
@@ -229,6 +252,31 @@ bool readHostConfigN(const char* modem_name, const char* module_name, const char
 bool setHostConfig(const char* modem_name, const char* module_name, const char* key, const char* display_type,
                    const char* value)
 {
+    /* with <PROTOCOL>_STUB_PERSIST set the value goes to the file /tmp/<protocol>_stub_cfg_<key> as well, so that a
+     * second program (Modem_Host and the calibration tool) sees it */
+    if (getenv(STUB_ENV "PERSIST") != NULL)
+    {
+        char path[100];
+        FILE* f;
+
+        snprintf(path, sizeof(path), STUB_TMP "cfg_%s", key);
+        f = fopen(path, "w");
+        if (f != NULL)
+        {
+            fprintf(f, "%s\n", value);
+            fclose(f);
+        }
+    }
+
+    for (int i = 0; i < storeCount; i++)
+    {
+        if (strcmp(store[i][0], module_name) == 0 && strcmp(store[i][1], key) == 0)
+        {
+            strncpy(store[i][2], value, 39);
+            return true;
+        }
+    }
+
     if (storeCount < 64)
     {
         strncpy(store[storeCount][0], module_name, 39);
@@ -339,6 +387,54 @@ bool readDashbCommand(const char* modem_name, const char* command, char* value)
 }
 
 /*
+ * sendDashbCommand()
+ *
+ * Stub for the sender side of the dashboard command table: writes the command file that readDashbCommand() looks
+ * for, waits until the receiver has acknowledged it (the file is gone) and returns the result that
+ * ackDashbCommand() left in /tmp/<protocol>_stub_res_<command>.
+ *
+ * Returns: true if the command was acknowledged within timeoutSec seconds.
+ */
+bool sendDashbCommand(const char* modem_name, const char* command, const char* parameter, char* result, size_t size,
+                      int timeoutSec)
+{
+    char path[100];
+    char res[100];
+    FILE* f;
+
+    if (size > 0)
+        result[0] = '\0';
+
+    snprintf(res, sizeof(res), STUB_TMP "res_%s", command);
+    unlink(res);
+    snprintf(path, sizeof(path), STUB_TMP "cmd_%s", command);
+    f = fopen(path, "w");
+    if (f == NULL)
+        return false;
+    fprintf(f, "%s\n", parameter);
+    fclose(f);
+
+    for (int i = 0; i < timeoutSec * 10; i++)
+    {
+        usleep(100000);
+        if (access(path, F_OK) != 0)
+        {
+            f = fopen(res, "r");
+            if (f != NULL)
+            {
+                if (fgets(result, (int)size, f) != NULL)
+                    result[strcspn(result, "\r\n")] = '\0';
+                fclose(f);
+            }
+            return true;
+        }
+    }
+
+    unlink(path);
+    return false;
+}
+
+/*
  * ackDashbCommand()
  *
  * Stub that removes the command file and prints a "[db] ack" line.
@@ -353,6 +449,16 @@ bool readDashbCommand(const char* modem_name, const char* command, char* value)
 bool ackDashbCommand(const char* modem_name, const char* command, const char* result)
 {
     char path[100];
+    FILE* f;
+
+    /* the result, for sendDashbCommand() */
+    snprintf(path, sizeof(path), STUB_TMP "res_%s", command);
+    f = fopen(path, "w");
+    if (f != NULL)
+    {
+        fprintf(f, "%s\n", result);
+        fclose(f);
+    }
 
     snprintf(path, sizeof(path), STUB_TMP "cmd_%s", command);
     unlink(path);

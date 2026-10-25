@@ -55,7 +55,7 @@ USART2 - TXD PA2  - RXD PA3
 #error "You have to select STM32_USART1_HOST or STM32_USB_HOST, but not both"
 #endif
 
-#if defined(STM32_USART1_HOST) || defined(SERIAL_REPEATER_USART1)
+#if defined(STM32_USART1_HOST)
 
 extern "C" {
   void USART1_IRQHandler();
@@ -252,230 +252,9 @@ void WriteUSART1(const uint8_t* data, uint16_t length)
 
 #endif
 
-#if defined(SERIAL_REPEATER)
-
-extern "C" {
-  void USART2_IRQHandler();
-}
-
-/* ************* USART2 ***************** */
-
-volatile uint8_t  TXSerialfifo2[TX_SERIAL_FIFO_SIZE];
-volatile uint8_t  RXSerialfifo2[RX_SERIAL_FIFO_SIZE];
-volatile uint16_t TXSerialfifohead2, TXSerialfifotail2;
-volatile uint16_t RXSerialfifohead2, RXSerialfifotail2;
-
-// Init queues
-void TXSerialfifoinit2()
-{
-  TXSerialfifohead2 = 0U;
-  TXSerialfifotail2 = 0U;
-}
-
-void RXSerialfifoinit2()
-{
-  RXSerialfifohead2 = 0U;
-  RXSerialfifotail2 = 0U;
-}
-
-// How full is queue
-// TODO decide if how full or how empty is preferred info to return
-uint16_t TXSerialfifolevel2()
-{
-  uint32_t tail = TXSerialfifotail2;
-  uint32_t head = TXSerialfifohead2;
-
-  if (tail > head)
-    return TX_SERIAL_FIFO_SIZE + head - tail;
-  else
-    return head - tail;
-}
-
-uint16_t RXSerialfifolevel2()
-{
-  uint32_t tail = RXSerialfifotail2;
-  uint32_t head = RXSerialfifohead2;
-
-  if (tail > head)
-    return RX_SERIAL_FIFO_SIZE + head - tail;
-  else
-    return head - tail;
-}
-
-// Flushes the transmit shift register
-// warning: this call is blocking
-void TXSerialFlush2()
-{
-  // wait until the TXE shows the shift register is empty
-  while (USART_GetITStatus(USART2, USART_FLAG_TXE))
-    ;
-}
-
-uint8_t TXSerialfifoput2(uint8_t next)
-{
-  if (TXSerialfifolevel2() < (TX_SERIAL_FIFO_SIZE - 1U)) {
-    TXSerialfifo2[TXSerialfifohead2] = next;
-
-    TXSerialfifohead2++;
-    if (TXSerialfifohead2 >= TX_SERIAL_FIFO_SIZE)
-      TXSerialfifohead2 = 0U;
-
-    // make sure transmit interrupts are enabled as long as there is data to send
-    USART_ITConfig(USART2, USART_IT_TXE, ENABLE);
-    return 1U;
-  } else {
-    return 0U; // signal an overflow occurred by returning a zero count
-  }
-}
-
-void USART2_IRQHandler()
-{
-  uint8_t c;
-  
-  if (USART_GetITStatus(USART2, USART_IT_RXNE)) {
-    c = (uint8_t) USART_ReceiveData(USART2);
-
-    if (RXSerialfifolevel2() < (RX_SERIAL_FIFO_SIZE - 1U)) {
-      RXSerialfifo2[RXSerialfifohead2] = c;
-
-      RXSerialfifohead2++;
-      if (RXSerialfifohead2 >= RX_SERIAL_FIFO_SIZE)
-        RXSerialfifohead2 = 0U;
-    } else {
-      // TODO - do something if rx fifo is full?
-    }
-
-    USART_ClearITPendingBit(USART2, USART_IT_RXNE);
-  }
-
-  if (USART_GetITStatus(USART2, USART_IT_TXE)) {
-    c = 0U;
-
-    if (TXSerialfifohead2 != TXSerialfifotail2) { // if the fifo is not empty
-      c = TXSerialfifo2[TXSerialfifotail2];
-
-      TXSerialfifotail2++;
-      if (TXSerialfifotail2 >= TX_SERIAL_FIFO_SIZE)
-        TXSerialfifotail2 = 0U;
-
-      USART_SendData(USART2, c);
-    } else { // if there's no more data to transmit then turn off TX interrupts
-      USART_ITConfig(USART2, USART_IT_TXE, DISABLE);
-    }
-
-    USART_ClearITPendingBit(USART2, USART_IT_TXE);
-  }
-}
-
-void InitUSART2(int speed)
-{
-  
-  // USART2 - TXD PA2  - RXD PA3
-  GPIO_InitTypeDef GPIO_InitStructure;
-  USART_InitTypeDef USART_InitStructure;
-  NVIC_InitTypeDef NVIC_InitStructure;
-  
-  RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_AFIO, ENABLE);
-  RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);
-
-  // USART IRQ init
-  NVIC_InitStructure.NVIC_IRQChannel    = USART2_IRQn;
-  NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 15;
-  NVIC_InitStructure.NVIC_IRQChannelSubPriority        = 15;
-  NVIC_Init(&NVIC_InitStructure);
-
-  // Configure USART as alternate function
-  GPIO_StructInit(&GPIO_InitStructure);
-  GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_AF_PP;
-  GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_2;       //  Tx
-  GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-  GPIO_Init(GPIOA, &GPIO_InitStructure);
-  
-  GPIO_InitStructure.GPIO_Mode  = GPIO_Mode_IN_FLOATING;
-  GPIO_InitStructure.GPIO_Pin   = GPIO_Pin_3;       //  Rx
-  GPIO_Init(GPIOA, &GPIO_InitStructure);
-
-  // Configure USART baud rate
-  USART_StructInit(&USART_InitStructure);
-  USART_InitStructure.USART_BaudRate   = speed;
-  USART_InitStructure.USART_WordLength = USART_WordLength_8b;
-  USART_InitStructure.USART_StopBits   = USART_StopBits_1;
-  USART_InitStructure.USART_Parity     = USART_Parity_No;
-  USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
-  USART_InitStructure.USART_Mode       = USART_Mode_Rx | USART_Mode_Tx;
-  USART_Init(USART2, &USART_InitStructure);
-
-  USART_Cmd(USART2, ENABLE);
-
-  USART_ITConfig(USART2, USART_IT_RXNE, ENABLE);
-
-  // initialize the fifos
-  TXSerialfifoinit2();
-  RXSerialfifoinit2();
-}
-
-uint8_t AvailUSART2()
-{
-  if (RXSerialfifolevel2() > 0U)
-    return 1U;
-  else
-    return 0U;
-}
-
-uint8_t ReadUSART2()
-{
-  uint8_t data_c = RXSerialfifo2[RXSerialfifotail2];
-
-  RXSerialfifotail2++;
-  if (RXSerialfifotail2 >= RX_SERIAL_FIFO_SIZE)
-    RXSerialfifotail2 = 0U;
-
-  return data_c;
-}
-
-void WriteUSART2(const uint8_t* data, uint16_t length)
-{
-  for (uint16_t i = 0U; i < length; i++)
-    TXSerialfifoput2(data[i]);
-    
-  USART_ITConfig(USART2, USART_IT_TXE, ENABLE);
-}
-
-#endif
-
 /////////////////////////////////////////////////////////////////
-#if defined(ENABLE_UDID)
-extern char UDID[];
-extern "C" {
-  #include <stdio.h>
-}
-#endif
-
 void CSerialPort::beginInt(uint8_t n, int speed)
 {
-#if defined(ENABLE_UDID)
-#if defined(STM32F4XX)
-  uint32_t *id0 =  (uint32_t *) (0x1FFF7A10);
-  uint32_t *id1 =  (uint32_t *) (0x1FFF7A10 + 0x04);
-  uint32_t *id2 =  (uint32_t *) (0x1FFF7A10 + 0x08);
-  ::sprintf(UDID, "%08X%08X%08X", *(unsigned int *)id0, *(unsigned int *)id1, *(unsigned int *)id2);
-
-#elif defined(STM32F7XX)
-  uint32_t *id0 =  (uint32_t *) (0x1FF0F420);
-  uint32_t *id1 =  (uint32_t *) (0x1FF0F420 + 0x04);
-  uint32_t *id2 =  (uint32_t *) (0x1FF0F420 + 0x08);
-  ::sprintf(UDID, "%08X%08X%08X", *(unsigned int *)id0, *(unsigned int *)id1, *(unsigned int *)id2);
-
-#elif defined(STM32F10X_MD)
-  uint16_t *id00 =  (uint16_t *) (0x1FFFF7E8);
-  uint16_t *id01 =  (uint16_t *) (0x1FFFF7E8 + 0x02);
-  uint32_t *id1 =  (uint32_t *) (0x1FFFF7E8 + 0x04);
-  uint32_t *id2 =  (uint32_t *) (0x1FFFF7E8 + 0x08);
-  ::sprintf(UDID, "%04X%04X%08X%08X", *id00, *id01, *(unsigned int *)id1, *(unsigned int *)id2);
-#endif
-#endif
-
   switch (n) {
     case 1U:
     #if defined(STM32_USART1_HOST)
@@ -484,13 +263,6 @@ void CSerialPort::beginInt(uint8_t n, int speed)
       usbserial.begin();
     #elif defined(STM32_I2C_HOST)
       i2c.Init();
-    #endif
-      break;
-    case 3U:
-    #if defined(SERIAL_REPEATER)
-      InitUSART2(speed);
-    #elif defined(SERIAL_REPEATER_USART1)
-      InitUSART1(speed);
     #endif
       break;
     default:
@@ -509,12 +281,6 @@ int CSerialPort::availableInt(uint8_t n)
     #elif defined(STM32_I2C_HOST)
       return i2c.AvailI2C();
     #endif
-    case 3U: 
-    #if defined(SERIAL_REPEATER)
-      return AvailUSART2();
-    #elif defined(SERIAL_REPEATER_USART1)
-      return AvailUSART1();
-    #endif
     default:
       return 0;
   }
@@ -530,12 +296,6 @@ uint8_t CSerialPort::readInt(uint8_t n)
       return usbserial.read();
     #elif defined(STM32_I2C_HOST)
       return i2c.ReadI2C();
-    #endif
-    case 3U:
-    #if defined(SERIAL_REPEATER)
-      return ReadUSART2();
-    #elif defined(SERIAL_REPEATER_USART1)
-      return ReadUSART1();
     #endif
     default:
       return 0U;
@@ -556,17 +316,6 @@ void CSerialPort::writeInt(uint8_t n, const uint8_t* data, uint16_t length, bool
         usbserial.flush();
     #elif defined(STM32_I2C_HOST)
       i2c.WriteI2C(data, length);
-    #endif
-      break;
-    case 3U:
-    #if defined(SERIAL_REPEATER)
-      WriteUSART2(data, length);
-      if (flush)
-        TXSerialFlush2();
-    #elif defined(SERIAL_REPEATER_USART1)
-      WriteUSART1(data, length);
-      if (flush)
-        TXSerialFlush1();
     #endif
       break;
     default:

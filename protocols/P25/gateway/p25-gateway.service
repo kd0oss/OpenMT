@@ -2,14 +2,15 @@
 [Unit]
 Description=P25 Gateway
 After=p25-host.service
-Requires=p25-host.service
+Wants=p25-host.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/OpenMT/protocols/P25/gateway
 ExecStart=/home/pi/OpenMT/protocols/P25/gateway/build/p25_gateway
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

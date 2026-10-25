@@ -2,14 +2,15 @@
 [Unit]
 Description=FM EchoLink Gateway
 After=fm-host.service
-Requires=fm-host.service
+Wants=fm-host.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/OpenMT/protocols/FM
 ExecStart=/home/pi/OpenMT/protocols/FM/gateway/build/fm_gateway
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

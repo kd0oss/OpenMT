@@ -2,16 +2,17 @@
 [Unit]
 Description=DSTAR Gateway
 After=dstar-host.service
-Requires=dstar-host.service
+Wants=dstar-host.service
 After=ircddbgateway.service
-Requires=ircddbgateway.service
+Wants=ircddbgateway.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/OpenMT/protocols/DSTAR/gateway
 ExecStart=/home/pi/OpenMT/protocols/DSTAR/gateway/build/dstar_gateway
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

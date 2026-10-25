@@ -52,7 +52,10 @@
  *   40..47  sync pattern (uint64)
  *   48..55  sync mask    (uint64)
  *   56      reserved (stored, not used by this firmware)
- *   57      high nibble bit 0: 1 = transmit bits MSB first, 0 = LSB first
+ *   57      bit 4: 1 = transmit bits MSB first, 0 = LSB first
+ *           bit 5: 1 = append the TX stream position (2 bytes, big endian,
+ *                  bit count modulo 576) to every BIT_DATA frame sent to
+ *                  the host; 0xFFFF while the modem is not transmitting
  *           low nibble: scan dwell multiplier (0 is treated as 1)
  *
  * DMR: if the registered sync is one of the four 48 bit DMR data syncs, the
@@ -85,6 +88,7 @@ const uint8_t OPENMT_TO_MODEM      = 0x80U;
 const uint8_t OPENMT_SAMP_EOT      = 0x90U;
 const uint8_t OPENMT_BIT_EOT       = 0xA0U;
 const uint8_t OPENMT_DEBUG         = 0xC0U;
+const uint8_t OPENMT_MEAS          = 0xD0U;   // MEAS | conn: receive frequency measurement (see COpenMT::measure)
 const uint8_t OPENMT_ACK           = 0xE0U;
 const uint8_t OPENMT_NAK           = 0xF0U;
 
@@ -108,6 +112,7 @@ const uint8_t OPENMT_ERR_BAD_CONN    = 3U;    // connection id not usable
 const uint8_t OPENMT_ERR_BAD_DATA    = 4U;    // bad length or bad values
 const uint8_t OPENMT_ERR_BUSY        = 5U;    // transmitting another mode
 const uint8_t OPENMT_ERR_NO_SPACE    = 6U;    // TX buffer full / table full
+const uint8_t OPENMT_ERR_TX_DATA     = 8U;    // MEAS: transmit bits are waiting in the modem (not keyed yet or still draining)
 
 // Mode data layout
 const uint8_t OPENMT_MODE_DATA_LEN = 58U;
@@ -168,6 +173,67 @@ const uint16_t OPENMT_TX_BUFFER_SLACK = 8U;
 // the host has locked the mode with SET_MODE
 #if !defined(OPENMT_LOCK_TIMEOUT_MS)
 #define OPENMT_LOCK_TIMEOUT_MS      1500U
+#endif
+
+// Lock timeout learning. While the host has the mode locked, the longest gap
+// between two syncs is measured; afterwards, when the host has not locked,
+// streaming ends LOCK_FACTOR_PERCENT percent of that gap after the last sync
+// (never less than OPENMT_LOCK_MIN_MS, never more than OPENMT_LOCK_TIMEOUT_MS,
+// which is also used until a mode has been learned). A false sync then only
+// stalls the scan for a fraction of a second. Set OPENMT_LOCK_LEARN to 0 to
+// always use OPENMT_LOCK_TIMEOUT_MS.
+#if !defined(OPENMT_LOCK_LEARN)
+#define OPENMT_LOCK_LEARN           1
+#endif
+
+#if !defined(OPENMT_LOCK_MIN_MS)
+#define OPENMT_LOCK_MIN_MS          250U
+#endif
+
+#if !defined(OPENMT_LOCK_FACTOR_PERCENT)
+#define OPENMT_LOCK_FACTOR_PERCENT  250U
+#endif
+
+// Send the first BIT frame as soon as a sync is found, even when it is shorter
+// than OPENMT_RX_FRAME_BYTES (saves 13 to 27 ms on the way to the host).
+#if !defined(OPENMT_SYNC_FLUSH)
+#define OPENMT_SYNC_FLUSH           1
+#endif
+
+// Skip empty channels while scanning. A short time after a mode is loaded the
+// received signal strength is read; when it is weaker than the threshold the
+// scanner moves on at once instead of listening for the whole dwell. The
+// value is the readRSSI() result, -dBm: 115 means "carrier present when
+// stronger than -115 dBm". A noise floor above that threshold only makes the
+// scan behave as before. Set OPENMT_RSSI_SCAN to 0 to disable.
+#if !defined(OPENMT_RSSI_SCAN)
+#define OPENMT_RSSI_SCAN            1
+#endif
+
+#if !defined(OPENMT_RSSI_THRESHOLD)
+#define OPENMT_RSSI_THRESHOLD       115U
+#endif
+
+#if !defined(OPENMT_RSSI_SETTLE_MS)
+#define OPENMT_RSSI_SETTLE_MS       2U
+#endif
+
+// RX frequency measurement (MEAS command, used by the calibration program).
+// The mode is loaded with the ADF7021 internal AFC switched off; the AFC readback
+// is then the intermediate frequency (100 kHz without error), read twice,
+// OPENMT_MEAS_SETTLE_MS apart. The step and AFC range options below are used
+// by the register 7 diagnostic (probe) only.
+#if !defined(OPENMT_MEAS_SETTLE_MS)
+#define OPENMT_MEAS_SETTLE_MS       60U
+#endif
+
+#if !defined(OPENMT_MEAS_STEP_COUNTS)
+#define OPENMT_MEAS_STEP_COUNTS     16U
+#endif
+
+// Value for the maximum AFC range field (register 10 bits 24-31)
+#if !defined(OPENMT_MEAS_AFC_RANGE)
+#define OPENMT_MEAS_AFC_RANGE       12U
 #endif
 
 // Scan dwell per mode, in ADF7021 clock edges, multiplied by the mode's
@@ -245,8 +311,22 @@ struct OpenMTMode {
     bool     txMsbFirst;
     uint8_t  scanMult;
 
+    uint16_t lockMs;       // streaming timeout without host lock (learned, see OPENMT_LOCK_LEARN)
+    uint16_t gapMaxMs;     // longest sync to sync gap seen while the host had the mode locked
+
     uint32_t rxFreq;
     uint32_t txFreq;
+};
+
+// Result of a MEAS command, sent to the host as MEAS | conn with these 11 bytes
+// (16 bit values, low byte first): afc0, afc1, step, rssi, syncs, flags.
+struct OpenMTMeas {
+    int16_t  afc0;      // AFC readback (the IF frequency: Hz = afc * step / 64)
+    int16_t  afc1;      // the same, one settle time later
+    int16_t  step;      // Hz per count of the readback, in 1/64 Hz
+    uint16_t rssi;      // -dBm, as readRSSI()
+    uint16_t syncs;     // sync patterns of the mode seen while measuring
+    uint8_t  flags;     // reserved, 0
 };
 
 class COpenMT {
@@ -259,6 +339,8 @@ public:
     uint8_t delMode(uint8_t connId);
     uint8_t setMode(uint8_t connId);
     uint8_t writeBits(uint8_t connId, const uint8_t* data, uint8_t length);
+    uint8_t measure(uint8_t connId, OpenMTMeas& result);
+    uint8_t probe(uint8_t connId, uint8_t pass, uint8_t half, uint16_t* words);
 
     // Free TX space reported to the host, in BIT frames (0..15)
     uint8_t getSpace() const;
@@ -280,11 +362,15 @@ private:
     bool       m_streaming;
     bool       m_hostLocked;
     uint32_t   m_lockTime;
+    bool       m_syncSeen;         // m_lockTime is the time of a real sync, not of the stream start
     uint8_t    m_rxFrame[OPENMT_RX_FRAME_BYTES + 8U];
     uint16_t   m_rxBits;
 
     // Scanning
     uint32_t   m_scanStart;
+    uint32_t   m_scanStartMs;
+    bool       m_rssiChecked;      // the carrier check of this dwell is done
+    uint32_t   m_rssiLast;         // time of the last RSSI debug event
     bool       m_reload;           // current mode changed during TX
 
     // TX
@@ -306,6 +392,9 @@ private:
     int8_t  findMode(uint8_t connId) const;
     bool    txBusy() const;
     void    selectMode(int8_t index);
+    void    restartDwell();
+    void    scanNext();
+    uint16_t listen(const OpenMTMode& mode, uint32_t ms);
     void    processRX();
     void    processTX();
     void    processScan();

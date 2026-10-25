@@ -31,7 +31,6 @@
 #include "stm32f7xx.h"
 #include "string.h"
 #else
-//#include <Arduino.h>
 #endif
 #include <stdint.h>
 
@@ -62,48 +61,17 @@ const uint8_t  MARK_NONE  = 0x00U;
 // Bidirectional Data pin (Enable Standard TX/RX Data Interface of ADF7021):
 #define BIDIR_DATA_PIN
 
-
 #include "IO.h"
 #include "SerialPort.h"
 #include "OpenMT.h"
-/*
-#include "DMRDMORX.h"
-#include "DMRDMOTX.h"
-
-#if defined(DUPLEX)
-#include "DMRIdleRX.h"
-#include "DMRRX.h"
-#include "DMRTX.h"
-#endif
-
-#include "DStarRX.h"
-#include "DStarTX.h"
-#include "YSFRX.h"
-#include "YSFTX.h"
-#include "P25RX.h"
-#include "P25TX.h"
-#include "M17RX.h"
-#include "M17TX.h"
-#include "NXDNRX.h"
-#include "NXDNTX.h"
-#include "POCSAGTX.h"
-#include "CWIdTX.h"
-#include "CalRSSI.h"
-#include "CalDMR.h"
-*/
 #include "Debug.h"
 #include "Utils.h"
 #include "I2CHost.h"
 
 extern MMDVM_STATE m_modemState;
-extern MMDVM_STATE m_calState;
-extern MMDVM_STATE m_modemState_prev;
 
-
-extern uint8_t m_cwIdTXLevel;
 
 extern uint32_t m_modeTimerCnt;
-
 
 extern bool m_duplex;
 
@@ -114,42 +82,7 @@ extern CIO io;
 extern CSerialPort serial;
 extern COpenMT openmt;
 
-//extern CDStarRX dstarRX;
-//extern CDStarTX dstarTX;
-
 extern uint8_t m_control;
-/*
-#if defined(DUPLEX)
-extern CDMRIdleRX dmrIdleRX;
-extern CDMRRX dmrRX;
-extern CDMRTX dmrTX;
-#endif
-
-extern CDMRDMORX dmrDMORX;
-extern CDMRDMOTX dmrDMOTX;
-
-extern CYSFRX ysfRX;
-extern CYSFTX ysfTX;
-
-extern CP25RX p25RX;
-extern CP25TX p25TX;
-
-extern CM17RX m17RX;
-extern CM17TX m17TX;
-
-extern CNXDNRX nxdnRX;
-extern CNXDNTX nxdnTX;
-
-extern CPOCSAGTX pocsagTX;
-
-extern CCalDMR  calDMR;
-
-#if defined(SEND_RSSI_DATA)
-extern CCalRSSI calRSSI;
-#endif
-
-extern CCWIdTX cwIdTX;
-*/
 #if defined(STM32_I2C_HOST)
 extern CI2CHost i2c;
 #endif

@@ -47,6 +47,7 @@
 #include "../tools/tools.h"
 #include "RingBuffer.h"
 #include "mmdvm.h"
+#include "../tools/ADF7021.h"   /* ADF7021_PFD and ADF7021_REG1_UHF2, for the RX offsets */
 #include <netinet/tcp.h>
 #define VERSION "2026-10-07"
 #define MAX_LINE_LENGTH 256
@@ -106,6 +107,7 @@ const char* TYPE_TX_TIMING    = "TXTM";  // OPENMT_TX_TIMING, forwarded to the D
 #define OPENMT_SAMP_EOT 0x90U
 #define OPENMT_BIT_EOT 0xA0U
 #define OPENMT_TX_TIMING 0xB0U  // bridge -> host: TX/RX sample alignment (DMR slot timing)
+#define OPENMT_MEAS 0xD0U       // RX frequency measurement request and reply (openmths)
 #define OPENMT_ACK 0xE0U
 #define OPENMT_NAK 0xF0U
 
@@ -210,6 +212,307 @@ char callsign[10] = "N0CALL";
 
 
 void setProtocol(const char* protocol, bool enabled);
+
+/* ------------------------------------------------------------------------------------------------------------------
+ * RX frequency offsets and calibration (modem type openmths)
+ *
+ * Every protocol service builds its ADD_MODE block (ADF7021 registers, sync, flags) and sends it in its MODE frame.
+ * Before the block goes to the modem, the RX frequency offset of the mode is added to the RX register 0 in it.  The
+ * offset, in Hz, is the "rxOffset" setting in the section of the mode (DMR, DSTAR, ...) in the config table; the
+ * calibration program and the dashboard change it.  A row is created with 0 when there is none.  The dashboard
+ * command "reloadOffsets" reads the offsets again and registers the modes whose offset changed.
+ *
+ * The dashboard command "calibrate <mode>" asks the modem (MEAS | conn) to measure the receive frequency error of the
+ * mode against the signal on its frequency.  The answer is given back as the command result:
+ *   "ok err=<Hz> off=<Hz> rssi=<-dBm> syncs=<n> a0=<n> a1=<n> step=<Hz>"   err is what to add to the offset
+ *   "error: <text>"
+ * ------------------------------------------------------------------------------------------------------------------ */
+#define ADD_MODE_BLOCK 58U
+
+static pthread_mutex_t offsetMutex = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t         addModeBlock[MAX_CLIENT_CONNECTIONS][ADD_MODE_BLOCK];   /* as the service sent it */
+static bool            addModeKnown[MAX_CLIENT_CONNECTIONS];
+static int32_t         rxOffsetHz[MAX_CLIENT_CONNECTIONS];                      /* offset in the block sent to the modem */
+
+typedef struct
+{
+    bool     pending;           /* a MEAS request is out */
+    bool     done;              /* the reply (or a NAK) has arrived */
+    bool     nak;
+    uint8_t  nakErr;
+    uint8_t  conn;
+    uint8_t  data[11];
+    int32_t  offset;            /* the RX offset that was in use */
+    time_t   deadline;
+} Measurement;
+
+static Measurement meas;
+static pthread_mutex_t measMutex = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * rxOffsetStepHz()
+ *
+ * Purpose: Size of one count of the RX synthesizer (the N.F value in register 0), from the band in register 1.
+ *
+ * Parameters: reg1 - register 1 of the mode.
+ *
+ * Returns: Hz per count.
+ */
+/* round to the nearest integer without libm */
+static long roundHz(double x)
+{
+    return (long)(x + ((x < 0.0) ? -0.5 : 0.5));
+}
+
+static double rxOffsetStepHz(uint32_t reg1)
+{
+    return (reg1 == ADF7021_REG1_UHF2) ? (ADF7021_PFD / 32768.0) : (ADF7021_PFD / 65536.0);
+}
+
+/*
+ * applyRxOffset()
+ *
+ * Purpose: Moves the RX frequency in an ADD_MODE block by hz.
+ *
+ * Parameters: block - the 58 byte block, changed in place; hz - the offset.
+ *
+ * Returns: nothing.
+ */
+static void applyRxOffset(uint8_t* block, int32_t hz)
+{
+    uint32_t reg0 = (uint32_t)block[0] | ((uint32_t)block[1] << 8) | ((uint32_t)block[2] << 16) | ((uint32_t)block[3] << 24);
+    uint32_t reg1 = (uint32_t)block[8] | ((uint32_t)block[9] << 8) | ((uint32_t)block[10] << 16) | ((uint32_t)block[11] << 24);
+
+    if (hz == 0 || (reg0 & 0x0FU) != 0U)
+        return;
+
+    int32_t counts = (int32_t)roundHz((double)hz / rxOffsetStepHz(reg1));
+    reg0 += (uint32_t)(counts * 16);
+    block[0] = (uint8_t)reg0;
+    block[1] = (uint8_t)(reg0 >> 8);
+    block[2] = (uint8_t)(reg0 >> 16);
+    block[3] = (uint8_t)(reg0 >> 24);
+}
+
+/*
+ * readRxOffset()
+ *
+ * Purpose: Reads the RX offset of a mode from the config table; creates the row with 0 if there is none.
+ *
+ * Parameters: modeName - section name of the mode.
+ *
+ * Returns: The offset in Hz, limited to +-20 kHz.
+ */
+static int32_t readRxOffset(const char* modeName)
+{
+    char tmp[32] = "";
+
+    readHostConfig(modemName, modeName, "rxOffset", tmp);
+    if (tmp[0] == '\0')
+    {
+        setHostConfig(modemName, modeName, "rxOffset", "rxoffset", "0");
+        return 0;
+    }
+
+    long v = strtol(tmp, NULL, 10);
+    return (int32_t)((v > 20000L) ? 20000L : (v < -20000L) ? -20000L : v);
+}
+
+/*
+ * queueAddMode()
+ *
+ * Purpose: Queues the ADD_MODE frame of a connection, with the RX offset in it, for the modem.
+ *
+ * Parameters: connId - connection index; the block must be known.
+ *
+ * Returns: nothing.
+ */
+static void queueAddMode(uint8_t connId)
+{
+    uint8_t frame[4 + ADD_MODE_BLOCK];
+
+    pthread_mutex_lock(&offsetMutex);
+    frame[0] = 0x61;
+    frame[1] = (uint8_t)(4U + ADD_MODE_BLOCK);
+    frame[2] = OPENMT_ADD_MODE;
+    frame[3] = connId;
+    memcpy(frame + 4, addModeBlock[connId], ADD_MODE_BLOCK);
+    applyRxOffset(frame + 4, rxOffsetHz[connId]);
+    pthread_mutex_unlock(&offsetMutex);
+
+    pthread_mutex_lock(&modemComBufMutex);
+    RingBuffer_addData(&modemCommandBuffer, frame, sizeof(frame));
+    pthread_mutex_unlock(&modemComBufMutex);
+}
+
+/*
+ * registerAddMode()
+ *
+ * Purpose: Called with the 58 byte block of a service's MODE frame: remembers it, looks up the RX offset of the mode
+ *          and queues the ADD_MODE frame.
+ *
+ * Parameters: connId - connection index; modeName - name of the mode; block - the service's block.
+ *
+ * Returns: nothing.
+ */
+static void registerAddMode(uint8_t connId, const char* modeName, const uint8_t* block)
+{
+    int32_t off = readRxOffset(modeName);
+
+    pthread_mutex_lock(&offsetMutex);
+    memcpy(addModeBlock[connId], block, ADD_MODE_BLOCK);
+    addModeKnown[connId] = true;
+    rxOffsetHz[connId]   = off;
+    pthread_mutex_unlock(&offsetMutex);
+
+    if (off != 0)
+        fprintf(stderr, "[%s] RX offset %d Hz.\n", modeName, (int)off);
+    queueAddMode(connId);
+}
+
+/*
+ * reloadRxOffsets()
+ *
+ * Purpose: Reads the RX offsets again and registers the modes whose offset changed.
+ *
+ * Returns: The number of modes that were changed.
+ */
+static int reloadRxOffsets(void)
+{
+    int changed = 0;
+
+    for (uint8_t i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
+    {
+        if (!hostClient[i].active || !addModeKnown[i])
+            continue;
+
+        int32_t off = readRxOffset(mode[i].name);
+        if (off != rxOffsetHz[i])
+        {
+            pthread_mutex_lock(&offsetMutex);
+            rxOffsetHz[i] = off;
+            pthread_mutex_unlock(&offsetMutex);
+            fprintf(stderr, "[%s] RX offset now %d Hz.\n", mode[i].name, (int)off);
+            queueAddMode(i);
+            changed++;
+        }
+    }
+
+    return changed;
+}
+
+/*
+ * startMeasurement()
+ *
+ * Purpose: Starts a frequency measurement of a mode: sends MEAS | conn to the modem.  The answer is picked up by
+ *          processSerial() and reported by finishMeasurement().
+ *
+ * Parameters: modeName - name of the mode; text - output, the error message when it cannot be started.
+ *
+ * Returns: true when the request is out, false with text set.
+ */
+static bool startMeasurement(const char* modeName, char* text, size_t size)
+{
+    int conn = -1;
+
+    for (uint8_t i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
+    {
+        if (hostClient[i].active && addModeKnown[i] && strcasecmp(mode[i].name, modeName) == 0)
+        {
+            conn = i;
+            break;
+        }
+    }
+
+    if (strcasecmp(modem, "openmths") != 0)
+        snprintf(text, size, "error: only the openmths modem type can measure");
+    else if (conn < 0)
+        snprintf(text, size, "error: mode %s is not registered", modeName);
+    else
+    {
+        pthread_mutex_lock(&measMutex);
+        bool busy = meas.pending;
+        if (!busy)
+        {
+            memset(&meas, 0, sizeof(meas));
+            meas.pending  = true;
+            meas.conn     = (uint8_t)conn;
+            meas.offset   = rxOffsetHz[conn];
+            meas.deadline = time(NULL) + 5;
+        }
+        pthread_mutex_unlock(&measMutex);
+
+        if (busy)
+        {
+            snprintf(text, size, "error: a measurement is already running");
+            return false;
+        }
+
+        uint8_t buf[3] = {0x61, 0x03, (uint8_t)(OPENMT_MEAS | (conn & 0x0f))};
+        pthread_mutex_lock(&modemComBufMutex);
+        RingBuffer_addData(&modemCommandBuffer, buf, 3);
+        pthread_mutex_unlock(&modemComBufMutex);
+        return true;
+    }
+
+    return false;
+}
+
+/*
+ * finishMeasurement()
+ *
+ * Purpose: When the modem has answered (or the time is up) turns the answer into the result text of the command.
+ *
+ * Parameters: text - output; size - its size.
+ *
+ * Returns: true when a result is ready in text.
+ */
+static bool finishMeasurement(char* text, size_t size)
+{
+    bool ready = false;
+
+    pthread_mutex_lock(&measMutex);
+    if (meas.pending && meas.done)
+    {
+        if (meas.nak)
+            snprintf(text, size, "error: modem refused (%s)", meas.nakErr == 5 ? "busy, a mode is locked or transmitting" :
+                                                              meas.nakErr == 3 ? "mode unknown to the modem" : "not supported");
+        else
+        {
+            int16_t  a0    = (int16_t)(meas.data[0] | (meas.data[1] << 8));
+            int16_t  a1    = (int16_t)(meas.data[2] | (meas.data[3] << 8));
+            int16_t  step  = (int16_t)(meas.data[4] | (meas.data[5] << 8));
+            uint16_t rssi  = (uint16_t)(meas.data[6] | (meas.data[7] << 8));
+            uint16_t syncs = (uint16_t)(meas.data[8] | (meas.data[9] << 8));
+            int      den   = (int)a1 - (int)a0;
+
+            /* Both readings come from the same AFC loop, the second one with the receive frequency moved up by step Hz.
+             * The error is where the reading would cross zero, whatever the scale of the readback is. */
+            if (rssi > 118)
+                snprintf(text, size, "error: no signal (rssi -%u dBm), is the reference transmitting?", rssi);
+            else if (abs(den) < 8 || abs(a0) > 30000 || abs(a1) > 30000)
+                snprintf(text, size, "error: AFC readback not usable (a0=%d a1=%d)", a0, a1);
+            else
+            {
+                double err = -(double)a0 * (double)step / (double)den;
+                snprintf(text, size, "ok err=%ld off=%d rssi=%u syncs=%u a0=%d a1=%d step=%d", roundHz(err), (int)meas.offset,
+                         rssi, syncs, a0, a1, step);
+            }
+        }
+        meas.pending = false;
+        ready = true;
+    }
+    else if (meas.pending && time(NULL) > meas.deadline)
+    {
+        snprintf(text, size, "error: no answer from the modem");
+        meas.pending = false;
+        ready = true;
+    }
+    pthread_mutex_unlock(&measMutex);
+
+    return ready;
+}
+
 
 /*
  * getCurrentMode()
@@ -2034,11 +2337,33 @@ void* commandThread(void* arg)
             }
         }
 
+        {
+            char text[96];
+
+            if (finishMeasurement(text, sizeof(text)))
+                ackDashbCommand(modemName, "modemHost", text);
+        }
+
         if (isTimerTriggered("chkComTimeout"))
         {
             char parameter[31];
             readDashbCommand(modemName, "modemHost", parameter);
-            if (strcasecmp(parameter, "setConfig") == 0)
+            if (strcasecmp(parameter, "reloadOffsets") == 0)
+            {
+                int n = reloadRxOffsets();
+                char text[40];
+
+                snprintf(text, sizeof(text), "success %d", n);
+                ackDashbCommand(modemName, "modemHost", text);
+            }
+            else if (strncasecmp(parameter, "calibrate ", 10) == 0)
+            {
+                char text[96];
+
+                if (!startMeasurement(parameter + 10, text, sizeof(text)))
+                    ackDashbCommand(modemName, "modemHost", text);
+            }
+            else if (strcasecmp(parameter, "setConfig") == 0)
             {
                 if (strcasecmp(modem, "mmdvmhs") == 0)
                     set_ConfigHS(modemName);
@@ -2291,14 +2616,19 @@ void* processClientSocket(void* arg)
             {
                 if (strcasecmp(modem, "openmths") == 0 || strcasecmp(modem, "openmtsx") == 0)
                 {
-                    buffer[0] = 0x61;
-                    buffer[1] = 0x3e;
-                    buffer[2] = OPENMT_ADD_MODE;
-                    buffer[3] = conn_id;
-                    memcpy(buffer + 4, buffer + 26, 58);
-                    pthread_mutex_lock(&modemComBufMutex);
-                    RingBuffer_addData(&modemCommandBuffer, buffer, 62);
-                    pthread_mutex_unlock(&modemComBufMutex);
+                    if (strcasecmp(modem, "openmths") == 0)
+                        registerAddMode(conn_id, mode[conn_id].name, buffer + 26);
+                    else
+                    {
+                        buffer[0] = 0x61;
+                        buffer[1] = 0x3e;
+                        buffer[2] = OPENMT_ADD_MODE;
+                        buffer[3] = conn_id;
+                        memcpy(buffer + 4, buffer + 26, 58);
+                        pthread_mutex_lock(&modemComBufMutex);
+                        RingBuffer_addData(&modemCommandBuffer, buffer, 62);
+                        pthread_mutex_unlock(&modemComBufMutex);
+                    }
                 }
 
                 buffer[0] = 0x61;
@@ -2762,6 +3092,7 @@ void* processClientSocket(void* arg)
         connections--;
 
     hostClient[conn_id].active = false;
+    addModeKnown[conn_id] = false;
     setProtocol(mode[conn_id].name, false);
 
     pthread_mutex_lock(&shutDownMutex);
@@ -3483,6 +3814,28 @@ int processSerial(void)
     {
         //     if (debugM)
         fprintf(stderr, "Nack == Type: %02X  Err: %02X\n", buffer[3], buffer[4]);
+
+        if ((buffer[3] & 0xf0) == OPENMT_MEAS)
+        {
+            pthread_mutex_lock(&measMutex);
+            if (meas.pending)
+            {
+                meas.nak    = true;
+                meas.nakErr = buffer[4];
+                meas.done   = true;
+            }
+            pthread_mutex_unlock(&measMutex);
+        }
+    }
+    else if (type == OPENMT_MEAS)
+    {
+        pthread_mutex_lock(&measMutex);
+        if (meas.pending && respLen >= 14U && (buffer[2] & 0x0f) == meas.conn)
+        {
+            memcpy(meas.data, buffer + 3, 11);
+            meas.done = true;
+        }
+        pthread_mutex_unlock(&measMutex);
     }
     else if (type == OPENMT_ACK)
     {

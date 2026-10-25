@@ -34,6 +34,8 @@ public:
     // Modem -> host
     void writeBitData(uint8_t connId, const uint8_t* data, uint8_t length);
     void writeStatus(uint8_t space);
+    void writeMeasurement(uint8_t connId, const OpenMTMeas& m);
+    void writeProbe(uint8_t connId, const uint16_t* words);
 
 #if defined(ENABLE_DEBUG)
     void writeDebug(const char* text);

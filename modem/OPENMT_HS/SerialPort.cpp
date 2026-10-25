@@ -97,6 +97,45 @@ void CSerialPort::writeStatus(uint8_t space)
     writeInt(1U, reply, 3U);
 }
 
+void CSerialPort::writeMeasurement(uint8_t connId, const OpenMTMeas& m)
+{
+    uint8_t reply[14U];
+
+    reply[0U]  = OPENMT_FRAME_START;
+    reply[1U]  = 14U;
+    reply[2U]  = OPENMT_MEAS | (connId & OPENMT_ID_MASK);
+    reply[3U]  = (uint8_t)(m.afc0 & 0xFF);
+    reply[4U]  = (uint8_t)((m.afc0 >> 8) & 0xFF);
+    reply[5U]  = (uint8_t)(m.afc1 & 0xFF);
+    reply[6U]  = (uint8_t)((m.afc1 >> 8) & 0xFF);
+    reply[7U]  = (uint8_t)(m.step & 0xFF);
+    reply[8U]  = (uint8_t)((m.step >> 8) & 0xFF);
+    reply[9U]  = (uint8_t)(m.rssi & 0xFF);
+    reply[10U] = (uint8_t)(m.rssi >> 8);
+    reply[11U] = (uint8_t)(m.syncs & 0xFF);
+    reply[12U] = (uint8_t)(m.syncs >> 8);
+    reply[13U] = m.flags;
+
+    writeInt(1U, reply, 14U, true);
+}
+
+void CSerialPort::writeProbe(uint8_t connId, const uint16_t* words)
+{
+    uint8_t reply[19U];
+
+    reply[0U] = OPENMT_FRAME_START;
+    reply[1U] = 19U;
+    reply[2U] = OPENMT_MEAS | (connId & OPENMT_ID_MASK);
+
+    for (uint8_t i = 0U; i < 8U; i++)
+    {
+        reply[3U + i * 2U] = (uint8_t)(words[i] & 0xFFU);
+        reply[4U + i * 2U] = (uint8_t)(words[i] >> 8);
+    }
+
+    writeInt(1U, reply, 19U, true);
+}
+
 void CSerialPort::writeBitData(uint8_t connId, const uint8_t* data, uint8_t length)
 {
     uint8_t head[3U];
@@ -180,8 +219,6 @@ void CSerialPort::processFrame()
     uint8_t length   = (uint8_t)(m_len - 3U);
     uint8_t err      = 0U;
 
-    io.resetWatchdog();
-
     switch (type)
     {
         case OPENMT_GET_VERSION:
@@ -230,6 +267,32 @@ void CSerialPort::processFrame()
             if (err != 0U)
                 sendNAK(typeByte, err);
             break;
+
+        case OPENMT_MEAS:
+        {
+            // A payload of pass and half asks for the register 7 diagnostic
+            if (m_len >= 5U)
+            {
+                uint16_t words[8U];
+
+                err = openmt.probe(id, m_buffer[3U], m_buffer[4U], words);
+                if (err == 0U)
+                    writeProbe(id, words);
+                else
+                    sendNAK(typeByte, err);
+            }
+            else
+            {
+                OpenMTMeas meas;
+
+                err = openmt.measure(id, meas);
+                if (err == 0U)
+                    writeMeasurement(id, meas);
+                else
+                    sendNAK(typeByte, err);
+            }
+        }
+        break;
 
         case OPENMT_BIT_EOT:
             // The transmitter drops by itself once the buffer drains

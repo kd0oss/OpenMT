@@ -2,14 +2,15 @@
 [Unit]
 Description=NXDN Gateway
 After=nxdn-host.service
-Requires=nxdn-host.service
+Wants=nxdn-host.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/OpenMT/protocols/NXDN
 ExecStart=/home/pi/OpenMT/protocols/NXDN/gateway/build/nxdn_gateway
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

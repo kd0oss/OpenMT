@@ -36,7 +36,10 @@
  *                            the sync are sent first (64 bits, 192 bits for
  *                            DMR) so the host decoder sees the whole sync
  *   host SET_MODE | conn  -> stay locked until SET_MODE | 0x0F (idle)
- *   no sync for OPENMT_LOCK_TIMEOUT_MS and no host lock -> stop, resume scan
+ *   no sync for the mode's lock timeout (learned, at most OPENMT_LOCK_TIMEOUT_MS)
+ *   and no host lock -> stop, resume scan
+ *
+ * Scanning: a mode is skipped after a few ms when its channel is empty (RSSI).
  */
 
 #include "Config.h"
@@ -223,9 +226,13 @@ m_rxHist1(0ULL),
 m_streaming(false),
 m_hostLocked(false),
 m_lockTime(0U),
+m_syncSeen(false),
 m_rxFrame(),
 m_rxBits(0U),
 m_scanStart(0U),
+m_scanStartMs(0U),
+m_rssiChecked(false),
+m_rssiLast(0U),
 m_reload(false),
 m_txWaiting(false),
 m_txWaitStart(0U),
@@ -338,6 +345,8 @@ uint8_t COpenMT::addMode(const uint8_t* data, uint8_t length)
         mode.syncErrs     = OPENMT_DMR_SYNC_ERRS;
     }
 
+    mode.lockMs     = OPENMT_LOCK_TIMEOUT_MS;
+    mode.gapMaxMs   = 0U;
     mode.reserved   = d[56U];
     mode.txMsbFirst = (d[57U] & 0x10U) != 0U;
     mode.scanMult   = d[57U] & 0x0FU;
@@ -374,7 +383,7 @@ uint8_t COpenMT::addMode(const uint8_t* data, uint8_t length)
 
 #if OPENMT_DEBUG_EVENTS
     // Build stamp, so it is obvious which firmware is running
-    serial.writeDebug("FW build v5-phase " __DATE__ " " __TIME__
+    serial.writeDebug("FW build " __DATE__ " " __TIME__
 #if OPENMT_LOOPBACK_TEST
                       " LB=on"
 #else
@@ -442,7 +451,7 @@ uint8_t COpenMT::setMode(uint8_t connId)
     {
         m_hostLocked = false;
         stopStreaming();
-        m_scanStart = io.getTicks();
+        restartDwell();
         setModeLEDs();
         return 0U;
     }
@@ -541,6 +550,179 @@ bool COpenMT::txBusy() const
     return m_tx || io.getTXData() > 0U;
 }
 
+// Receive for ms milliseconds without streaming and count the sync patterns of
+// the mode that are seen.
+uint16_t COpenMT::listen(const OpenMTMode& mode, uint32_t ms)
+{
+    uint32_t start = io.getMillis();
+    uint64_t shift = 0ULL;
+    uint16_t syncs = 0U;
+    uint8_t  bit;
+
+    while ((io.getMillis() - start) < ms)
+    {
+        while (io.getRXBit(bit))
+        {
+            if (m_rxInvert)
+                bit ^= 0x01U;
+
+            shift = (shift << 1) | bit;
+            if (mode.syncMask != 0ULL && syncMatch(shift, mode) && syncs < 0xFFFFU)
+                syncs++;
+        }
+    }
+
+    return syncs;
+}
+
+// Measure the receive frequency error of a registered mode against whatever
+// is being received on its frequency (a reference signal). Blocks for about
+// 2 * OPENMT_MEAS_SETTLE_MS plus the two mode loads, so it is refused while a
+// mode is locked by the host or the modem transmits. The mode is loaded again
+// as it was afterwards.
+uint8_t COpenMT::measure(uint8_t connId, OpenMTMeas& result)
+{
+    int8_t index = findMode(connId);
+    if (index < 0)
+        return OPENMT_ERR_BAD_CONN;
+
+    // Any mode can be measured, also while the host has a mode locked (the reference may be a radio
+    // sending that mode's frames): the stream stops for the measurement, and afterwards the modem goes
+    // back to the mode it was on, locked as before.
+    bool   wasLocked = m_hostLocked;
+    int8_t previous  = m_current;
+
+    if (m_tx)
+        return OPENMT_ERR_BUSY;
+
+    if (io.getTXData() > 0U)
+        return OPENMT_ERR_TX_DATA;
+
+    stopStreaming();
+
+    // The internal AFC must be off: it pulls the signal back to the IF and hides the error. With it off
+    // the AFC readback is the intermediate frequency itself, 100 kHz when the receiver is on frequency,
+    // frequency [Hz] = word * DEMOD_CLK / 2^18 with DEMOD_CLK = XTAL / DEMOD_CLK_DIVIDE (register 3, bits 6-9).
+    OpenMTMode mode = m_modes[index];
+    mode.reg10 &= ~0x10U;
+
+    m_current = index;
+    io.ifConfRegs(mode, true);
+    io.clearRX();
+    result.syncs = listen(mode, OPENMT_MEAS_SETTLE_MS);
+    result.afc0  = io.readAFC();
+    result.rssi  = io.readRSSI();
+
+    // A second reading later, the host averages the two
+    result.syncs += listen(mode, OPENMT_MEAS_SETTLE_MS);
+    result.afc1   = io.readAFC();
+
+    uint32_t div = (mode.reg3 >> 6) & 0x0FU;
+    if (div == 0U)
+        div = 1U;
+
+    // Hz per readback count in 1/64 Hz
+    result.step  = (int16_t)((((uint32_t)ADF7021_XTAL * 64UL) / div) >> 18);
+    result.flags = 0U;
+
+    selectMode((wasLocked && previous >= 0) ? previous : index);
+    if (wasLocked && !m_streaming)
+        startStreaming(false);
+
+    return 0U;
+}
+
+// Diagnostic for bringing up the AFC readback: reads eight of the sixteen 16 bit
+// words that register 7 can select (bits 7:4 stepped, readback enabled), so the
+// host can see which word follows the signal. pass 0: AFC on, 1: AFC off,
+// 2: AFC on with the frequency moved by OPENMT_MEAS_STEP_COUNTS.
+uint8_t COpenMT::probe(uint8_t connId, uint8_t pass, uint8_t half, uint16_t* words)
+{
+    int8_t index = findMode(connId);
+    if (index < 0)
+        return OPENMT_ERR_BAD_CONN;
+
+    if ((pass > 2U && (pass < 16U || pass > 20U)) || half > 1U)
+        return OPENMT_ERR_BAD_DATA;
+
+    // Any mode can be measured, also while the host has a mode locked (the reference may be a radio
+    // sending that mode's frames): the stream stops for the measurement, and afterwards the modem goes
+    // back to the mode it was on, locked as before.
+    bool   wasLocked = m_hostLocked;
+    int8_t previous  = m_current;
+
+    if (m_tx)
+        return OPENMT_ERR_BUSY;
+
+    if (io.getTXData() > 0U)
+        return OPENMT_ERR_TX_DATA;
+
+    stopStreaming();
+
+    OpenMTMode mode = m_modes[index];
+    mode.reg10 = (mode.reg10 & 0x00FFFFFFU) | ((uint32_t)OPENMT_MEAS_AFC_RANGE << 24);
+    if (pass >= 16U)
+    {
+        // Sweep: the frequency moved by (pass - 18) * 32 synthesizer counts, AFC on when half is 1. Words: the
+        // AFC readback after 60, 120, 180 and 240 ms (does it settle?), then RSSI, filter calibration, revision.
+        int32_t shift = ((int32_t)pass - 18) * 32;
+
+        if (half != 0U)
+            mode.reg10 |= 0x10U;
+        else
+            mode.reg10 &= ~0x10U;
+        mode.rxReg0 = (uint32_t)((int32_t)mode.rxReg0 + (shift << 4));
+
+        m_current = index;
+        io.ifConfRegs(mode, true);
+        io.clearRX();
+
+        for (uint8_t i = 0U; i < 4U; i++)
+        {
+            listen(mode, OPENMT_MEAS_SETTLE_MS);
+            words[i] = io.readback(0x0107UL);
+        }
+        words[4U] = io.readback(0x0147UL);
+        words[5U] = io.readback(0x0187UL);
+        words[6U] = io.readback(0x01C7UL);
+        words[7U] = 0U;
+
+        selectMode((wasLocked && previous >= 0) ? previous : index);
+        if (wasLocked && !m_streaming)
+            startStreaming(false);
+        return 0U;
+    }
+
+    if (pass != 1U)
+        mode.reg10 |= 0x10U;
+    else
+        mode.reg10 &= ~0x10U;
+
+    if (pass == 2U)
+        mode.rxReg0 += ((uint32_t)OPENMT_MEAS_STEP_COUNTS << 4);
+
+    m_current = index;
+    io.ifConfRegs(mode, true);
+    io.clearRX();
+    listen(mode, OPENMT_MEAS_SETTLE_MS);
+
+    for (uint8_t i = 0U; i < 8U; i++)
+        words[i] = io.readback(0x0107UL | ((uint32_t)(half * 8U + i) << 4));
+
+    selectMode((wasLocked && previous >= 0) ? previous : index);
+    if (wasLocked && !m_streaming)
+        startStreaming(false);
+
+    return 0U;
+}
+
+void COpenMT::restartDwell()
+{
+    m_scanStart   = io.getTicks();
+    m_scanStartMs = io.getMillis();
+    m_rssiChecked = false;
+}
+
 void COpenMT::selectMode(int8_t index)
 {
     m_current = index;
@@ -554,7 +736,7 @@ void COpenMT::selectMode(int8_t index)
     m_rxHist0 = 0ULL;
     m_rxHist1 = 0ULL;
 
-    m_scanStart = io.getTicks();
+    restartDwell();
     setModeLEDs();
 }
 
@@ -622,7 +804,30 @@ void COpenMT::processRX()
         {
             putRXBit(bit);
             if (sync)
+            {
+#if OPENMT_LOCK_LEARN
+                if (m_hostLocked && m_syncSeen)
+                {
+                    uint32_t gap = now - m_lockTime;
+                    OpenMTMode& cur = m_modes[m_current];
+
+                    if (gap < OPENMT_LOCK_TIMEOUT_MS && gap > cur.gapMaxMs)
+                    {
+                        uint32_t t = (gap * OPENMT_LOCK_FACTOR_PERCENT) / 100U;
+
+                        cur.gapMaxMs = (uint16_t)gap;
+                        if (t < OPENMT_LOCK_MIN_MS)
+                            t = OPENMT_LOCK_MIN_MS;
+                        if (t > OPENMT_LOCK_TIMEOUT_MS)
+                            t = OPENMT_LOCK_TIMEOUT_MS;
+                        cur.lockMs = (uint16_t)t;
+                        OPENMT_EVENT("lock timeout learned, conn,ms", cur.connId, cur.lockMs);
+                    }
+                }
+#endif
                 m_lockTime = now;
+                m_syncSeen = true;
+            }
         }
         else if (sync)
         {
@@ -631,7 +836,7 @@ void COpenMT::processRX()
         }
     }
 
-    if (m_streaming && !m_hostLocked && (now - m_lockTime) >= OPENMT_LOCK_TIMEOUT_MS)
+    if (m_streaming && !m_hostLocked && m_current >= 0 && (now - m_lockTime) >= m_modes[m_current].lockMs)
         stopStreaming();
 }
 
@@ -748,10 +953,41 @@ void COpenMT::processScan()
     if (m_modeCount < 2U || m_streaming || m_hostLocked)
         return;
 
+#if OPENMT_RSSI_SCAN
+    if (!m_rssiChecked)
+    {
+        if ((io.getMillis() - m_scanStartMs) < OPENMT_RSSI_SETTLE_MS)
+            return;
+
+        m_rssiChecked = true;
+
+        uint16_t rssi = io.readRSSI();
+        if (rssi > OPENMT_RSSI_THRESHOLD)
+        {
+            // Empty channel: next mode now
+            scanNext();
+            return;
+        }
+
+        uint32_t t = io.getMillis();
+        if ((t - m_rssiLast) >= 1000U)
+        {
+            m_rssiLast = t;
+            OPENMT_EVENT("RSSI carrier, conn,-dBm", m_modes[m_current].connId, rssi);
+        }
+    }
+#endif
+
     uint32_t dwell = OPENMT_SCAN_TIME * m_modes[m_current].scanMult;
     if ((io.getTicks() - m_scanStart) < dwell)
         return;
 
+    scanNext();
+}
+
+// Load the next registered mode
+void COpenMT::scanNext()
+{
     int8_t next = m_current;
     do
     {
@@ -761,7 +997,7 @@ void COpenMT::processScan()
     if (next != m_current)
         selectMode(next);
     else
-        m_scanStart = io.getTicks();
+        restartDwell();
 }
 
 // Only changes to/from "no space" are announced: that is all Modem_Host
@@ -783,6 +1019,7 @@ void COpenMT::startStreaming(bool withHistory)
     m_streaming = true;
     m_rxBits    = 0U;
     m_lockTime  = io.getMillis();
+    m_syncSeen  = withHistory;      // a stream that starts at a sync begins with one
 
     if (withHistory)
     {
@@ -807,8 +1044,13 @@ void COpenMT::startStreaming(bool withHistory)
 
         m_rxBits = (uint16_t)first * 8U;
 
+        // The history is whole bytes, so the stream stays bit-contiguous
+#if OPENMT_SYNC_FLUSH
+        flushRX();
+#else
         if (m_rxBits >= (OPENMT_RX_FRAME_BYTES * 8U))
             flushRX();
+#endif
     }
 
     io.setDecode(true);
@@ -829,7 +1071,7 @@ void COpenMT::stopStreaming()
     flushRX();
 
     m_streaming = false;
-    m_scanStart = io.getTicks();
+    restartDwell();
 
     io.setDecode(false);
     setModeLEDs();

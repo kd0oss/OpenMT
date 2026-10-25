@@ -45,23 +45,6 @@
 #define BAN2_MIN  435000000
 #define BAN2_MAX  438000000
 
-#define SCAN_TIME  1920
-#define SCAN_PAUSE 20000
-
-#if defined(DUPLEX)
-#if defined(STM32_USB_HOST)
-#define CAL_DLY_LOOP 98950U
-#else
-#define CAL_DLY_LOOP 96100U
-#endif
-#else
-#if defined(STM32_USB_HOST)
-#define CAL_DLY_LOOP 110850U
-#else
-#define CAL_DLY_LOOP 104600U
-#endif
-#endif
-
 extern uint32_t  m_frequency_rx;
 extern uint32_t  m_frequency_tx;
 extern uint32_t  m_pocsag_freq_tx;
@@ -112,43 +95,26 @@ public:
 #endif
 
   // IO API
-  void      write(uint8_t* data, uint16_t length, const uint8_t* control = NULL);
   uint16_t  getSpace(void) const;
   void      process(void);
-  bool      hasTXOverflow(void);
-  bool      hasRXOverflow(void);
   uint8_t   setFreq(uint32_t frequency_rx, uint32_t frequency_tx, uint8_t rf_power, uint32_t pocsag_freq_tx);
   void      setPower(uint8_t power);
   void      setMode(MMDVM_STATE modemState);
   void      setDecode(bool dcd);
-  void      setLoDevYSF(bool ysfLoDev);
-  void      resetWatchdog(void);
-  uint32_t  getWatchdog(void);
-  void      getIntCounter(uint16_t &int1, uint16_t &int2);
   void      selfTest(void);
 #if defined(ZUMSPOT_ADF7021) || defined(LONESTAR_USB) || defined(SKYBRIDGE_HS)
-//  void      checkBand(uint32_t frequency_rx, uint32_t frequency_tx);
-//  uint8_t   checkZUMspot(uint32_t frequency_rx, uint32_t frequency_tx);
-//  void      setBandVHF(bool vhf_on);
-//  bool      hasSingleADF7021(void);
-//  bool      isDualBand(void);
+  void      checkBand(uint32_t frequency_rx, uint32_t frequency_tx);
+  uint8_t   checkZUMspot(uint32_t frequency_rx, uint32_t frequency_tx);
+  void      setBandVHF(bool vhf_on);
+  bool      hasSingleADF7021(void);
+  bool      isDualBand(void);
 #endif
 
   // RF interface API
   void      setTX(void);
   void      setRX(bool doSle = true);
-  void      ifConf(MMDVM_STATE modemState, bool reset);
-#if defined(DUPLEX)
-  void      ifConf2(MMDVM_STATE modemState);
-#endif
   void      start(void);
   void      startInt(void);
-  void      setDeviations(uint8_t dstarTXLevel, uint8_t dmrTXLevel, uint8_t ysfTXLevel, uint8_t p25TXLevel, uint8_t nxdnTXLevel, uint8_t m17TXLevel, uint8_t pocsagTXLevel, bool ysfLoDev);
-  void      updateCal(void);
-
-#if defined(SEND_RSSI_DATA)
-  uint16_t  readRSSI(void);
-#endif
 
   // OpenMT bit stream API
   bool      getRXBit(uint8_t& bit);
@@ -160,10 +126,13 @@ public:
   uint32_t  getTicks(void) const;
   uint32_t  getMillis(void) const;
   void      ifConfRegs(const OpenMTMode& mode, bool reset);
-#if defined(DUPLEX)
-  void      ifConfRegs2(const OpenMTMode& mode);
+  uint16_t  readRSSI(void);
+  int16_t   readAFC(void);
+  uint16_t  readback(uint32_t reg7);
   void      loopbackTune(uint32_t reg0);
   uint8_t   takeHangFlags(void);
+#if defined(DUPLEX)
+  void      ifConfRegs2(const OpenMTMode& mode);
 #endif
 
   // Misc functions
@@ -171,19 +140,6 @@ public:
   void      delay_IFcal(void);
   void      delay_reset(void);
   void      delay_us(uint32_t us);
-
-#if defined(ENABLE_DEBUG)
-  uint32_t  RXfreq(void);
-  uint32_t  TXfreq(void);
-  uint16_t  devDSTAR(void);
-  uint16_t  devDMR(void);
-  uint16_t  devYSF(void);
-  uint16_t  devP25(void);
-  uint16_t  devNXDN(void);
-  uint16_t  devM17(void);
-  uint16_t  devPOCSAG(void);
-  void      printConf();
-#endif
 
 private:
   uint8_t            m_RX_N_divider;
@@ -194,15 +150,11 @@ private:
   bool               m_started;
   CBitRB             m_rxBuffer;
   CBitRB             m_txBuffer;
-  bool               m_LoDevYSF;
   uint32_t           m_ledCount;
   bool               m_ledValue;
   volatile uint32_t  m_ticks;
-  volatile uint32_t  m_watchdog;
   volatile uint8_t   m_hangFlags;
   uint32_t           m_txBitsPut;
-  volatile uint16_t  m_int1counter;
-  volatile uint16_t  m_int2counter;
 
 };
 

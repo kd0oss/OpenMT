@@ -1207,9 +1207,14 @@ bool ackDashbCommand(const char* modem_name, const char* command, const char* re
         return false;
     }
 
+    /* the result column holds 80 characters, a longer text makes the update fail */
+    char shortResult[80];
+    strncpy(shortResult, result, sizeof(shortResult) - 1);
+    shortResult[sizeof(shortResult) - 1] = '\0';
+
     sb_init(&query, 512);
     sb_append(&query, "UPDATE modem_host.dashb_commands SET result = '");
-    sbAppendEscaped(&query, mysql_conn, result);
+    sbAppendEscaped(&query, mysql_conn, shortResult);
     sb_append(&query, "' WHERE modem_name = '");
     sbAppendEscaped(&query, mysql_conn, modem_name);
     sb_append(&query, "' AND command = '");
@@ -1279,6 +1284,115 @@ bool clearDashbCommands(const char* modem_name)
     sb_free(&query);
     mysql_close(mysql_conn);
     return true;
+}
+
+/*
+ * sendDashbCommand()
+ *
+ * Puts a command into the modem_host.dashb_commands table, the same way the
+ * dashboard does, waits for the program that owns the command to
+ * acknowledge it, and removes the row again.
+ *
+ * Parameters:
+ *   modem_name  - Name of the modem the command is for.
+ *   command     - Command name ("modemHost" for Modem_Host).
+ *   parameter   - Command parameter.
+ *   result      - Output buffer for the result text the receiver stored.
+ *   size        - Size of result in bytes.
+ *   timeoutSec  - How long to wait for the acknowledgement.
+ *
+ * Returns: true if the command was acknowledged (result holds the text), false
+ *   if the database failed or there was no answer within the time (result is
+ *   then empty).
+ */
+bool sendDashbCommand(const char* modem_name, const char* command, const char* parameter, char* result, size_t size,
+                      int timeoutSec)
+{
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
+    StringBuilder query;
+    bool answered = false;
+
+    if (size > 0)
+        result[0] = '\0';
+
+    readConfig("database", "host", dbhost);
+    readConfig("database", "passwd", passwd);
+
+    MYSQL *mysql_conn = mysql_init(NULL);
+    if (mysql_conn == NULL)
+    {
+        fprintf(stderr, "SendDash: mysql_init() failed\n");
+        return false;
+    }
+
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
+    {
+        fprintf(stderr, "SendDash: %s\n", mysql_error(mysql_conn));
+        mysql_close(mysql_conn);
+        return false;
+    }
+
+    sb_init(&query, 512);
+    sb_append(&query, "INSERT INTO modem_host.dashb_commands SET modem_name = '");
+    sbAppendEscaped(&query, mysql_conn, modem_name);
+    sb_append(&query, "', command = '");
+    sbAppendEscaped(&query, mysql_conn, command);
+    sb_append(&query, "', parameter = '");
+    sbAppendEscaped(&query, mysql_conn, parameter);
+    sb_append(&query, "'");
+
+    if (mysql_query(mysql_conn, sb_cstr(&query)))
+    {
+        fprintf(stderr, "sendDashbCommand: mysql_query failed: %s\n", mysql_error(mysql_conn));
+        mysql_close(mysql_conn);
+        sb_free(&query);
+        return false;
+    }
+
+    unsigned long long id = mysql_insert_id(mysql_conn);
+
+    for (int waited = 0; waited < timeoutSec && !answered; waited++)
+    {
+        sb_clear(&query);
+        sb_append(&query, "SELECT result FROM modem_host.dashb_commands WHERE id = ");
+        char num[32];
+        snprintf(num, sizeof(num), "%llu", id);
+        sb_append(&query, num);
+
+        if (mysql_query(mysql_conn, sb_cstr(&query)) == 0)
+        {
+            MYSQL_RES *res = mysql_store_result(mysql_conn);
+
+            if (res != NULL)
+            {
+                MYSQL_ROW row = mysql_fetch_row(res);
+
+                if (row != NULL && row[0] != NULL)
+                {
+                    snprintf(result, size, "%s", row[0]);
+                    answered = true;
+                }
+                mysql_free_result(res);
+            }
+        }
+
+        if (!answered)
+            sleep(1);
+    }
+
+    sb_clear(&query);
+    sb_append(&query, "DELETE FROM modem_host.dashb_commands WHERE id = ");
+    {
+        char num[32];
+        snprintf(num, sizeof(num), "%llu", id);
+        sb_append(&query, num);
+    }
+    mysql_query(mysql_conn, sb_cstr(&query));
+
+    sb_free(&query);
+    mysql_close(mysql_conn);
+    return answered;
 }
 
 /*

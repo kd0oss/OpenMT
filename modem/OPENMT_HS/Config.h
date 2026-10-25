@@ -69,23 +69,6 @@
 // I2C host address:
 #define I2C_ADDR 0x22
 
-// Enable mode detection:
-#define ENABLE_SCAN_MODE
-
-// Send RSSI value:
-#define SEND_RSSI_DATA
-
-// Enable Nextion LCD serial port repeater on USART2 (ZUMspot Libre Kit and ZUMspot RPi):
-// Not available with the OpenMT protocol (it relied on MMDVM_SERIAL frames).
-// #define SERIAL_REPEATER
-#define SERIAL_REPEATER_BAUD 9600
-
-// Enable Nextion LCD serial port repeater on USART1 (Do not use with STM32_USART1_HOST enabled):
-// #define SERIAL_REPEATER_USART1
-
-// Enable P25 Wide modulation:
-// #define ENABLE_P25_WIDE
-
 // Disable mode LEDs blink during scan mode:
 // #define QUIET_MODE_LEDS
 
@@ -116,9 +99,6 @@
 // Disable frequency restrictions (satellite, ISS, etc)
 // #define DISABLE_FREQ_BAN
 
-// Enable UDID feature
-// #define ENABLE_UDID
-
 // ---------------------------------------------------------------------------
 // OpenMT (modem type "openmths") options, defaults are in OpenMT.h
 // ---------------------------------------------------------------------------
@@ -134,5 +114,19 @@
 // Stop streaming RX bits this long after the last sync (ms), unless the
 // host locked the mode with SET_MODE:
 // #define OPENMT_LOCK_TIMEOUT_MS     1500U
+// Learn the timeout per mode from the sync gaps seen under host lock:
+// #define OPENMT_LOCK_LEARN          1
+// #define OPENMT_LOCK_MIN_MS         250U
+// Send the first frame at the sync instead of waiting for a full frame:
+// #define OPENMT_SYNC_FLUSH          1
+// Skip empty channels while scanning (RSSI, as -dBm, carrier when stronger):
+// #define OPENMT_RSSI_SCAN           1
+// #define OPENMT_RSSI_THRESHOLD      115U
+// #define OPENMT_RSSI_SETTLE_MS      2U
+// RX offset measurement (MEAS command): listen time per reading (ms). The step and
+// AFC range are used by the openmt_cal raw/sweep diagnostics only:
+// #define OPENMT_MEAS_SETTLE_MS      60U
+// #define OPENMT_MEAS_STEP_COUNTS    16
+// #define OPENMT_MEAS_AFC_RANGE      12U
 
 #endif

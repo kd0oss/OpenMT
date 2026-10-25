@@ -2,14 +2,15 @@
 [Unit]
 Description=M17 Gateway
 After=m17-host.service
-Requires=m17-host.service
+Wants=m17-host.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/OpenMT/protocols/m17/gateway
 ExecStart=/home/pi/OpenMT/protocols/m17/gateway/build/m17_gateway
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

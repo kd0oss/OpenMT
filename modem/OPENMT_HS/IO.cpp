@@ -24,10 +24,7 @@
 
 // Modem state shared with ADF7021.cpp, OpenMT.cpp and BitRB.cpp
 MMDVM_STATE m_modemState = STATE_IDLE;
-MMDVM_STATE m_calState = STATE_IDLE;
-MMDVM_STATE m_modemState_prev = STATE_IDLE;
 
-uint8_t m_cwIdTXLevel = 30;
 uint32_t m_modeTimerCnt;
 
 bool m_duplex = false;
@@ -44,9 +41,7 @@ uint8_t m_power;
 CIO::CIO()
     : m_started(false), m_rxBuffer(1024U),
       m_txBuffer((OPENMT_TX_BUFFER_FRAMES * OPENMT_BIT_FRAME_BITS) + OPENMT_TX_BUFFER_SLACK),
-      m_LoDevYSF(false),
-      m_ledCount(0U), m_ledValue(true), m_ticks(0U), m_watchdog(0U), m_hangFlags(0U), m_txBitsPut(0U),
-      m_int1counter(0U), m_int2counter(0U) {
+      m_ledCount(0U), m_ledValue(true), m_ticks(0U), m_hangFlags(0U), m_txBitsPut(0U) {
   Init();
 
   CE_pin(HIGH);
@@ -248,29 +243,7 @@ uint32_t CIO::getTicks() const
     return m_ticks;
 }
 
-void CIO::write(uint8_t *data, uint16_t length, const uint8_t *control) {
-  if (!m_started)
-    return;
-
-  for (uint16_t i = 0U; i < length; i++) {
-    if (control == NULL)
-      m_txBuffer.put(data[i], MARK_NONE);
-    else
-      m_txBuffer.put(data[i], control[i]);
-  }
-
-  // Switch the transmitter on if needed
-  if (!m_tx) {
-    setTX();
-    m_tx = true;
-  }
-}
-
 uint16_t CIO::getSpace() const { return m_txBuffer.getSpace(); }
-
-bool CIO::hasTXOverflow() { return m_txBuffer.hasOverflowed(); }
-
-bool CIO::hasRXOverflow() { return m_rxBuffer.hasOverflowed(); }
 
 #if defined(ZUMSPOT_ADF7021) || defined(LONESTAR_USB) || defined(SKYBRIDGE_HS)
 void CIO::checkBand(uint32_t frequency_rx, uint32_t frequency_tx) {
@@ -419,19 +392,6 @@ void CIO::setDecode(bool dcd)
         COS_pin(dcd ? true : false);
 
     m_dcd = dcd;
-}
-
-void CIO::setLoDevYSF(bool on) { m_LoDevYSF = on; }
-
-void CIO::resetWatchdog() { m_watchdog = 0U; }
-
-uint32_t CIO::getWatchdog() { return m_watchdog; }
-
-void CIO::getIntCounter(uint16_t &int1, uint16_t &int2) {
-  int1 = m_int1counter;
-  int2 = m_int2counter;
-  m_int1counter = 0U;
-  m_int2counter = 0U;
 }
 
 // Global objects (definition order is the construction order)
