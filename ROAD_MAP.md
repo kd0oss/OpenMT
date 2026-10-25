@@ -16,7 +16,7 @@ Description and status:
 - [x] NXDN service to work with modem host. **(beta)**
 - [x] NXDN gateway for NXDN service. **(beta)**
 - [x] FM repeater service to work with modem host. **(beta)**
-- [x] EchoLink gateway for FM service, outgoing and incoming, DTMF control. **(beta, not tried on the live EchoLink network)**
+- [x] EchoLink gateway for FM service, outgoing and incoming, DTMF control. **(beta)**
 - [x] HTML based Dashboard for status and configuration. **(beta)**
 - [x] SQL database for logging, status and configuration. **(beta)**
 - [x] Update IRCDDBGateway to use database instead of config file. **(beta)**
