@@ -50,6 +50,47 @@ CREATE TABLE `config` (
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
+-- Adding data for table `config`
+--
+
+SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, @@AUTOCOMMIT=0;
+LOCK TABLES `config` WRITE;
+/*!40000 ALTER TABLE `config` DISABLE KEYS */;
+INSERT INTO `config` VALUES
+(1,'modem1','main','gateways','none',''),
+(2,'modem1','main','activeModes','none',''),
+(3,'modem1','main','username','none','admin'),
+(4,'modem1','main','callsign','none','N0CALL'),
+(5,'modem1','main','title','none','Repeater Dashboard'),
+(6,'modem1','config','port','none','ttyAMA0'),
+(7,'modem1','config','mode','none','duplex'),
+(8,'modem1','config','modem','none','openmt'),
+(9,'modem1','config','rxInvert','none','false'),
+(10,'modem1','config','txInvert','none','true'),
+(11,'modem1','config','pttInvert','none','false'),
+(12,'modem1','config','useCOSAsLockout','none','false'),
+(13,'modem1','config','debug','none','false'),
+(14,'modem1','config','txDelay','none','100'),
+(15,'modem1','config','rxLevel','none','50'),
+(16,'modem1','config','rfTXLevel','none','50'),
+(17,'modem1','config','rxFrequency','none','449900000'),
+(18,'modem1','config','txFrequency','none','444900000'),
+(19,'modem1','config','rxDCOffset','none','0'),
+(20,'modem1','config','txDCOffset','none','0'),
+(21,'modem1','config','baud','none','921600'),
+(22,'modem1','config','fmTxLevel','none','50'),
+(23,'modem1','config','cwIdTxLevel','none','50'),
+(24,'modem1','main','latitude','none','0.000000'),
+(25,'modem1','main','longitude','none','0.000000'),
+(26,'modem1','main','description','none',''),
+(27,'modem1','main','location','none',''),
+
+/*!40000 ALTER TABLE `config` ENABLE KEYS */;
+UNLOCK TABLES;
+COMMIT;
+SET AUTOCOMMIT=@OLD_AUTOCOMMIT;
+
+--
 -- Table structure for table `dashb_commands`
 --
 
