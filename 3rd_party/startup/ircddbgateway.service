@@ -1,14 +1,14 @@
 # /etc/systemd/system/ircddbgateway.service
 [Unit]
 Description=IRCDDBGateway Service
-After=network.target
-Wants=network.target
+After=network.target mariadb.service
+Wants=network.target mariadb.service
 
 [Service]
 Type=forking
 User=root
-WorkingDirectory=/home/pi/ircDDBGateway
-ExecStart=/home/pi/ircDDBGateway/ircDDBGateway/ircddbgatewayd -daemon
+WorkingDirectory=/home/pi/ircDDBGateway-openmt
+ExecStart=/home/pi/ircDDBGateway-openmt/ircDDBGateway/ircddbgatewayd -daemon
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

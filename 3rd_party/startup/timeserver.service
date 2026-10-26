@@ -7,8 +7,8 @@ Requires=ircddbgateway.service
 [Service]
 Type=forking
 User=root
-WorkingDirectory=/home/pi/ircDDBGateway/TimeServer
-ExecStart=/home/pi/ircDDBGateway/TimeServer/timeserverd -daemon
+WorkingDirectory=/home/pi/ircDDBGateway-openmt/TimeServer
+ExecStart=/home/pi/ircDDBGateway-openmt/TimeServer/timeserverd -daemon
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

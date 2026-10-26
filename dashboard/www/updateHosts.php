@@ -317,44 +317,116 @@ function updateDMRHosts()
     }
 }
 
-function updateDMRIds()
+/* Runs one SQL statement. Kept in one place so the id list code can be tried without a database. */
+function dbExec($sql)
 {
     global $mysql;
 
-    exec("curl -sSL http://www.pistar.uk/downloads/DMRIds.dat.gz  --user-agent Pi-Star_Pi-Star_20260101 | gunzip -c > DMRIds.dat", $out, $ret);
-//    echo $out."   ".$ret."\n";
-    //    if ($hosts != "error")
+    return mysqli_query($mysql, $sql);
+}
+
+/* One row of the id list as the text of a VALUES list, or null when the line has no usable id. The callsign and the
+   name are cut to the size of their columns, because a too long value would make the whole INSERT fail. */
+function idRow($id, $callsign, $name)
+{
+    $id = trim($id);
+    if ($id === "" || !ctype_digit($id))
+        return null;
+
+    return "(".(int)$id.",'".hostEsc(substr(trim($callsign), 0, 10))."','".hostEsc(substr(trim($name), 0, 40))."')";
+}
+
+/* Writes rows (made by idRow) into a table of modem_host with one INSERT, returns the number of rows written. */
+function flushIdRows($table, $rows)
+{
+    if (count($rows) == 0)
+        return 0;
+
+    if (!dbExec("INSERT INTO modem_host.".$table." (DMR_Id, Callsign, Name) VALUES ".implode(",", $rows)))
     {
-        mysqli_query($mysql, "TRUNCATE modem_host.dmr_ids");
-        $lines = file("DMRIds.dat", FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        for ($x = 0; $x < count($lines); $x++)
+        echo "Inserting ids failed.\n";
+        return 0;
+    }
+    return count($rows);
+}
+
+/* Reads a file of ids (id, callsign, name separated by $separator) and adds them to a table, 1000 rows to an INSERT.
+   One INSERT for each id takes minutes on a Raspberry Pi, since the database makes every one of them durable on its
+   own. $skipFirst skips a header line. Returns the number of rows added. */
+function insertIdFile($path, $separator, $skipFirst, $table)
+{
+    $in = @fopen($path, "r");
+    if ($in === false)
+        return 0;
+
+    $rows = array();
+    $total = 0;
+    $first = true;
+    while (($line = fgets($in)) !== false)
+    {
+        if ($first)
         {
-            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
-            {
-                $fields = explode("\t", $lines[$x]);
-                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '".hostEsc($fields[0])."', Callsign = '".hostEsc($fields[1])."', Name = '".hostEsc($fields[2])."'";
-                mysqli_query($mysql, $query);
-//                echo ".";
-            }
+            $first = false;
+            if ($skipFirst)
+                continue;
         }
+        $line = rtrim($line, "\r\n");
+        if (strlen($line) <= 6 || $line[0] == '#')
+            continue;
+
+        $fields = explode($separator, $line);
+        if (count($fields) < 3)
+            continue;
+
+        $row = idRow($fields[0], $fields[1], $fields[2]);
+        if ($row === null)
+            continue;
+
+        $rows[] = $row;
+        if (count($rows) >= 1000)
+        {
+            $total += flushIdRows($table, $rows);
+            $rows = array();
+        }
+    }
+    fclose($in);
+
+    return $total + flushIdRows($table, $rows);
+}
+
+function updateDMRIds()
+{
+    @unlink("DMRIds.dat");
+    exec("curl -sSL --fail --connect-timeout 20 --max-time 300 http://www.pistar.uk/downloads/DMRIds.dat.gz --user-agent Pi-Star_Pi-Star_20260101 | gunzip -c > DMRIds.dat", $out, $ret);
+
+    // The new list is built beside the old one and put in place at once, so the list is never empty or half filled
+    // while it loads, and a failed download leaves the old list as it was
+    dbExec("DROP TABLE IF EXISTS modem_host.dmr_ids_new");
+    if (!dbExec("CREATE TABLE modem_host.dmr_ids_new LIKE modem_host.dmr_ids"))
+    {
+        echo "Could not create the new id list.\n";
+        return;
     }
 
-    $file = "http://www.pistar.uk/downloads/NXDN.csv";
-    $users = getHostFile($file);
+    $count = insertIdFile("DMRIds.dat", "\t", false, "dmr_ids_new");
+
+    $users = getHostFile("http://www.pistar.uk/downloads/NXDN.csv");
     if ($users != "error")
     {
-        $lines = explode("\n", $users);
-        for ($x = 1; $x < count($lines)-1; $x++)
-        {
-            if (strlen($lines[$x]) > 6 && $lines[$x][0] != '#')
-            {
-                $fields = explode(",", $lines[$x]);
-                $query = "INSERT INTO modem_host.dmr_ids SET DMR_Id = '".hostEsc($fields[0])."', Callsign = '".hostEsc($fields[1])."', Name = '".hostEsc(substr($fields[2], 0, 40))."'";
-                mysqli_query($mysql, $query);
-//                echo ".";
-            }
-        }
+        file_put_contents("NXDN.csv", $users);
+        $count += insertIdFile("NXDN.csv", ",", true, "dmr_ids_new");
     }
+
+    if ($count < 1000)
+    {
+        echo "Only ".$count." ids were read, keeping the old list.\n";
+        dbExec("DROP TABLE IF EXISTS modem_host.dmr_ids_new");
+        return;
+    }
+
+    dbExec("RENAME TABLE modem_host.dmr_ids TO modem_host.dmr_ids_old, modem_host.dmr_ids_new TO modem_host.dmr_ids");
+    dbExec("DROP TABLE IF EXISTS modem_host.dmr_ids_old");
+    echo $count." ids loaded.\n";
 }
 
 function updateYSFHosts()
