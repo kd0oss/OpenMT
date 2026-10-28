@@ -11,9 +11,10 @@ cmake_minimum_required(VERSION 3.12)
 # convention with the actual library this project needs instead).
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(alsa REQUIRED IMPORTED_TARGET "alsa")
+pkg_check_modules(mariadb REQUIRED IMPORTED_TARGET "mariadb")
 
 # Project name and language
-project(bridge C)
+project(sx1255_bridge C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -28,32 +29,39 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Define an executable target (sources added below)
-add_executable(bridge)
+add_executable(sx1255_bridge)
 
 # Link ALSA plus the other system libraries this project needs:
 # libm (math.h), libpthread (the playback thread + mutex),
 # libutil (openpty())
-target_link_libraries(bridge PUBLIC PkgConfig::alsa)
-target_link_libraries(bridge PRIVATE m pthread util)
+target_link_libraries(sx1255_bridge PUBLIC PkgConfig::alsa PkgConfig::mariadb)
+target_link_libraries(sx1255_bridge PRIVATE m pthread util)
 
 # Link the source files -- one flat list, matching this project's own
 # directory layout (hw/, dsp/, audio/, app/)
-target_sources(bridge PRIVATE
+target_sources(sx1255_bridge PRIVATE
     hw/sx1255.c
     hw/gpio_line.c
     dsp/dsp.c
     audio/alsa_io.c
     app/bridge.c
+    app/bridge_db.c
+    ../../tools/bridge_common.c
+    ../../tools/tools.c
+    ../../tools/string_builder.c
+    ../../tools/RingBuffer.c
 )
 
 # Specify the directories where header files are located
-target_include_directories(bridge PRIVATE
+target_include_directories(sx1255_bridge PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/hw
     ${CMAKE_CURRENT_SOURCE_DIR}/dsp
     ${CMAKE_CURRENT_SOURCE_DIR}/audio
+    ${CMAKE_CURRENT_SOURCE_DIR}/app
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools
 )
 
 # Change the output directory for the executable -- same pattern
 # OpenMT's own CMakeLists.txt files use, so the built binary lands in
 # the build directory rather than scattered under source directories.
-set_target_properties(bridge PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+set_target_properties(sx1255_bridge PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")

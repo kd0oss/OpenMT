@@ -3057,10 +3057,10 @@ int main(int argc, char **argv)
     m17modFilter.pState      = m17modState;
 
     char tmp[15];
-    readHostConfig(modemName, "config", "modem", tmp);
-    if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
+    readHostConfig(modemName, "config", "streamType", tmp);   /* published by the bridge: FRAME, BIT or SAMPLE */
+    if (strcasecmp(tmp, "SAMPLE") == 0)
         packetType = PACKET_TYPE_SAMP;
-    else if (strcasecmp(tmp, "openmths") == 0)
+    else if (strcasecmp(tmp, "BIT") == 0)
         packetType = PACKET_TYPE_BIT;
     else
         packetType = PACKET_TYPE_FRAME;
@@ -3128,6 +3128,13 @@ int main(int argc, char **argv)
         {
             char parameter[31];
 
+            if (!m17GWConnected)
+            {
+                readDashbCommand(modemName, "updateConfM17", parameter);
+                if (strlen(parameter) > 0)
+                    ackDashbCommand(modemName, "updateConfM17", "success");
+            }
+
             if (m17GWConnected)
             {
                 readDashbCommand(modemName, "updateConfM17", parameter);
@@ -3143,6 +3150,8 @@ int main(int argc, char **argv)
                     pthread_mutex_lock(&gwCmdMutex);
                     RingBuffer_addData(&gwCommand, buf, 9);
                     pthread_mutex_unlock(&gwCmdMutex);
+                    /* The M17 gateway never replies to this command. */
+                    ackDashbCommand(modemName, "updateConfM17", "success");
                 }
 
                 readDashbCommand(modemName, "reflLinkM17", parameter);

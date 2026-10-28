@@ -788,6 +788,74 @@ bool readHostConfig(const char* modem_name, const char* module_name, const char*
 }
 
 /*
+ * hostConfigDigest()
+ *
+ * Gives one number that changes whenever any setting of a module of the
+ * modem is added, removed or changed.  Modem_Host compares it from time to
+ * time to find out that the bridge has to read its settings again.  It is
+ * the sum of a CRC of every "parameter=value" row, so the order of the rows
+ * does not matter and the length of the result does not depend on how many
+ * settings there are.
+ *
+ * Parameters:
+ *   modem_name  - Name of the modem.
+ *   module_name - Module to watch, normally "config".
+ *   digest      - Receives the number.
+ *
+ * Returns: true if the number was read, false if the database could not be
+ *   reached (digest is left alone then).
+ */
+bool hostConfigDigest(const char* modem_name, const char* module_name, uint64_t* digest)
+{
+    char dbhost[128] = "localhost";
+    char passwd[128] = "";
+    StringBuilder query;
+    bool ok = false;
+
+    readConfig("database", "host", dbhost);
+    readConfig("database", "passwd", passwd);
+
+    MYSQL *mysql_conn = mysql_init(NULL);
+
+    if (mysql_conn == NULL)
+        return false;
+
+    if (mysql_real_connect(mysql_conn, dbhost, dbUser(), passwd, "", 0, NULL, 0) == NULL)
+    {
+        mysql_close(mysql_conn);
+        return false;
+    }
+
+    sb_init(&query, 512);
+    sb_append(&query, "SELECT COALESCE(SUM(CRC32(CONCAT(parameter, '=', COALESCE(value, '')))), 0) FROM modem_host.config WHERE modem_name = '");
+    sbAppendEscaped(&query, mysql_conn, modem_name);
+    sb_append(&query, "' AND module = '");
+    sbAppendEscaped(&query, mysql_conn, module_name);
+    sb_append(&query, "'");
+
+    if (mysql_query(mysql_conn, sb_cstr(&query)) == 0)
+    {
+        MYSQL_RES *result = mysql_store_result(mysql_conn);
+
+        if (result != NULL)
+        {
+            MYSQL_ROW row = mysql_fetch_row(result);
+
+            if (row != NULL && row[0] != NULL)
+            {
+                *digest = strtoull(row[0], NULL, 10);
+                ok = true;
+            }
+            mysql_free_result(result);
+        }
+    }
+
+    sb_free(&query);
+    mysql_close(mysql_conn);
+    return ok;
+}
+
+/*
  * addMode()
  *
  * Adds a protocol mode to the comma separated activeModes setting of a

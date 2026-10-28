@@ -80,19 +80,25 @@ passord to access the database.
 Modem types
 ===========================================================================
 ```
-This software is intended to work with 4 modem types:
-    1. MMDVM        // used mostly for repeaters
-    2. MMDVM_HS     // used mostly for hotspots
-    3. OPENMT       // This will be new firmware that will run on MMDVM
-                       compatiable modems. It will be a bare bones
-                       system that will stream ADC/DAC samples to and
-                       from the host. This will make it protocol agnostic.
-    4. OPENMT_HS    // Firmware for MMDVM_HS compatible hardware (ADF7021
-                       hotspot boards) with the same intention of creating
-                       a protocol agnostic modem. It exchanges raw bits
-                       with the host. See modem/OPENMT_HS/README.md. It is
-                       a port of MMDVM_HS by Andy Uribe CA6JAU.
+The modem host does not talk to a modem. A small bridge program does, and the host
+talks to the bridge through a virtual serial port. The host only knows the kind of
+packet stream the bridge delivers:
 
+    FRAME   whole frames, one mode at a time
+    BIT     bit stream frames with a connection id
+    SAMPLE  audio sample frames
+
+Bridges (one per modem family; run the one for your modem, see its INSTALL_SERVICE.txt):
+    modem/mmdvm-bridge      MMDVM and MMDVM_HS boards (FRAME)
+    modem/openmths-bridge   OPENMT_HS firmware for ADF7021 hotspot boards (BIT),
+                            see modem/OPENMT_HS/README.md. It is a port of MMDVM_HS
+                            by Andy Uribe CA6JAU.
+    modem/openmt-bridge     OPENMT firmware that streams ADC/DAC samples (SAMPLE)
+    modem/sx1255-openmt-bridge   SX1255 radio on the Pi itself (SAMPLE)
+
+A bridge keeps its settings in the database, creates the ones that are missing, tells
+the modem host its stream type, and reads its settings again when the host tells it
+the settings changed. See docs/BRIDGES.md.
 ```
 
 Modem Host (multimode)

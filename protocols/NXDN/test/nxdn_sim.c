@@ -1,4 +1,3 @@
-/* Created by Rick KD0OSS */
 /*
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -28,7 +27,7 @@
  *      original frames,
  *   5. a data call, a noisy call and the mode hang time.
  *
- * Usage: nxdn_sim [-m modem 1-10] [--frame] [--noise rms] [--hang seconds]
+ * Usage: nxdn_sim [-m modem 1-10] [--frame | --bits] [--noise rms] [--hang seconds]
  */
 
 #include <arpa/inet.h>
@@ -55,6 +54,9 @@
 static int modemFd = -1;
 static int gwFd = -1;
 static bool frameMode = false;
+static bool bitMode = false;
+static bool noGateway = false;
+static unsigned int callTg = 9U;
 static double noiseRms = 0.0;
 static unsigned int hangSeconds = 3U;
 
@@ -77,15 +79,6 @@ static unsigned int gwHead = 0U, gwTail = 0U;
 static uint8_t rxbuf[2][600];
 static int rxlen[2] = {0, 0};
 
-/*
- * nowMs()
- *
- * Reads the monotonic clock.
- *
- * Parameters: none.
- *
- * Returns: Time in milliseconds.
- */
 static uint64_t nowMs(void)
 {
     struct timespec ts;
@@ -95,17 +88,6 @@ static uint64_t nowMs(void)
     return (uint64_t)ts.tv_sec * 1000U + (uint64_t)ts.tv_nsec / 1000000U;
 }
 
-/*
- * gauss()
- *
- * Makes a random number with a Gaussian (normal) distribution, mean 0 and
- * standard deviation 1 (Box-Muller method), used to add noise to the test
- * samples.
- *
- * Parameters: none.
- *
- * Returns: The random number.
- */
 static double gauss(void)
 {
     double u = (rand() + 1.0) / (RAND_MAX + 2.0);
@@ -116,14 +98,8 @@ static double gauss(void)
 
 /*
  * pump()
- *
- * Reads whatever packets have arrived from the host on either socket and
- * queues them, waiting up to timeoutMs for the first.
- *
- * Parameters:
- *   timeoutMs - Longest wait for the first packet, in milliseconds.
- *
- * Returns: nothing.
+ *   Reads whatever packets have arrived from the host on either socket and
+ *   queues them, waiting up to timeoutMs for the first.
  */
 static void pump(int timeoutMs)
 {
@@ -194,19 +170,6 @@ static void pump(int timeoutMs)
     }
 }
 
-/*
- * sendAll()
- *
- * Writes a whole buffer to a socket, retrying when the write is interrupted
- * or would block.
- *
- * Parameters:
- *   fd   - Socket to write to.
- *   data - Bytes to write.
- *   len  - Number of bytes in data.
- *
- * Returns: nothing.
- */
 static void sendAll(int fd, const uint8_t* data, size_t len)
 {
     size_t done = 0U;
@@ -228,16 +191,6 @@ static void sendAll(int fd, const uint8_t* data, size_t len)
 static char modeNow[10] = "IDLE";
 static unsigned int setModeCount = 0U, setIdleCount = 0U;
 
-/*
- * writeModeFile()
- *
- * Writes the current simulated modem mode to /tmp/nxdn_stub_mode, where the
- * host can read it as the active mode.
- *
- * Parameters: none.
- *
- * Returns: nothing.
- */
 static void writeModeFile(void)
 {
     FILE* f = fopen("/tmp/nxdn_stub_mode", "w");
@@ -250,16 +203,9 @@ static void writeModeFile(void)
 }
 
 /*
- * handleModemCommands()
- *
- * Processes the packets from the host that are not transmit data, such as
- * the mode commands (SETMODE changes IDLE to NXDN, and the count is kept;
- * SETIDLE returns to IDLE).  Transmit packets stay in the queue for the
- * caller.
- *
- * Parameters: none.
- *
- * Returns: nothing.
+ * drainModem()
+ *   Processes the packets from the host that are not transmit data: mode
+ *   commands. Transmit packets stay in the queue for the caller.
  */
 static void handleModemCommands(void)
 {
@@ -285,18 +231,6 @@ static void handleModemCommands(void)
     }
 }
 
-/*
- * sendGwPacket()
- *
- * Sends a packet to the host's gateway port.
- *
- * Parameters:
- *   type    - Four character packet type.
- *   payload - The payload.
- *   len     - Number of bytes in payload.
- *
- * Returns: nothing.
- */
 static void sendGwPacket(const char* type, const uint8_t* payload, unsigned int len)
 {
     uint8_t pkt[100];
@@ -310,17 +244,7 @@ static void sendGwPacket(const char* type, const uint8_t* payload, unsigned int 
     sendAll(gwFd, pkt, 8 + len);
 }
 
-/*
- * sendSamples()
- *
- * Sends modem samples to the host as SAMP packets
- *
- * Parameters:
- *   s     - The samples.
- *   count - Number of samples.
- *
- * Returns: nothing.
- */
+/* Sends modem samples to the host as SAMP packets */
 static void sendSamples(const int16_t* s, unsigned int count)
 {
     uint8_t pkt[200];
@@ -353,17 +277,7 @@ static void sendSamples(const int16_t* s, unsigned int count)
     }
 }
 
-/*
- * radioTransmit()
- *
- * Plays a list of on air frames into the host
- *
- * Parameters:
- *   frames - The frames to play, 48 bytes each.
- *   n      - Number of frames.
- *
- * Returns: nothing.
- */
+/* Plays a list of on air frames into the host */
 static void radioTransmit(uint8_t frames[][48], unsigned int n)
 {
     if (frameMode)
@@ -386,6 +300,56 @@ static void radioTransmit(uint8_t frames[][48], unsigned int n)
 
         uint8_t lost[8] = {0x61, 0x00, 0x08, 0x04, 'N', 'X', 'D', 'L'};
         sendAll(modemFd, lost, sizeof(lost));
+        return;
+    }
+
+    if (bitMode)
+    {
+        /* what the ADF7021 streams: noise, then the preamble and the frames, 3 bits off a byte boundary */
+        static uint8_t stream[MAXF * 48 + 4000];
+        unsigned int len = 0U;
+        uint8_t shifted[sizeof(stream) + 8];
+        unsigned int bits;
+
+        for (unsigned int i = 0U; i < 40U; i++)
+            stream[len++] = (uint8_t)(rand() & 0xFF);       /* noise before the signal */
+
+        for (unsigned int i = 0U; i < 24U; i++)
+            stream[len++] = 0x77U;                          /* preamble */
+
+        for (unsigned int i = 0U; i < n; i++)
+        {
+            memcpy(stream + len, frames[i], 48);
+            len += 48U;
+        }
+
+        for (unsigned int i = 0U; i < 6U * 48U + 20U; i++)
+            stream[len++] = 0x00U;                          /* nothing after the signal */
+
+        /* shift the stream by 3 bits */
+        memset(shifted, 0x00, sizeof(shifted));
+        bits = len * 8U;
+        for (unsigned int b = 0U; b < bits; b++)
+            if (stream[b >> 3] & (0x80U >> (b & 7U)))
+                shifted[(b + 3U) >> 3] |= (uint8_t)(0x80U >> ((b + 3U) & 7U));
+        len++;
+
+        for (unsigned int pos = 0U; pos < len; pos += 192U)
+        {
+            uint8_t pkt[200];
+
+            pkt[0] = 0x61;
+            pkt[1] = 0x00;
+            pkt[2] = 200;
+            pkt[3] = 0x04;
+            memcpy(pkt + 4, "BITS", 4);
+            memset(pkt + 8, 0x00, 192);
+            memcpy(pkt + 8, shifted + pos, len - pos < 192U ? len - pos : 192U);
+            sendAll(modemFd, pkt, 200);
+            usleep(3000);
+            pump(0);
+        }
+
         return;
     }
 
@@ -430,16 +394,6 @@ static void radioTransmit(uint8_t frames[][48], unsigned int n)
 static uint8_t netMsg[MAXF][41];
 static unsigned int netCount = 0U;
 
-/*
- * collectGateway()
- *
- * Takes the NXDN messages from the packets queued from the gateway port and
- * stores them in netMsg.
- *
- * Parameters: none.
- *
- * Returns: nothing.
- */
 static void collectGateway(void)
 {
     while (gwTail != gwHead)
@@ -453,17 +407,7 @@ static void collectGateway(void)
     }
 }
 
-/*
- * waitGatewayQuiet()
- *
- * Waits until the gateway has gone quiet for quietMs
- *
- * Parameters:
- *   quietMs - How long the gateway must be quiet, in milliseconds.
- *   maxMs   - Longest total wait, in milliseconds.
- *
- * Returns: nothing.
- */
+/* Waits until the gateway has gone quiet for quietMs */
 static void waitGatewayQuiet(unsigned int quietMs, unsigned int maxMs)
 {
     uint64_t start = nowMs();
@@ -494,19 +438,6 @@ typedef struct
     unsigned int cap;
 } TxCapture;
 
-/*
- * captureFrameCb()
- *
- * Receiver callback that stores each frame received from the host's
- * transmission.
- *
- * Parameters:
- *   ctx  - The capture structure (TxCapture).
- *   f    - The received frame.
- *   lost - true if the signal was lost; such calls are ignored.
- *
- * Returns: nothing.
- */
 static void captureFrameCb(void* ctx, const uint8_t* f, bool lost)
 {
     TxCapture* c = ctx;
@@ -517,24 +448,25 @@ static void captureFrameCb(void* ctx, const uint8_t* f, bool lost)
 
 /*
  * collectTransmit()
- *
- * Gathers what the host transmitted: decodes the samples with the receiver
- * (or reads the frames of the MMDVM path) until the host has been quiet.
- *
- * Parameters:
- *   c       - Receives the frames and the end of transmission flag.
- *   quietMs - How long the host must be quiet, in milliseconds.
- *   maxMs   - Longest total wait, in milliseconds.
- *
- * Returns: nothing.
+ *   Gathers what the host transmitted: decodes the samples with the receiver
+ *   (or reads the frames of the MMDVM path) until the host has been quiet.
  */
+static void bitCaptureCb(void* ctx, const uint8_t* f, bool lost)
+{
+    captureFrameCb(ctx, f, lost);
+}
+
 static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int maxMs)
 {
     static NxdnRx rx;
+    static NxdnBitRx brx;
+    unsigned int bitPackets = 0U;
+    unsigned int bitBytes = 0U;
     uint64_t start = nowMs();
     uint64_t lastRx = nowMs();
 
     nxdnRxInit(&rx, captureFrameCb, c, NXDN_SHAPE_RRC);
+    nxdnBitRxInit(&brx, bitCaptureCb, c);
     c->count = 0U;
     c->eot = false;
 
@@ -563,6 +495,12 @@ static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int max
 
                 nxdnRxSamples(&rx, s, 96);
             }
+            else if (memcmp(p->data + 4, "BITS", 4) == 0)
+            {
+                bitPackets++;
+                bitBytes += 192U;
+                nxdnBitRxBytes(&brx, p->data + 8, 192U);
+            }
             else if (memcmp(p->data + 4, "SEOT", 4) == 0 || memcmp(p->data + 4, "NXDL", 4) == 0)
             {
                 c->eot = true;
@@ -575,7 +513,13 @@ static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int max
         collectGateway();
     }
 
-    if (!frameMode)
+    if (bitMode)
+    {
+        /* no EOT packet in bit mode: the host stopped sending */
+        c->eot = bitPackets > 0U;
+        printf("  %u BITS packets (%u bytes) from the host\n", bitPackets, bitBytes);
+    }
+    else if (!frameMode)
     {
         /* push zeros so the receiver emits its last frame */
         int16_t z[96] = {0};
@@ -585,19 +529,6 @@ static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int max
     }
 }
 
-/*
- * countEqual()
- *
- * Counts how many frames of one list also appear in another.
- *
- * Parameters:
- *   a  - First list of frames, 48 bytes each.
- *   na - Number of frames in a.
- *   b  - Second list of frames, 48 bytes each.
- *   nb - Number of frames in b.
- *
- * Returns: The number of frames in a that are also in b.
- */
 static unsigned int countEqual(uint8_t a[][48], unsigned int na, uint8_t b[][48], unsigned int nb)
 {
     unsigned int same = 0U;
@@ -617,19 +548,6 @@ static unsigned int countEqual(uint8_t a[][48], unsigned int na, uint8_t b[][48]
 static unsigned int refNetCount;
 static uint8_t refNet[MAXF][41];
 
-/*
- * refNetCb()
- *
- * Control callback for the reference run: stores each message the control
- * would send to the network.
- *
- * Parameters:
- *   ctx - Not used.
- *   d   - The message data.
- *   t   - The message type.
- *
- * Returns: nothing.
- */
 static void refNetCb(void* ctx, const uint8_t* d, uint8_t t)
 {
     if (refNetCount < MAXF)
@@ -640,18 +558,6 @@ static void refNetCb(void* ctx, const uint8_t* d, uint8_t t)
     }
 }
 
-/*
- * reference()
- *
- * Runs the control logic directly on a list of frames, to find which network
- * messages it should produce.  The result is kept in refNet.
- *
- * Parameters:
- *   frames - The frames, 48 bytes each.
- *   n      - Number of frames.
- *
- * Returns: nothing.
- */
 static void reference(uint8_t frames[][48], unsigned int n)
 {
     NxdnCtrl c;
@@ -667,21 +573,6 @@ static void reference(uint8_t frames[][48], unsigned int n)
 
 static uint8_t txCall[MAXF][48];
 
-/*
- * main()
- *
- * Program entry.  Plays the part of the modem host and the gateway for
- * nxdn_host and runs five tests: a voice call from radio to network, a voice
- * call from network to radio, a data call, the mode hang time, and a call
- * with another RAN, which must be ignored.  Options: -m modem number,
- * --frame (MMDVM frames instead of samples), --noise rms, --hang seconds.
- *
- * Parameters:
- *   argc - Number of command line arguments.
- *   argv - Command line arguments.
- *
- * Returns: 0 if all tests pass, 1 if a test fails, 2 on a setup error.
- */
 int main(int argc, char** argv)
 {
     int modem = 1;
@@ -692,6 +583,13 @@ int main(int argc, char** argv)
             modem = atoi(argv[++i]);
         else if (strcmp(argv[i], "--frame") == 0)
             frameMode = true;
+        else if (strcmp(argv[i], "--nogw") == 0 && i + 1 < argc)
+        {
+            noGateway = true;
+            callTg = (unsigned int)atoi(argv[++i]);
+        }
+        else if (strcmp(argv[i], "--bits") == 0)
+            bitMode = true;
         else if (strcmp(argv[i], "--noise") == 0 && i + 1 < argc)
             noiseRms = atof(argv[++i]);
         else if (strcmp(argv[i], "--hang") == 0 && i + 1 < argc)
@@ -723,7 +621,7 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    printf("nxdn_sim: waiting for nxdn_host on port %d (%s modem)...\n", 18000 + modem - 1, frameMode ? "MMDVM" : "sample");
+    printf("nxdn_sim: waiting for nxdn_host on port %d (%s modem)...\n", 18000 + modem - 1, frameMode ? "MMDVM" : (bitMode ? "OpenMT_HS bit" : "sample"));
 
     struct pollfd pf = { lfd, POLLIN, 0 };
 
@@ -751,6 +649,44 @@ int main(int argc, char** argv)
 
     printf("registration: mode \"%.4s\" type \"%.4s\" txLevel %u\n", reg + 8, reg + 19, reg[25]);
     CHECK(memcmp(reg + 4, "MODE", 4) == 0 && memcmp(reg + 8, "NXDN", 4) == 0, "MODE registration for NXDN");
+
+    if (bitMode)
+    {
+        uint32_t w[10];
+        uint64_t sync[2];
+        uint32_t reg4;
+        uint32_t reg2;
+
+        memcpy(w, reg + 26, 40);
+        memcpy(sync, reg + 66, 16);
+        reg2 = w[3];
+        reg4 = w[5];
+
+        printf("ADF7021: RX0 %08X TX0 %08X R1 %08X R2 %08X R3 %08X R4 %08X R5 %08X R6 %08X R10 %08X R13 %08X\n",
+               w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9]);
+        printf("sync %llX mask %llX flags %02X %02X\n", (unsigned long long)sync[0], (unsigned long long)sync[1], reg[82], reg[83]);
+
+        CHECK(w[4] == 0x2A4CC113U, "REG3 is the NXDN clock register (14.7456 MHz TCXO)");
+        CHECK(((reg4 >> 4) & 7U) == 3U && ((reg4 >> 10) & 0x3FFU) == 295U && ((reg4 >> 20) & 0x3FFU) == 7U && (reg4 >> 30) == 0U,
+              "REG4: 4FSK, discriminator 295, post demod 7, 12.5 kHz IF");
+        CHECK(((reg2 >> 4) & 7U) == 7U && ((reg2 >> 28) & 3U) == 2U && ((reg2 >> 19) & 0x1FFU) == 13U,
+              "REG2: RC 4FSK, data inverted, deviation 13 at 50 percent");
+        CHECK((w[9] >> 4) == 26U, "REG13: slicer threshold 26");
+        CHECK(w[8] == 0x049E472AU, "REG10: AFC off");
+        CHECK(sync[0] == 0xCDF59ULL && sync[1] == 0xFFFFFULL, "frame sync word 0xCDF59, 20 bits");
+        CHECK(((w[0] >> 27) & 0x1FU) == 0x09U && ((w[1] >> 27) & 0x1FU) == 0x08U && w[0] != w[1], "RX and TX frequency words (register 0)");
+    }
+
+    if (noGateway)
+    {
+        /* a real gateway is attached to the host: just make a call from the radio to the talk group */
+        unsigned int cnt = nxdnGenVoiceCall(RAN, 1234, (uint16_t)callTg, true, 50, txCall, MAXF, 3);
+
+        sleep(8);                       /* the gateway connects to the host */
+        radioTransmit(txCall, cnt);
+        sleep(6);
+        return 0;
+    }
 
     /* 2. play the gateway */
     a.sin_port = htons(18500 + modem - 1);
@@ -824,7 +760,7 @@ int main(int argc, char** argv)
     collectTransmit(&cap, 1500, 15000);
 
     printf("  host transmitted %u frames, end of transmission %s\n", cap.count, cap.eot ? "seen" : "NOT seen");
-    CHECK(cap.eot, "transmission ended with an EOT packet");
+    CHECK(cap.eot, bitMode ? "transmission ended (host stopped sending bits)" : "transmission ended with an EOT packet");
     unsigned int eq = countEqual(txCall, n, cap.frames, cap.count);
     printf("  %u of %u original frames recovered exactly\n", eq, n);
     CHECK(eq == n || (noiseRms > 0.0 && eq >= n * 8U / 10U), "transmitted frames decode to the original frames");

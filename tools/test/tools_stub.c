@@ -152,6 +152,17 @@ bool readHostConfig(const char* modem_name, const char* module_name, const char*
         return true;
     }
 
+    if (strcmp(module_name, "config") == 0 && strcmp(key, "streamType") == 0)
+    {
+        /* what the bridge would publish for the simulated modem type */
+        env = getenv(STUB_ENV "MODEM");
+        if (env == NULL || strncasecmp(env, "mmdvm", 5) == 0)
+            strcpy(value, env == NULL ? "SAMPLE" : "FRAME");
+        else
+            strcpy(value, strcasecmp(env, "openmths") == 0 ? "BIT" : "SAMPLE");
+        return true;
+    }
+
     if (strcmp(module_name, "main") == 0 && strcmp(key, "callsign") == 0)
     {
         strcpy(value, "N0CALL");
@@ -381,6 +392,18 @@ bool readDashbCommand(const char* modem_name, const char* command, char* value)
         if (fgets(value, 30, f) != NULL)
             value[strcspn(value, "\r\n")] = '\0';
         fclose(f);
+
+        /* <PROTOCOL>_STUB_PROCESSING: like the real table, the command reads "processing" from now on, so a
+         * receiver that hands the command on to someone else is not given it again */
+        if (getenv(STUB_ENV "PROCESSING") != NULL && value[0] != '\0' && strcmp(value, "processing") != 0)
+        {
+            f = fopen(path, "w");
+            if (f != NULL)
+            {
+                fputs("processing\n", f);
+                fclose(f);
+            }
+        }
     }
 
     return true;

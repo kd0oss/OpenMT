@@ -59,6 +59,8 @@
 #include "sx1255.h"
 #include "alsa_io.h"
 #include "dsp.h"
+#include "bridge_common.h"
+#include "bridge_db.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,6 +182,7 @@ typedef struct
     float rx_gain; /* extra scale factor applied to baseband before Q15
                     * conversion, on top of the DSP chain's own
                     * scalingCoeff. */
+    const char *modem_name; /* name of the modem in the config database */
     const char *pty_symlink; /* optional stable symlink (e.g.
                                * /dev/sx1255modem) to the PTY slave path,
                                * so Modem_Host.c's config doesn't need
@@ -259,6 +262,12 @@ typedef struct
 
 static volatile sig_atomic_t g_stop = 0;
 
+/* The control frame read_frame() found instead of an OpenMT frame, if any. */
+static bool    g_ctl_pending = false;
+static uint8_t g_ctl_type    = 0;
+static uint8_t g_ctl_plen    = 0;
+static uint8_t g_ctl_payload[BRIDGE_CTL_MAX];
+
 /*
  * handle_signal()
  *
@@ -315,6 +324,7 @@ config_set_defaults(bridge_config_t *cfg)
      * anything about the DSP chain upstream of this value changes. */
     cfg->deviation_hz = 950.0;
     cfg->pty_symlink = "/dev/sx1255";
+    cfg->modem_name = "modem1";
     cfg->tx_symbol_scale = 494.0f;
     atomic_store(&cfg->tx_invert, true); /* see the field comment above */
     cfg->tx_prime_ms = 250; /* see the field comment above */
@@ -372,6 +382,10 @@ print_usage(const char *argv0)
         "  --tx-pll-bw KHZ       75/150/225/300 (default 300)\n"
         "  --capture DEV         ALSA capture device (default hw:sx1255)\n"
         "  --playback DEV        ALSA playback device (default hw:sx1255)\n"
+        "  --modem-name NAME     modem name in the config database (default modem1);\n"
+        "                        frequencies, gains, PLL bandwidths and the invert flags\n"
+        "                        are kept there: the options give only the defaults of\n"
+        "                        settings that do not exist yet\n"
         "  --pty-symlink PATH    create/update a stable symlink to the PTY\n"
         "                        slave device at PATH (e.g. /dev/sx1255modem)\n"
         "                        so OpenMT's modemtty config doesn't need\n"
@@ -528,6 +542,10 @@ parse_args(int argc, char **argv, bridge_config_t *cfg)
         else if (strcmp(argv[i], "--playback") == 0 && (val = NEXT_ARG()) != NULL)
         {
             cfg->alsa_playback_dev = val;
+        }
+        else if (strcmp(argv[i], "--modem-name") == 0 && (val = NEXT_ARG()) != NULL)
+        {
+            cfg->modem_name = val;
         }
         else if (strcmp(argv[i], "--pty-symlink") == 0 && (val = NEXT_ARG()) != NULL)
         {
@@ -778,6 +796,31 @@ read_frame(int fd, uint8_t *type_and_conn, uint8_t *payload, uint8_t *payload_le
         if (n <= 0)
         {
             return false;
+        }
+        if (hdr[0] == BRIDGE_CTL_START)
+        {
+            /* a control frame of Modem_Host: 0xFE <total length> <type> [payload] */
+            uint8_t clen;
+            uint8_t cbuf[BRIDGE_CTL_MAX];
+            size_t  have = 0;
+
+            if (read(fd, &clen, 1) != 1 || clen < BRIDGE_CTL_LENGTH || clen > BRIDGE_CTL_MAX)
+                continue;
+            cbuf[0] = BRIDGE_CTL_START;
+            cbuf[1] = clen;
+            have    = 2;
+            while (have < clen)
+            {
+                n = read(fd, cbuf + have, clen - have);
+                if (n <= 0)
+                    return false;
+                have += (size_t)n;
+            }
+            g_ctl_type     = cbuf[2];
+            g_ctl_plen     = (uint8_t)(clen - 3U);
+            memcpy(g_ctl_payload, cbuf + 3, g_ctl_plen);
+            g_ctl_pending  = true;
+            return true;
         }
         if (hdr[0] != OPENMT_START)
         {
@@ -1638,6 +1681,117 @@ apply_openmtsx_config(tx_state_t *tx_state, const uint8_t *payload, uint8_t payl
     }
 }
 
+
+/*
+ * settings_from_cfg()
+ *
+ * Copies the radio settings of the bridge configuration.
+ *
+ * Parameters:
+ *   cfg - Configuration.
+ *   d   - Receives the settings.
+ *
+ * Returns: nothing.
+ */
+static void
+settings_from_cfg(const bridge_config_t *cfg, SxSettings *d)
+{
+    memset(d, 0, sizeof(*d));
+    d->rx_freq_hz = cfg->rx_freq_hz;
+    d->tx_freq_hz = cfg->tx_freq_hz;
+    d->lna_gain_db = cfg->lna_gain_db;
+    d->pga_gain_db = cfg->pga_gain_db;
+    d->mixer_gain_db = cfg->mixer_gain_db;
+    d->dac_gain_db = cfg->dac_gain_db;
+    d->rx_pll_bw_khz = cfg->rx_pll_bw_khz;
+    d->tx_pll_bw_khz = cfg->tx_pll_bw_khz;
+    d->rx_invert = atomic_load(&cfg->rx_invert);
+    d->tx_invert = atomic_load(&cfg->tx_invert);
+}
+
+/*
+ * settings_to_cfg()
+ *
+ * Puts radio settings in the bridge configuration.
+ *
+ * Parameters:
+ *   d   - Settings.
+ *   cfg - Configuration to change.
+ *
+ * Returns: nothing.
+ */
+static void
+settings_to_cfg(const SxSettings *d, bridge_config_t *cfg)
+{
+    cfg->rx_freq_hz = d->rx_freq_hz;
+    cfg->tx_freq_hz = d->tx_freq_hz;
+    cfg->lna_gain_db = d->lna_gain_db;
+    cfg->pga_gain_db = d->pga_gain_db;
+    cfg->mixer_gain_db = d->mixer_gain_db;
+    cfg->dac_gain_db = d->dac_gain_db;
+    cfg->rx_pll_bw_khz = d->rx_pll_bw_khz;
+    cfg->tx_pll_bw_khz = d->tx_pll_bw_khz;
+    atomic_store(&cfg->rx_invert, d->rx_invert);
+    atomic_store(&cfg->tx_invert, d->tx_invert);
+}
+
+/*
+ * reload_settings()
+ *
+ * Reads the settings from the config database again.  When they differ from
+ * the ones in use they are applied and the radio is configured again, the
+ * same way a SET_CONFIG frame did it before the settings were kept in the
+ * database.
+ *
+ * Parameters:
+ *   tx_state - TX state, whose configuration and SX1255 are updated.
+ *
+ * Returns: nothing.
+ */
+static void
+reload_settings(tx_state_t *tx_state)
+{
+    SxSettings now, wanted;
+
+    settings_from_cfg(tx_state->cfg, &now);
+    wanted = now;
+    sxDbLoad(tx_state->cfg->modem_name, &wanted);
+    if (!sxDbDiffer(&now, &wanted))
+    {
+        log_msg("bridge: settings read, nothing changed\n");
+        return;
+    }
+    log_msg("bridge: settings changed -- rx=%u tx=%u lna=%u pga=%u mixer=%.1f dac=%d "
+        "rx_pll_bw=%u tx_pll_bw=%u rx_invert=%d tx_invert=%d\n", wanted.rx_freq_hz,
+        wanted.tx_freq_hz, wanted.lna_gain_db, wanted.pga_gain_db, (double)wanted.mixer_gain_db,
+        wanted.dac_gain_db, wanted.rx_pll_bw_khz, wanted.tx_pll_bw_khz, (int)wanted.rx_invert,
+        (int)wanted.tx_invert);
+    settings_to_cfg(&wanted, tx_state->cfg);
+    if (!sx1255_startup_configure(tx_state->sx, tx_state->cfg))
+        log_msg("bridge: failed to apply the settings to the hardware\n");
+}
+
+/*
+ * handle_control()
+ *
+ * Carries out a control frame of Modem_Host.  RELOAD and HOST_UP read the
+ * settings again; the radio needs nothing else when the host starts.  The
+ * mode and command frames are for bridges of modems that need them.
+ *
+ * Parameters:
+ *   tx_state - TX state.
+ *
+ * Returns: nothing.
+ */
+static void
+handle_control(tx_state_t *tx_state)
+{
+    if (g_ctl_type == BRIDGE_CTL_RELOAD || g_ctl_type == BRIDGE_CTL_HOST_UP)
+        reload_settings(tx_state);
+    else if (g_ctl_type == BRIDGE_CTL_COMMAND)
+        sxDbAckUnsupported(tx_state->cfg->modem_name);
+}
+
 /*
  * handle_frame()
  *
@@ -1826,6 +1980,17 @@ main(int argc, char **argv)
         sigaction(SIGTERM, &sa, NULL);
     }
 
+    {
+        /* The settings live in the config database: the options only give the defaults of
+         * settings that are not there yet, and what is saved wins. */
+        SxSettings s;
+
+        settings_from_cfg(&cfg, &s);
+        sxDbDefaults(cfg.modem_name, &s);
+        sxDbLoad(cfg.modem_name, &s);
+        settings_to_cfg(&s, &cfg);
+    }
+
     pty_fd = open_bridge_pty(slave_path, sizeof(slave_path));
     if (pty_fd < 0)
     {
@@ -1847,6 +2012,8 @@ main(int argc, char **argv)
             log_msg( "bridge: symlinked %s -> %s\n", cfg.pty_symlink, slave_path);
         }
     }
+
+    sxDbPublish(cfg.modem_name, cfg.pty_symlink);
 
     log_msg( "bridge: opening SX1255 on %s (reset %s)\n", cfg.spi_path,
         cfg.gpio_chip != NULL ? cfg.gpio_chip : "none -- skipping our own GPIO reset request");
@@ -1921,6 +2088,12 @@ main(int argc, char **argv)
              * the PTY approach is that either end can be started and
              * restarted independently of the other. */
             usleep(200 * 1000);
+            continue;
+        }
+        if (g_ctl_pending)
+        {
+            g_ctl_pending = false;
+            handle_control(&tx_state);
             continue;
         }
         handle_frame(&tx_state, pty_fd, type_and_conn, payload, payload_len);

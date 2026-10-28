@@ -2092,11 +2092,11 @@ int main(int argc, char** argv)
 
     char tmp[15];
 
-    readHostConfigN(modemName, "config", "modem", tmp, sizeof(tmp));
+    readHostConfigN(modemName, "config", "streamType", tmp, sizeof(tmp));   /* published by the bridge: FRAME, BIT or SAMPLE */
 
-    if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
+    if (strcasecmp(tmp, "SAMPLE") == 0)
         packetType = PACKET_TYPE_SAMP;
-    else if (strcasecmp(tmp, "openmths") == 0)
+    else if (strcasecmp(tmp, "BIT") == 0)
         packetType = PACKET_TYPE_BIT;
     else
         packetType = PACKET_TYPE_FRAME;

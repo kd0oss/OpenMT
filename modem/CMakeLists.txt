@@ -13,14 +13,15 @@ add_executable(Modem_Host)
 
 # Link the MariaDB library to your executable
 target_link_libraries(Modem_Host PUBLIC PkgConfig::mariadb)
+target_link_libraries(Modem_Host PRIVATE util)
 
 # Link the source files from the src/ directory to the target
 target_sources(Modem_Host PRIVATE
     ./Modem_Host.c
-    ./mmdvm.c
     ../tools/string_builder.c
     ../tools/tools.c
     ../tools/RingBuffer.c
+    ../tools/bridge_common.c
 )
 
 # Specify the directory where header files are located

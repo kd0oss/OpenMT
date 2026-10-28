@@ -45,8 +45,8 @@
 #include <unistd.h>
 #include "../tools/RingBuffer.h"
 #include "../tools/tools.h"
+#include "../tools/bridge_common.h"
 #include "RingBuffer.h"
-#include "mmdvm.h"
 #include "../tools/ADF7021.h"   /* ADF7021_PFD and ADF7021_REG1_UHF2, for the RX offsets */
 #include <netinet/tcp.h>
 #define VERSION "2026-10-07"
@@ -58,33 +58,7 @@
 const char* TYPE_ACK          = "ACK ";
 const char* TYPE_NACK         = "NACK";
 const char* TYPE_MODE         = "MODE";
-const char* TYPE_LSF_M17      = "M17L";
-const char* TYPE_STREAM_M17   = "M17S";
-const char* TYPE_PACKET_M17   = "M17P";
-const char* TYPE_EOT_M17      = "M17E";
-const char* TYPE_HEADER_DSTAR = "DSTH";
-const char* TYPE_DATA_DSTAR   = "DSTD";
-const char* TYPE_EOT_DSTAR    = "DSTE";
-const char* TYPE_DATA_FM      = "FMDA";
-const char* TYPE_STATUS_FM    = "FMST";
-const char* TYPE_EOT_FM       = "FMEO";
-const char* TYPE_RSSI_FM      = "FMRS";
-const char* TYPE_HDR_P25      = "P25H";
-const char* TYPE_LDU_P25      = "P25L";
-const char* TYPE_LOST_P25     = "P25E";
-const char* TYPE_DATA_YSF     = "YSFD";
-const char* TYPE_LOST_YSF     = "YSFL";
-const char* TYPE_DATA_NXDN    = "NXDD";
-const char* TYPE_LOST_NXDN    = "NXDL";
-const char* TYPE_DATA1_DMR    = "DMD1";
-const char* TYPE_LOST1_DMR    = "DML1";
-const char* TYPE_DATA2_DMR    = "DMD2";
-const char* TYPE_LOST2_DMR    = "DML2";
-const char* TYPE_SHORTLC_DMR  = "DMLC";
-const char* TYPE_START_DMR    = "DMST";
-const char* TYPE_ABORT_DMR    = "DMAB";
 
-const char* TYPE_TO_MODEM     = "2MOD";
 const char* TYPE_COMMAND      = "COMM";
 const char* TYPE_SAMPLE       = "SAMP";
 const char* TYPE_SAMPLE_EOT   = "SEOT";
@@ -115,9 +89,6 @@ const char* TYPE_TX_TIMING    = "TXTM";  // OPENMT_TX_TIMING, forwarded to the D
 #define COMM_SET_SIMPLEX 0x01
 #define COMM_SET_MODE 0x02
 #define COMM_SET_IDLE 0x03
-#define TYPE_M17_SAMPLE 0x04
-#define TYPE_DSTAR_SAMPLE 0x05
-#define TYPE_DSTAR_BITS 0x06
 
 // ****** Modem specific parameters ********************
 bool modem_trace           = false;
@@ -141,6 +112,7 @@ pthread_t modetxid;
 pthread_t tcpid;
 pthread_t timerid;
 pthread_t commandid;
+pthread_t cfgwatchid;
 
 // Protocol service client descriptor
 typedef struct
@@ -183,7 +155,6 @@ atomic_bool txOn          = false;       //< If true we are processing frame dat
 atomic_bool running       = true;        //< Set false to kill all processes and exit program.
 atomic_bool exitRequested = false;       //< Set to true with ctrl + c keyboard input.
 atomic_bool isModemSpace  = true;        //< Flag indicating that modem buffer space is available.
-atomic_bool bufReady      = false;       //< Signal when rxModeBuffer has adequate number of bytes.
 
 unsigned int clientlen;         //< byte size of client's address
 char* hostaddrp;                //< dotted decimal host addr string
@@ -207,338 +178,23 @@ char currentMode[11]             = "idle";
 pthread_mutex_t currentModeMutex = PTHREAD_MUTEX_INITIALIZER;
 char commPort[20];
 char modemBaud[10];
-char modem[20];
 char callsign[10] = "N0CALL";
+
+/* Kind of packet stream the modem (or the bridge in front of it) delivers.
+ * A bridge always publishes it in the database; the host sends the bridge
+ * control frames on the same serial port. */
+static StreamType streamType = STREAM_NONE;
+static bool       creditPacing = false;  /* published by the bridge: poll the modem for free buffer space */
+static void       sendBridgeControl(uint8_t type, const char* payload, size_t plen);
+static void       refreshBridgedSettings(void);
 
 
 void setProtocol(const char* protocol, bool enabled);
 
-/* ------------------------------------------------------------------------------------------------------------------
- * RX frequency offsets and calibration (modem type openmths)
- *
- * Every protocol service builds its ADD_MODE block (ADF7021 registers, sync, flags) and sends it in its MODE frame.
- * Before the block goes to the modem, the RX frequency offset of the mode is added to the RX register 0 in it.  The
- * offset, in Hz, is the "rxOffset" setting in the section of the mode (DMR, DSTAR, ...) in the config table; the
- * calibration program and the dashboard change it.  A row is created with 0 when there is none.  The dashboard
- * command "reloadOffsets" reads the offsets again and registers the modes whose offset changed.
- *
- * The dashboard command "calibrate <mode>" asks the modem (MEAS | conn) to measure the receive frequency error of the
- * mode against the signal on its frequency.  The answer is given back as the command result:
- *   "ok err=<Hz> off=<Hz> rssi=<-dBm> syncs=<n> a0=<n> a1=<n> step=<Hz>"   err is what to add to the offset
- *   "error: <text>"
- * ------------------------------------------------------------------------------------------------------------------ */
-#define ADD_MODE_BLOCK 58U
-
-static pthread_mutex_t offsetMutex = PTHREAD_MUTEX_INITIALIZER;
-static uint8_t         addModeBlock[MAX_CLIENT_CONNECTIONS][ADD_MODE_BLOCK];   /* as the service sent it */
-static bool            addModeKnown[MAX_CLIENT_CONNECTIONS];
-static int32_t         rxOffsetHz[MAX_CLIENT_CONNECTIONS];                      /* offset in the block sent to the modem */
-
-typedef struct
-{
-    bool     pending;           /* a MEAS request is out */
-    bool     done;              /* the reply (or a NAK) has arrived */
-    bool     nak;
-    uint8_t  nakErr;
-    uint8_t  conn;
-    uint8_t  data[11];
-    int32_t  offset;            /* the RX offset that was in use */
-    time_t   deadline;
-} Measurement;
-
-static Measurement meas;
-static pthread_mutex_t measMutex = PTHREAD_MUTEX_INITIALIZER;
-
-/*
- * rxOffsetStepHz()
- *
- * Purpose: Size of one count of the RX synthesizer (the N.F value in register 0), from the band in register 1.
- *
- * Parameters: reg1 - register 1 of the mode.
- *
- * Returns: Hz per count.
- */
-/* round to the nearest integer without libm */
-static long roundHz(double x)
-{
-    return (long)(x + ((x < 0.0) ? -0.5 : 0.5));
-}
-
-static double rxOffsetStepHz(uint32_t reg1)
-{
-    return (reg1 == ADF7021_REG1_UHF2) ? (ADF7021_PFD / 32768.0) : (ADF7021_PFD / 65536.0);
-}
-
-/*
- * applyRxOffset()
- *
- * Purpose: Moves the RX frequency in an ADD_MODE block by hz.
- *
- * Parameters: block - the 58 byte block, changed in place; hz - the offset.
- *
- * Returns: nothing.
- */
-static void applyRxOffset(uint8_t* block, int32_t hz)
-{
-    uint32_t reg0 = (uint32_t)block[0] | ((uint32_t)block[1] << 8) | ((uint32_t)block[2] << 16) | ((uint32_t)block[3] << 24);
-    uint32_t reg1 = (uint32_t)block[8] | ((uint32_t)block[9] << 8) | ((uint32_t)block[10] << 16) | ((uint32_t)block[11] << 24);
-
-    if (hz == 0 || (reg0 & 0x0FU) != 0U)
-        return;
-
-    int32_t counts = (int32_t)roundHz((double)hz / rxOffsetStepHz(reg1));
-    reg0 += (uint32_t)(counts * 16);
-    block[0] = (uint8_t)reg0;
-    block[1] = (uint8_t)(reg0 >> 8);
-    block[2] = (uint8_t)(reg0 >> 16);
-    block[3] = (uint8_t)(reg0 >> 24);
-}
-
-/*
- * readRxOffset()
- *
- * Purpose: Reads the RX offset of a mode from the config table; creates the row with 0 if there is none.
- *
- * Parameters: modeName - section name of the mode.
- *
- * Returns: The offset in Hz, limited to +-20 kHz.
- */
-static int32_t readRxOffset(const char* modeName)
-{
-    char tmp[32] = "";
-
-    readHostConfig(modemName, modeName, "rxOffset", tmp);
-    if (tmp[0] == '\0')
-    {
-        setHostConfig(modemName, modeName, "rxOffset", "rxoffset", "0");
-        return 0;
-    }
-
-    long v = strtol(tmp, NULL, 10);
-    return (int32_t)((v > 20000L) ? 20000L : (v < -20000L) ? -20000L : v);
-}
-
-/*
- * queueAddMode()
- *
- * Purpose: Queues the ADD_MODE frame of a connection, with the RX offset in it, for the modem.
- *
- * Parameters: connId - connection index; the block must be known.
- *
- * Returns: nothing.
- */
-static void queueAddMode(uint8_t connId)
-{
-    uint8_t frame[4 + ADD_MODE_BLOCK];
-
-    pthread_mutex_lock(&offsetMutex);
-    frame[0] = 0x61;
-    frame[1] = (uint8_t)(4U + ADD_MODE_BLOCK);
-    frame[2] = OPENMT_ADD_MODE;
-    frame[3] = connId;
-    memcpy(frame + 4, addModeBlock[connId], ADD_MODE_BLOCK);
-    applyRxOffset(frame + 4, rxOffsetHz[connId]);
-    pthread_mutex_unlock(&offsetMutex);
-
-    pthread_mutex_lock(&modemComBufMutex);
-    RingBuffer_addData(&modemCommandBuffer, frame, sizeof(frame));
-    pthread_mutex_unlock(&modemComBufMutex);
-}
-
-/*
- * registerAddMode()
- *
- * Purpose: Called with the 58 byte block of a service's MODE frame: remembers it, looks up the RX offset of the mode
- *          and queues the ADD_MODE frame.
- *
- * Parameters: connId - connection index; modeName - name of the mode; block - the service's block.
- *
- * Returns: nothing.
- */
-static void registerAddMode(uint8_t connId, const char* modeName, const uint8_t* block)
-{
-    int32_t off = readRxOffset(modeName);
-
-    pthread_mutex_lock(&offsetMutex);
-    memcpy(addModeBlock[connId], block, ADD_MODE_BLOCK);
-    addModeKnown[connId] = true;
-    rxOffsetHz[connId]   = off;
-    pthread_mutex_unlock(&offsetMutex);
-
-    if (off != 0)
-        fprintf(stderr, "[%s] RX offset %d Hz.\n", modeName, (int)off);
-    queueAddMode(connId);
-}
-
-/*
- * reloadRxOffsets()
- *
- * Purpose: Reads the RX offsets again and registers the modes whose offset changed.
- *
- * Returns: The number of modes that were changed.
- */
-static int reloadRxOffsets(void)
-{
-    int changed = 0;
-
-    for (uint8_t i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
-    {
-        if (!hostClient[i].active || !addModeKnown[i])
-            continue;
-
-        int32_t off = readRxOffset(mode[i].name);
-        if (off != rxOffsetHz[i])
-        {
-            pthread_mutex_lock(&offsetMutex);
-            rxOffsetHz[i] = off;
-            pthread_mutex_unlock(&offsetMutex);
-            fprintf(stderr, "[%s] RX offset now %d Hz.\n", mode[i].name, (int)off);
-            queueAddMode(i);
-            changed++;
-        }
-    }
-
-    return changed;
-}
-
-/*
- * startMeasurement()
- *
- * Purpose: Starts a frequency measurement of a mode: sends MEAS | conn to the modem.  The answer is picked up by
- *          processSerial() and reported by finishMeasurement().
- *
- * Parameters: modeName - name of the mode; text - output, the error message when it cannot be started.
- *
- * Returns: true when the request is out, false with text set.
- */
-static bool startMeasurement(const char* modeName, char* text, size_t size)
-{
-    int conn = -1;
-
-    for (uint8_t i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
-    {
-        if (hostClient[i].active && addModeKnown[i] && strcasecmp(mode[i].name, modeName) == 0)
-        {
-            conn = i;
-            break;
-        }
-    }
-
-    if (strcasecmp(modem, "openmths") != 0)
-        snprintf(text, size, "error: only the openmths modem type can measure");
-    else if (conn < 0)
-        snprintf(text, size, "error: mode %s is not registered", modeName);
-    else
-    {
-        pthread_mutex_lock(&measMutex);
-        bool busy = meas.pending;
-        if (!busy)
-        {
-            memset(&meas, 0, sizeof(meas));
-            meas.pending  = true;
-            meas.conn     = (uint8_t)conn;
-            meas.offset   = rxOffsetHz[conn];
-            meas.deadline = time(NULL) + 5;
-        }
-        pthread_mutex_unlock(&measMutex);
-
-        if (busy)
-        {
-            snprintf(text, size, "error: a measurement is already running");
-            return false;
-        }
-
-        uint8_t buf[3] = {0x61, 0x03, (uint8_t)(OPENMT_MEAS | (conn & 0x0f))};
-        pthread_mutex_lock(&modemComBufMutex);
-        RingBuffer_addData(&modemCommandBuffer, buf, 3);
-        pthread_mutex_unlock(&modemComBufMutex);
-        return true;
-    }
-
-    return false;
-}
-
-/*
- * finishMeasurement()
- *
- * Purpose: When the modem has answered (or the time is up) turns the answer into the result text of the command.
- *
- * Parameters: text - output; size - its size.
- *
- * Returns: true when a result is ready in text.
- */
-static bool finishMeasurement(char* text, size_t size)
-{
-    bool ready = false;
-
-    pthread_mutex_lock(&measMutex);
-    if (meas.pending && meas.done)
-    {
-        if (meas.nak)
-            snprintf(text, size, "error: modem refused (%s)", meas.nakErr == 5 ? "busy, a mode is locked or transmitting" :
-                                                              meas.nakErr == 3 ? "mode unknown to the modem" : "not supported");
-        else
-        {
-            int16_t  a0    = (int16_t)(meas.data[0] | (meas.data[1] << 8));
-            int16_t  a1    = (int16_t)(meas.data[2] | (meas.data[3] << 8));
-            int16_t  step  = (int16_t)(meas.data[4] | (meas.data[5] << 8));
-            uint16_t rssi  = (uint16_t)(meas.data[6] | (meas.data[7] << 8));
-            uint16_t syncs = (uint16_t)(meas.data[8] | (meas.data[9] << 8));
-            int      den   = (int)a1 - (int)a0;
-
-            /* Both readings come from the same AFC loop, the second one with the receive frequency moved up by step Hz.
-             * The error is where the reading would cross zero, whatever the scale of the readback is. */
-            if (rssi > 118)
-                snprintf(text, size, "error: no signal (rssi -%u dBm), is the reference transmitting?", rssi);
-            else if (abs(den) < 8 || abs(a0) > 30000 || abs(a1) > 30000)
-                snprintf(text, size, "error: AFC readback not usable (a0=%d a1=%d)", a0, a1);
-            else
-            {
-                double err = -(double)a0 * (double)step / (double)den;
-                snprintf(text, size, "ok err=%ld off=%d rssi=%u syncs=%u a0=%d a1=%d step=%d", roundHz(err), (int)meas.offset,
-                         rssi, syncs, a0, a1, step);
-            }
-        }
-        meas.pending = false;
-        ready = true;
-    }
-    else if (meas.pending && time(NULL) > meas.deadline)
-    {
-        snprintf(text, size, "error: no answer from the modem");
-        meas.pending = false;
-        ready = true;
-    }
-    pthread_mutex_unlock(&measMutex);
-
-    return ready;
-}
-
-
-/*
- * getCurrentMode()
- *
- * Copies the name of the current radio mode into a buffer.  The mode string
- * is shared by several threads, so it is read under currentModeMutex.  The
- * copy is cut to fit and always NUL terminated.
- *
- * Parameters:
- *   buf - Output buffer for the mode name.
- *   len - Size of buf in bytes.
- *
- * Returns: nothing.
- */
-static void getCurrentMode(char* buf, size_t len)
-{
-    pthread_mutex_lock(&currentModeMutex);
-    strncpy(buf, currentMode, len - 1);
-    buf[len - 1] = '\0';
-    pthread_mutex_unlock(&currentModeMutex);
-}
-
 /*
  * setCurrentMode()
  *
- * Stores the name of the current radio mode, such as "idle", "DMR" or "YSF",
+ * Stores the name of the current radio mode, such as "idle" or the name a service registered with,
  * under currentModeMutex.  Names longer than the storage are cut.
  *
  * Parameters:
@@ -621,45 +277,6 @@ static void sigintHandler(int signum)
     signal(SIGINT, SIG_DFL);
 }
 
-/*
- * getModemSpace()
- *
- * Reports how many frames the modem can still take for a protocol.  For
- * MMDVM modems the value is the last one the modem reported in its status.
- * For OpenMT modems, and for an unknown protocol, the default of 20 is
- * returned.
- *
- * Parameters:
- *   protocol - Protocol name such as M17, DSTAR, P25, YSF, NXDN or DMR, or
- *              NULL to use the current mode.
- *   slot     - DMR slot, 1 or 2; ignored for other protocols.
- *
- * Returns: Number of free frame slots in the modem queue.
- */
-uint8_t getModemSpace(const char* protocol, const uint8_t slot)
-{
-    if (strncasecmp(modem, "openmt", 6) != 0)
-    {
-        char mode[11];
-        if (protocol != NULL)
-            strncpy(mode, protocol, sizeof(mode) - 1);
-        else
-            getCurrentMode(mode, sizeof(mode));
-        if (strcasecmp(mode, "M17") == 0)
-            return getM17Space();
-        else if (strcasecmp(mode, "DSTAR") == 0)
-            return getDSTARSpace();
-        else if (strcasecmp(mode, "P25") == 0)
-            return getP25Space();
-        else if (strcasecmp(mode, "YSF") == 0)
-            return getYSFSpace();
-        else if (strcasecmp(mode, "NXDN") == 0)
-            return getNXDNSpace();
-        else if (strcasecmp(mode, "DMR") == 0)
-            return getDMRSpace(slot);
-    }
-    return 20;  // default
-}
 
 /*
  * setSpace()
@@ -692,7 +309,7 @@ void setSpace(uint8_t space)
  * status nibble is capped at 15, so with a large TX buffer it never shows
  * how full the buffer really is; waiting for a status reply after EVERY
  * frame (as an earlier version did) limits throughput to about one 4 ms
- * frame per loop pass, which is barely real time and starves a DMR
+ * frame per loop pass, which is barely real time and starves a
  * downlink.  Instead send while credit remains and refresh it from the
  * periodic status replies. */
 static atomic_int openmtCredit = 0;
@@ -774,11 +391,12 @@ static void openmtResyncPacing(void)
  *
  * Parameters: none.
  *
- * Returns: true if the modem type is exactly "openmt".
+ * Returns: true if the bridge published "creditPacing" as true: its modem
+ *   has a fixed TX buffer that has to be asked about.
  */
 static bool openmtPacing(void)
 {
-    return strcasecmp(modem, "openmt") == 0;
+    return creditPacing;
 }
 
 /*
@@ -825,70 +443,19 @@ static void requestModemStatus(bool force)
 /*
  * setProtocol()
  *
- * Switches a protocol on or off in an MMDVM modem, by calling the matching
- * enableXXX() or disableXXX() function.  Nothing is done for OpenMT modems,
- * or for an unknown protocol name.
+ * Tells the bridge that a mode is wanted or not wanted any more.  The bridge
+ * knows what the name means for its modem and does whatever that needs.
  *
  * Parameters:
- *   protocol - Protocol name: M17, DSTAR, P25, YSF, NXDN, FM or DMR.
+ *   protocol - The mode name the service registered with.
  *   enabled  - true to enable the protocol, false to disable it.
  *
  * Returns: nothing.
  */
 void setProtocol(const char* protocol, bool enabled)
 {
-    if (strncasecmp(modem, "openmt", 6) != 0)
-    {
-        if (strcasecmp(protocol, "M17") == 0)
-        {
-            if (enabled)
-                enableM17(modemName);
-            else
-                disableM17(modemName);
-        }
-        else if (strcasecmp(protocol, "DSTAR") == 0)
-        {
-            if (enabled)
-                enableDSTAR(modemName);
-            else
-                disableDSTAR(modemName);
-        }
-        else if (strcasecmp(protocol, "P25") == 0)
-        {
-            if (enabled)
-                enableP25(modemName);
-            else
-                disableP25(modemName);
-        }
-        else if (strcasecmp(protocol, "YSF") == 0)
-        {
-            if (enabled)
-                enableYSF(modemName);
-            else
-                disableYSF(modemName);
-        }
-        else if (strcasecmp(protocol, "NXDN") == 0)
-        {
-            if (enabled)
-                enableNXDN(modemName);
-            else
-                disableNXDN(modemName);
-        }
-        else if (strcasecmp(protocol, "FM") == 0)
-        {
-            if (enabled)
-                enableFM(modemName);
-            else
-                disableFM(modemName);
-        }
-        else if (strcasecmp(protocol, "DMR") == 0)
-        {
-            if (enabled)
-                enableDMR(modemName);
-            else
-                disableDMR(modemName);
-        }
-    }
+    /* the bridge knows what the mode name means and does the rest */
+    sendBridgeControl(enabled ? BRIDGE_CTL_MODE_ON : BRIDGE_CTL_MODE_OFF, protocol, strlen(protocol));
 }
 
 /*
@@ -1274,148 +841,39 @@ static int modemGetFrame(uint8_t* frame, uint16_t* frameLen)
 /*
  * setMode()
  *
- * Tells the modem to change its operating mode.  For MMDVM and MMDVMHS
- * modems a MODEM_MODE command is queued; for OPENMTHS and OPENMTSX modems a
- * SET_MODE command is queued.  Nothing is sent for other modem types.
+ * Tells the modem to change its operating mode (a SET_MODE command on the
+ * BIT and SAMPLE streams).  A bridge whose modem has no such command drops
+ * it.  FRAME streams never get here: the bridge changes its modem's mode
+ * itself when the service asks for it.
  *
  * Parameters:
- *   mode - Mode value to set, such as the idle or DMR mode code.
+ *   mode - Mode value to set.
  *
  * Returns: nothing.
  */
 void setMode(const uint8_t mode)
 {
-    uint8_t buffer[4];
+    uint8_t buffer[3];
 
-    if (strcasecmp(modem, "MMDVM") == 0 || strcasecmp(modem, "MMDVMHS") == 0)
-    {
-        buffer[0] = 0xE0;
-        buffer[1] = 0x04;
-        buffer[2] = MODEM_MODE;
-        buffer[3] = mode;
-        pthread_mutex_lock(&modemComBufMutex);
-        RingBuffer_addData(&modemCommandBuffer, buffer, 4);
-        pthread_mutex_unlock(&modemComBufMutex);
-    }
-    else if (strcasecmp(modem, "OPENMTHS") == 0 || strcasecmp(modem, "OPENMTSX") == 0)
-    {
-        buffer[0] = 0x61;
-        buffer[1] = 0x03;
-        buffer[2] = (uint8_t)(OPENMT_SET_MODE | mode);
-        pthread_mutex_lock(&modemComBufMutex);
-        RingBuffer_addData(&modemCommandBuffer, buffer, 3);
-        pthread_mutex_unlock(&modemComBufMutex);
-    }
+    buffer[0] = 0x61;
+    buffer[1] = 0x03;
+    buffer[2] = (uint8_t)(OPENMT_SET_MODE | mode);
+    pthread_mutex_lock(&modemComBufMutex);
+    RingBuffer_addData(&modemCommandBuffer, buffer, 3);
+    pthread_mutex_unlock(&modemComBufMutex);
 }
 
-/*
- * NXDN frame pacing.
- *
- * One TYPE_NXDN_DATA frame is a whole 80 ms air frame (48 bytes), unlike the
- * 20 ms frames of the other modes, and the modem's NXDN FIFO holds dozens of
- * them. The generic controller below steers the free space to 10..12 frames,
- * which for NXDN would park well over a second of speech in the modem. Here
- * the aim is a small, steady queue instead: enough to ride out network jitter
- * and keep the transmitter fed, little enough to keep the delay short.
- *
- * The depth of the queue is the largest free space the modem has reported
- * (its empty FIFO) minus the free space now.
- */
-#define NXDN_QUEUE_MIN      3U     /* frames queued before the call is paced in real time */
-#define NXDN_QUEUE_MAX      5U     /* frames queued above which the sender holds back */
-#define NXDN_FRAME_MS       80U    /* one frame on the air */
-#define NXDN_FILL_MS        10U    /* pause between frames while building the queue */
-
-/*
- * nxdnFrameDelay()
- *
- * Works out how long to wait before sending the next NXDN frame.  A NXDN
- * frame is 80 ms of air time and the modem queue is deep, so the aim is a
- * small steady queue.  The queue depth is the largest free space ever
- * reported minus the space now.  Below NXDN_QUEUE_MIN the call is being
- * filled quickly; above NXDN_QUEUE_MAX the sender holds back; in between it
- * runs just under real time.
- *
- * Parameters:
- *   space - Free frames the modem reported now.
- *
- * Returns: Delay in milliseconds.
- */
-static uint32_t nxdnFrameDelay(const uint8_t space)
-{
-    static uint8_t peak = 0U;
-
-    if (space > peak)
-        peak = space;
-
-    uint8_t queued = peak > space ? (uint8_t)(peak - space) : 0U;
-
-    if (queued < NXDN_QUEUE_MIN)
-        return NXDN_FILL_MS;                 /* start of a call or after a gap: fill quickly */
-    if (queued > NXDN_QUEUE_MAX)
-        return NXDN_FRAME_MS + 10U;          /* running ahead: let the modem drain a little */
-    return NXDN_FRAME_MS - 10U;              /* in the band: just under real time keeps the queue topped up */
-}
-
-/*
- * YSF frame pacing.
- *
- * One TYPE_YSF_DATA frame is a whole 100 ms air frame (120 bytes) and the
- * modem's YSF FIFO holds ten of them. As for NXDN the aim is a small, steady
- * queue: enough to ride out network jitter and keep the transmitter fed, little
- * enough to keep the delay short. The depth of the queue is the largest free
- * space the modem has reported (its empty FIFO) minus the free space now.
- */
-#define YSF_QUEUE_MIN       2U     /* frames queued before the call is paced in real time */
-#define YSF_QUEUE_MAX       4U     /* frames queued above which the sender holds back */
-#define YSF_FRAME_MS        100U   /* one frame on the air */
-#define YSF_FILL_MS         10U    /* pause between frames while building the queue */
-
-/*
- * ysfFrameDelay()
- *
- * Works out how long to wait before sending the next YSF frame.  A YSF frame
- * is 100 ms of air time and the modem's YSF queue holds ten of them.  It
- * works like nxdnFrameDelay(): the queue depth is the largest free space
- * ever reported minus the space now; below YSF_QUEUE_MIN the call is being
- * filled quickly, above YSF_QUEUE_MAX the sender holds back, and in between
- * it runs just under real time.
- *
- * Parameters:
- *   space - Free frames the modem reported now.
- *
- * Returns: Delay in milliseconds.
- */
-static uint32_t ysfFrameDelay(const uint8_t space)
-{
-    static uint8_t peak = 0U;
-
-    if (space > peak)
-        peak = space;
-
-    uint8_t queued = peak > space ? (uint8_t)(peak - space) : 0U;
-
-    if (queued < YSF_QUEUE_MIN)
-        return YSF_FILL_MS;                  /* start of a call or after a gap: fill quickly */
-    if (queued > YSF_QUEUE_MAX)
-        return YSF_FRAME_MS + 10U;           /* running ahead: let the modem drain a little */
-    return YSF_FRAME_MS - 10U;               /* in the band: just under real time keeps the queue topped up */
-}
 
 /*
  * timerThread()
  *
- * Runs the one millisecond timer tick of the host.  It creates the
- * "frameDelay" timer (19 ms to start with) and then, once a millisecond,
- * advances all timers and clears the bufReady flag when rxModeBuffer is
- * empty.  For MMDVM modems with data waiting it steers the frameDelay timer
- * from the free space the modem reports: for NXDN and YSF with their own
- * delay functions, and for the other modes by moving the delay up or down by
- * one so that the free space stays between 10 and 12 frames.  In every other
- * case the timer goes back to 19 ms.  If the txTimeout timer fires while a
- * transmission is on, the transmission is ended: txOn is cleared, the mode
- * becomes idle, rxModeBuffer is emptied and, for MMDVM modems, an idle mode
- * command is queued.  The thread stops when the running flag is cleared.
+ * Runs the timer tick of the host: advances all timers by the real time that
+ * has passed since the last tick.  If the txTimeout timer fires while a
+ * transmission is on (BIT and SAMPLE streams; the bridge of a FRAME modem
+ * watches the transmit time itself), the transmission is ended: txOn is
+ * cleared, the mode becomes idle, rxModeBuffer is emptied and the modem is
+ * told to release its mode.  The thread stops when the running flag is
+ * cleared.
  *
  * Parameters:
  *   arg - Not used.
@@ -1424,84 +882,16 @@ static uint32_t ysfFrameDelay(const uint8_t space)
  */
 void* timerThread(void* arg)
 {
-    uint8_t currDelay = 19;
-
-    if (getTimer("frameDelay", 19) < 0)
-    {
-        if (debugM) fprintf(stderr, "Timer thread exited.\n");
-        pthread_exit(NULL);
-        return NULL;
-    }
-
-    uint64_t lastTick   = 0;        /* timers are advanced by the real time that passed */
-    bool     sleptLong  = false;    /* the last sleep was the long, idle one            */
+    uint64_t lastTick = 0;          /* timers are advanced by the real time that passed */
 
     while (atomic_load(&running))
     {
-        /* One millisecond while an MMDVM transmission is being paced (the
-         * frameDelay steering below needs it); otherwise the timers only
-         * have to be accurate to 10 ms. */
-        bool pacing = (strncasecmp(modem, "mmdvm", 5) == 0 && RingBuffer_dataSize(&rxModeBuffer) != 0);
-
-        delay(pacing ? 1000 : HOST_TIMER_PERIOD_US);
+        delay(HOST_TIMER_PERIOD_US);
         uint32_t elapsed = timerElapsedMs(&lastTick);
 
         for (uint8_t i = 0; i < 10; i++)
         {
             timerTickN(i, elapsed);
-        }
-
-        /* Data that arrived during a long sleep starts the frame pacing
-         * now, not at some point in the sleep. */
-        if (sleptLong && pacing)
-            resetTimer("frameDelay", 0);
-        sleptLong = !pacing;
-
-        pthread_mutex_lock(&rxBufModeMutex);
-        if (RingBuffer_dataSize(&rxModeBuffer) == 0)
-            atomic_store(&bufReady, false);
-        pthread_mutex_unlock(&rxBufModeMutex);
-
-        if (strncasecmp(modem, "mmdvm", 5) == 0 && RingBuffer_dataSize(&rxModeBuffer) != 0)
-        {
-            //      if (strcmp(currentMode, "DSTAR") == 0)
-            //      {
-            if (isCurrentMode("NXDN"))
-            {
-                resetTimer("frameDelay", nxdnFrameDelay(getNXDNSpace()));
-            }
-            else if (isCurrentMode("YSF"))
-            {
-                resetTimer("frameDelay", ysfFrameDelay(getYSFSpace()));
-            }
-            else
-            {
-                uint8_t space1 = getModemSpace(NULL, 1);
-                uint8_t space2 = getModemSpace(NULL, 2);
-                uint8_t space  = MIN(space1, space2);
-                //       fprintf(stderr, "***************** Modem space. %u   Delay: %u\n", space, currDelay);
-                if (space < 10)
-                {
-                    if (currDelay > 19)
-                        currDelay = 19;
-
-                    resetTimer("frameDelay", ++currDelay);
-                }
-                else if (space > 12)
-                {
-                    if (currDelay <= 1)
-                        currDelay = 2;
-
-                    resetTimer("frameDelay", --currDelay);
-                }
-            }
-        }
-        else
-        {
-            if (getTimerDuration("frameDelay") != 19)
-                resetTimer("frameDelay", 19);
-
-            resetTimer("frameDelay", 0);
         }
 
         if (isTimerTriggered("txTimeout") && atomic_load(&txOn))
@@ -1512,17 +902,8 @@ void* timerThread(void* arg)
             pthread_mutex_lock(&rxBufModeMutex);
             RingBuffer_clear(&rxModeBuffer);
             pthread_mutex_unlock(&rxBufModeMutex);
-            if (strncasecmp(modem, "mmdvm", 5) == 0)
-            {
-                uint8_t buffer[4];
-                buffer[0] = 0xE0;
-                buffer[1] = 0x04;
-                buffer[2] = MODEM_MODE;
-                buffer[3] = 0x00;  // IDLE_MODE
-                pthread_mutex_lock(&modemComBufMutex);
-                RingBuffer_addData(&modemCommandBuffer, buffer, 4);
-                pthread_mutex_unlock(&modemComBufMutex);
-            }
+            /* release the mode the modem holds for the host */
+            setMode(0x0f);
             resetTimer("txTimeout", 0);
             fprintf(stderr, "TX timeout. Setting mode to idle.\n");
         }
@@ -1562,8 +943,8 @@ static void logBadTxHeader(uint8_t first, uint8_t dropped)
         RingBuffer_peek(&txModeBuffer, next, n);
     for (uint16_t i = 0; i < n; i++)
         snprintf(hex + i * 3, 4, "%02X ", next[i]);
-    fprintf(stderr, "txModeBuffer: invalid header [%02X]  [%02X]  modem=%s mode=%s left=%u next: %s\n",
-            first, dropped, modem, currentMode, (unsigned)avail, hex);
+    fprintf(stderr, "txModeBuffer: invalid header [%02X]  [%02X]  stream=%s mode=%s left=%u next: %s\n",
+            first, dropped, bridgeStreamName(streamType), currentMode, (unsigned)avail, hex);
 }
 
 /*
@@ -1571,10 +952,10 @@ static void logBadTxHeader(uint8_t first, uint8_t dropped)
  *
  * Sends data from the modem to one protocol service.  There is one thread
  * for each connected service.  Twice a millisecond it takes a complete frame
- * from txModeBuffer and writes it to the service's socket: for MMDVM modems
- * a frame whose type matches the service's mode; for other modems a frame
- * (without its trailing connection id byte) if the service's mode is the
- * current mode.  Frames with a bad header or length are dropped one byte at
+ * from txModeBuffer and writes it to the service's socket, without its
+ * trailing connection id byte: on a FRAME stream the frame whose connection
+ * id is this service's (the bridge chose it); on the other streams a frame if
+ * the service's mode is the current mode.  Frames with a bad header or length are dropped one byte at
  * a time to find the next frame.  It also sends the commands queued for this
  * service in its command buffer.  When a write fails or the service goes
  * away the connection is marked inactive and the thread ends.
@@ -1600,65 +981,59 @@ void* modeRxThread(void* arg)
         pthread_mutex_lock(&txBufModeMutex);
         if (RingBuffer_dataSize(&txModeBuffer) >= 4)
         {
-            uint8_t buf[1];
-            RingBuffer_peek(&txModeBuffer, buf, 1);
-            if (buf[0] != 0x61)
+            uint8_t first[3];
+
+            RingBuffer_peek(&txModeBuffer, first, 1);
+            if (first[0] != 0x61)
             {
                 uint8_t tmp[1];
                 RingBuffer_getData(&txModeBuffer, tmp, 1);
                 fast = true;
-                logBadTxHeader(buf[0], tmp[0]);   /* caller holds txBufModeMutex */
+                logBadTxHeader(first[0], tmp[0]);   /* caller holds txBufModeMutex */
                 pthread_mutex_unlock(&txBufModeMutex);
                 continue;
             }
-            if (strncasecmp(modem, "mmdvm", 5) == 0)
+
+            /* A frame in txModeBuffer is the service frame followed by the
+             * connection id byte. */
+            RingBuffer_peek(&txModeBuffer, first, 3);
+            uint16_t len = (first[1] << 8) + first[2] + 1;
+            if (len < 5 || len > 1024)
             {
-                uint8_t byte[6];
-                uint16_t len = 0;
-                RingBuffer_peek(&txModeBuffer, byte, 6);
-                len = (byte[1] << 8) + byte[2];
-                if (len < 6 || len > 1024)
+                /* corrupt header: drop a byte and resync instead of building a
+                 * huge on-stack array / reading past the data in the ring */
+                uint8_t junk[1];
+                RingBuffer_getData(&txModeBuffer, junk, 1);
+                fast = true;
+                fprintf(stderr, "txModeBuffer: bad length %u, resync\n", (unsigned)len);
+                pthread_mutex_unlock(&txBufModeMutex);
+                continue;
+            }
+            if (RingBuffer_dataSize(&txModeBuffer) >= len)
+            {
+                uint8_t buf[len];
+                bool    mine;
+
+                RingBuffer_peek(&txModeBuffer, buf, len);
+                if (streamType == STREAM_FRAME)
                 {
-                    uint8_t junk[1];
-                    RingBuffer_getData(&txModeBuffer, junk, 1);
-                    fast = true;
-                    fprintf(stderr, "txModeBuffer: bad length %u, resync\n", (unsigned)len);
-                    pthread_mutex_unlock(&txBufModeMutex);
-                    continue;
-                }
-                if (RingBuffer_dataSize(&txModeBuffer) >= len && strncasecmp(hostClient[conn_id].mode, (char*)byte + 4, 2) == 0)
-                {
-                    uint8_t buf[len];
-                    RingBuffer_getData(&txModeBuffer, buf, len);
-                    fast = true;
-                    if (write(sockfd, buf, len) < 0)
+                    /* the bridge decided who gets the frame and said so */
+                    uint8_t tag = buf[len - 1];
+
+                    mine = (tag == conn_id);
+                    if (!mine && (tag >= MAX_CLIENT_CONNECTIONS || !hostClient[tag].active))
                     {
-                        pthread_mutex_unlock(&txBufModeMutex);
-                        reportError(modemName, "Modem", "remote disconnect");
-                        break;
+                        RingBuffer_getData(&txModeBuffer, buf, len);    /* nobody to give it to */
+                        fast = true;
                     }
                 }
-            }
-            else
-            {
-                uint8_t byte[3];
-                uint16_t len = 0;
-                RingBuffer_peek(&txModeBuffer, byte, 3);
-                len = (byte[1] << 8) + byte[2] + 1;  // length plus conn id byte.
-                if (len < 4 || len > 1024)
+                else
                 {
-                    /* corrupt header: drop a byte and resync instead of building a
-                     * huge on-stack array / reading past the data in the ring */
-                    uint8_t junk[1];
-                    RingBuffer_getData(&txModeBuffer, junk, 1);
-                    fast = true;
-                    fprintf(stderr, "txModeBuffer: bad length %u, resync\n", (unsigned)len);
-                    pthread_mutex_unlock(&txBufModeMutex);
-                    continue;
+                    mine = strcasecmp(hostClient[conn_id].mode, currentMode) == 0;
                 }
-                if (RingBuffer_dataSize(&txModeBuffer) >= len && strcasecmp(hostClient[conn_id].mode, currentMode) == 0)
+
+                if (mine)
                 {
-                    uint8_t buf[len];
                     RingBuffer_getData(&txModeBuffer, buf, len);
                     fast = true;
                     len--;  // do not include conn id byte.
@@ -1778,7 +1153,6 @@ void* modeTxThread(void* arg)
                 RingBuffer_getData(&rxModeBuffer, tmp, 1);
                 pthread_mutex_unlock(&rxBufModeMutex);
                 fprintf(stderr, "RX Mode buffer invalid header [%02X]\n", tmp[0]);
-                resetTimer("frameDelay", 0);
                 continue;
             }
             RingBuffer_peek(&rxModeBuffer, buf, 3);
@@ -1865,7 +1239,6 @@ void* modeTxThread(void* arg)
                     //       pthread_mutex_unlock(&modemTxBufMutex);
                 }
             }
-            resetTimer("frameDelay", 0);
         }
 
         if (RingBuffer_dataSize(&modemCommandBuffer) >= 3)
@@ -1873,7 +1246,7 @@ void* modeTxThread(void* arg)
             pthread_mutex_lock(&modemComBufMutex);
             uint8_t buf[3];
             RingBuffer_peek(&modemCommandBuffer, buf, 1);
-            if (buf[0] != 0x61)
+            if (buf[0] != 0x61 && buf[0] != BRIDGE_CTL_START)
             {
                 uint8_t tmp[1];
                 RingBuffer_getData(&modemCommandBuffer, tmp, 1);
@@ -1910,137 +1283,6 @@ void* modeTxThread(void* arg)
     return NULL;
 }
 
-/*
- * modeMMDVMTxThread()
- *
- * Writes data to an MMDVM modem.  It requests the modem status when the
- * status timer fires and nothing is waiting, sends a frame from rxModeBuffer
- * when the frameDelay timer has fired, bufReady is set and the modem reports
- * free space (DMR slot 2 data is checked against slot 2), and asks for a new
- * status after each frame.  Commands from modemCommandBuffer are also
- * written to the serial port.
- *
- * Parameters:
- *   arg - Not used.
- *
- * Returns: NULL; the thread ends by calling pthread_exit().
- */
-void* modeMMDVMTxThread(void* arg)
-{
-    while (atomic_load(&running))
-    {
-        /* Short interval while there is something to send or a transmission
-         * is on; otherwise look only every MODEM_IDLE_POLL_US. */
-        bool busy = atomic_load(&txOn) || RingBuffer_dataSize(&rxModeBuffer) != 0 ||
-                    RingBuffer_dataSize(&modemCommandBuffer) != 0;
-
-        delay(busy ? 200 : MODEM_IDLE_POLL_US);
-
-        if (isTimerTriggered("status"))
-        {
-            if (RingBuffer_dataSize(&rxModeBuffer) < 3)
-            {
-                uint8_t buf[3];
-                buf[0]  = 0xE0;
-                buf[1]  = 0x03;
-                buf[2]  = MODEM_STATUS;
-                int ret = write(serialModemFd, buf, 3);
-                if (ret != 3)
-                {
-                    reportError(modemName, "Modem", "modem TX write failed.");
-                }
-            }
-            resetTimer("status", 0);
-        }
-
-        if (RingBuffer_dataSize(&rxModeBuffer) >= 3 && isTimerTriggered("frameDelay") && atomic_load(&bufReady))
-        {
-            uint8_t buf[3];
-            pthread_mutex_lock(&rxBufModeMutex);
-            RingBuffer_peek(&rxModeBuffer, buf, 1);
-            if (buf[0] != 0xE0)
-            {
-                uint8_t tmp[1];
-                RingBuffer_getData(&rxModeBuffer, tmp, 1);
-                pthread_mutex_unlock(&rxBufModeMutex);
-                fprintf(stderr, "rxModeBuffer invalid header [%02X]\n", tmp[0]);
-                resetTimer("frameDelay", 0);
-                continue;
-            }
-            RingBuffer_peek(&rxModeBuffer, buf, 2);
-            uint8_t len = buf[1];
-            if (RingBuffer_dataSize(&rxModeBuffer) >= len)
-            {
-                uint8_t space = 0;
-                RingBuffer_peek(&rxModeBuffer, buf, 3);
-                if (buf[2] == TYPE_DMR_DATA2)
-                    space = getModemSpace(NULL, 2);
-                else
-                    space = getModemSpace(NULL, 1);
-
-                if (space > 1 && RingBuffer_freeSpace(&modemTxBuffer) >= (len + 3))
-                {
-                    uint8_t buf[len];
-                    RingBuffer_getData(&rxModeBuffer, buf, len);
-                    int ret = write(serialModemFd, buf, len);
-                    if (ret != len)
-                    {
-                        reportError(modemName, "Modem", "modem TX write failed.");
-                    }
-                }
-                uint8_t buf[3];
-                buf[0]  = 0xE0;
-                buf[1]  = 0x03;
-                buf[2]  = MODEM_STATUS;
-                int ret = write(serialModemFd, buf, 3);
-                if (ret != 3)
-                {
-                    reportError(modemName, "Modem", "modem TX write failed.");
-                }
-            }
-            else
-            {
-                pthread_mutex_unlock(&rxBufModeMutex);
-                continue;
-            }
-            pthread_mutex_unlock(&rxBufModeMutex);
-            resetTimer("frameDelay", 0);
-        }
-
-        pthread_mutex_lock(&modemComBufMutex);
-        if (RingBuffer_dataSize(&modemCommandBuffer) >= 3)
-        {
-            uint8_t buf[2];
-            RingBuffer_peek(&modemCommandBuffer, buf, 1);
-            if (buf[0] != 0xE0)
-            {
-                fprintf(stderr, "modem command: invalid header [%02X]\n", buf[0]);
-                pthread_mutex_unlock(&modemComBufMutex);
-                continue;
-            }
-            RingBuffer_peek(&modemCommandBuffer, buf, 2);
-            uint8_t len = buf[1];
-            if (RingBuffer_dataSize(&modemCommandBuffer) >= len)
-            {
-                if (RingBuffer_freeSpace(&modemTxBuffer) >= len)
-                {
-                    uint8_t buf[len];
-                    RingBuffer_getData(&modemCommandBuffer, buf, len);
-                    int ret = write(serialModemFd, buf, len);
-                    if (ret != len)
-                    {
-                        reportError(modemName, "Modem", "modem TX write failed.");
-                    }
-                }
-            }
-        }
-        pthread_mutex_unlock(&modemComBufMutex);
-    }
-
-    fprintf(stderr, "Mode TX thread exited.\n");
-    pthread_exit(NULL);
-    return NULL;
-}
 
 #ifndef OPENMT_STATUS_GAP_US
 #define OPENMT_STATUS_GAP_US 0
@@ -2053,74 +1295,11 @@ void* modeMMDVMTxThread(void* arg)
 #define OPENMT_FRAME_GAP_US 0
 #endif
 
-/* Raspberry Pi PL011 (ttyAMA0) TX race workaround.
- *
- * The kernel's amba-pl011 interrupt handler reads the interrupt status once,
- * handles RX first -- dropping the port lock while it pushes the RX data to
- * the tty layer -- and then, on the TX status it read before, writes up to 8
- * characters into the TX FIFO without checking whether it is full.  A write()
- * from this process on another CPU in that window fills the FIFO through
- * pl011_start_tx(), and the handler's characters then land in a full FIFO
- * and are lost, although the kernel counts them as sent.  The modem received
- * frames 4-7 bytes short (and replaced them by silence: the M17 drop outs).
- *
- * The handler can only act on stale TX status while the port's queue still
- * holds data, so a write() made when the queue is empty is safe.  Wait for
- * that before every write.  TIOCOUTQ reads the queue length under the same
- * port lock.  The 16 byte FIFO still holds ~170 us of data when the queue
- * runs empty, so the line hardly ever idles. */
-#ifndef MODEM_TXQ_GATE
-#define MODEM_TXQ_GATE 1
-#endif
-#define MODEM_TXQ_POLL_US    50U        /* poll interval while waiting     */
-#define MODEM_TXQ_TIMEOUT_US 50000U     /* give up waiting after 50 ms     */
-
-/*
- * waitModemTxQueueEmpty()
- *
- * Works round a race in the Raspberry Pi PL011 serial driver (amba-pl011)
- * that can lose a few bytes of a frame when write() is called while the
- * driver is still moving earlier data into the transmit FIFO.  Before each
- * write the thread waits until the kernel's serial transmit queue is empty
- * (TIOCOUTQ), polling every 50 microseconds.  It gives up after 50 ms and
- * prints a warning every hundredth time.  It does nothing for modem types
- * other than the "openmt" and "openmths" UART links, or when MODEM_TXQ_GATE
- * is 0.
- *
- * Parameters: none.
- *
- * Returns: nothing.
- */
-static void waitModemTxQueueEmpty(void)
-{
-#if MODEM_TXQ_GATE
-    static uint32_t timeouts;
-    uint32_t waited = 0;
-    int      pending = 0;
-
-    if (strncasecmp(modem, "openmt", 6) != 0 || strcasecmp(modem, "openmtsx") == 0)
-        return;                         /* only the real UART link          */
-
-    while (ioctl(serialModemFd, TIOCOUTQ, &pending) == 0 && pending > 0)
-    {
-        if (waited >= MODEM_TXQ_TIMEOUT_US)
-        {
-            if ((timeouts++ % 100U) == 0U)
-                fprintf(stderr, "Modem_Host: serial TX queue not draining (%d bytes), writing anyway\n", pending);
-            return;
-        }
-        delay(MODEM_TXQ_POLL_US);
-        waited += MODEM_TXQ_POLL_US;
-    }
-#endif
-}
-
 /*
  * modemTxThread()
  *
  * Writes queued frames to the modem's serial port.  It takes one complete
- * frame at a time from modemTxBuffer and writes it, after waiting for the
- * serial queue to drain.  A frame with a bad header or length is dropped a
+ * frame at a time from modemTxBuffer and writes it.  A frame with a bad header or length is dropped a
  * byte at a time.  A warning is printed if a sample data frame is not 196
  * bytes long.  If the environment variable OPENMT_TXLOG is set, a copy of
  * every byte written is saved in that file, with the time of each frame in a
@@ -2159,7 +1338,7 @@ void* modemTxThread(void* arg)
             pthread_mutex_unlock(&modemTxBufMutex);
             continue;
         }
-        if (buf[0] != 0x61)
+        if (buf[0] != 0x61 && buf[0] != BRIDGE_CTL_START)
         {
             uint8_t tmp[1];
             RingBuffer_getData(&modemTxBuffer, tmp, 1);
@@ -2187,7 +1366,6 @@ void* modemTxThread(void* arg)
         /* sanity: a SAMP_DATA frame is always 196 bytes (4 + 96 q15) */
         if ((buf[2] & 0xf0) == OPENMT_SAMP_DATA && len != 0xC4)
             fprintf(stderr, "Modem_Host: odd frame to modem: len=%u type=%02X\n", (unsigned)len, (unsigned)buf[2]);
-        waitModemTxQueueEmpty();        /* PL011 driver race, see above */
         int ret = write(serialModemFd, buf, len);
         if (ret != len)
         {
@@ -2263,14 +1441,13 @@ void* modemTxThread(void* arg)
  * commandThread()
  *
  * Handles commands that are not part of the voice data.  While the host is
- * idle, and the modem type is an OpenMT one, frames from the modem in
+ * idle, and the stream is not a FRAME stream, frames from the modem in
  * txModeBuffer are sent to all connected services.  When the "chkComTimeout"
- * timer fires, it reads the dashboard command "modemHost" from the database;
- * for "setConfig" it sends the modem configuration again (set_ConfigHS() for
- * mmdvmhs, set_Config() for mmdvm, or a 21 byte SET_CONFIG frame with
- * frequencies, gains, PLL bandwidths and invert flags for openmtsx), tells
- * every connected service the duplex or simplex setting and acknowledges the
- * command as "success".
+ * timer fires, it reads the dashboard command "modemHost" from the database.
+ * "setConfig" tells the bridge to read its settings again, tells every
+ * connected service the duplex or simplex setting and acknowledges the
+ * command as "success".  "reloadOffsets", "calibrate" and "probe" are passed
+ * to the bridge, which acknowledges them itself.
  *
  * Parameters:
  *   arg - Not used.
@@ -2291,7 +1468,7 @@ void* commandThread(void* arg)
 
         if (isCurrentModeIdle())
         {
-            if (strncasecmp(modem, "openmt", 6) == 0)
+            if (streamType != STREAM_FRAME)
             {
                 pthread_mutex_lock(&txBufModeMutex);
                 if (RingBuffer_dataSize(&txModeBuffer) >= 4)
@@ -2337,98 +1514,21 @@ void* commandThread(void* arg)
             }
         }
 
-        {
-            char text[96];
-
-            if (finishMeasurement(text, sizeof(text)))
-                ackDashbCommand(modemName, "modemHost", text);
-        }
-
         if (isTimerTriggered("chkComTimeout"))
         {
             char parameter[31];
             readDashbCommand(modemName, "modemHost", parameter);
-            if (strcasecmp(parameter, "reloadOffsets") == 0)
+            if (strcasecmp(parameter, "reloadOffsets") == 0 || strncasecmp(parameter, "calibrate ", 10) == 0 ||
+                strncasecmp(parameter, "probe ", 6) == 0)
             {
-                int n = reloadRxOffsets();
-                char text[40];
-
-                snprintf(text, sizeof(text), "success %d", n);
-                ackDashbCommand(modemName, "modemHost", text);
-            }
-            else if (strncasecmp(parameter, "calibrate ", 10) == 0)
-            {
-                char text[96];
-
-                if (!startMeasurement(parameter + 10, text, sizeof(text)))
-                    ackDashbCommand(modemName, "modemHost", text);
+                /* the bridge knows what these mean for its modem and acknowledges the command itself */
+                sendBridgeControl(BRIDGE_CTL_COMMAND, parameter, strlen(parameter));
             }
             else if (strcasecmp(parameter, "setConfig") == 0)
             {
-                if (strcasecmp(modem, "mmdvmhs") == 0)
-                    set_ConfigHS(modemName);
-                else if (strcasecmp(modem, "mmdvm") == 0)
-                    set_Config(modemName);
-                else if (strcasecmp(modem, "openmtsx") == 0)
-                {
-                    char tmp[16];
-                    uint32_t rx_freq_hz, tx_freq_hz;
-                    uint8_t lna_gain_db, pga_gain_db;
-                    int8_t mixer_gain_x2, dac_gain_db;
-                    uint16_t rx_pll_bw_khz, tx_pll_bw_khz;
-                    uint8_t invert_flags = 0;
-                    uint8_t buf[21];
-
-                    readHostConfig(modemName, "config", "rxFrequency", tmp);
-                    rx_freq_hz = (uint32_t)strtoul(tmp, NULL, 10);
-                    readHostConfig(modemName, "config", "txFrequency", tmp);
-                    tx_freq_hz = (uint32_t)strtoul(tmp, NULL, 10);
-                    readHostConfig(modemName, "config", "rxLnaGain", tmp);
-                    lna_gain_db = (uint8_t)atoi(tmp);
-                    readHostConfig(modemName, "config", "rxPgaGain", tmp);
-                    pga_gain_db = (uint8_t)atoi(tmp);
-                    readHostConfig(modemName, "config", "txMixerGain", tmp);
-                    mixer_gain_x2 = (int8_t)(atof(tmp) * 2.0); /* 2dB steps */
-                    readHostConfig(modemName, "config", "txDacGain", tmp);
-                    dac_gain_db = (int8_t)atoi(tmp);
-                    readHostConfig(modemName, "config", "rxPllBw", tmp);
-                    rx_pll_bw_khz = (uint16_t)atoi(tmp);
-                    readHostConfig(modemName, "config", "txPllBw", tmp);
-                    tx_pll_bw_khz = (uint16_t)atoi(tmp);
-                    readHostConfig(modemName, "config", "rxInvert", tmp);
-                    if (strcasecmp(tmp, "true") == 0)
-                        invert_flags |= 0x01U;
-                    readHostConfig(modemName, "config", "txInvert", tmp);
-                    if (strcasecmp(tmp, "true") == 0)
-                        invert_flags |= 0x02U;
-                    readHostConfig(modemName, "config", "mode", tmp);
-
-                    buf[0] = 0x61;
-                    buf[1] = 21; /* total frame length, including 0x61 itself */
-                    buf[2] = OPENMT_SET_CONFIG;
-                    buf[3] = 1; /* payload version */
-                    buf[4] = (uint8_t)(rx_freq_hz >> 24);
-                    buf[5] = (uint8_t)(rx_freq_hz >> 16);
-                    buf[6] = (uint8_t)(rx_freq_hz >> 8);
-                    buf[7] = (uint8_t)rx_freq_hz;
-                    buf[8] = (uint8_t)(tx_freq_hz >> 24);
-                    buf[9] = (uint8_t)(tx_freq_hz >> 16);
-                    buf[10] = (uint8_t)(tx_freq_hz >> 8);
-                    buf[11] = (uint8_t)tx_freq_hz;
-                    buf[12] = lna_gain_db;
-                    buf[13] = pga_gain_db;
-                    buf[14] = (uint8_t)mixer_gain_x2;
-                    buf[15] = (uint8_t)dac_gain_db;
-                    buf[16] = (uint8_t)(rx_pll_bw_khz >> 8);
-                    buf[17] = (uint8_t)rx_pll_bw_khz;
-                    buf[18] = (uint8_t)(tx_pll_bw_khz >> 8);
-                    buf[19] = (uint8_t)tx_pll_bw_khz;
-                    buf[20] = invert_flags;
-                    pthread_mutex_lock(&modemTxBufMutex);
-                    RingBuffer_addData(&modemTxBuffer, buf, 21);
-                    pthread_mutex_unlock(&modemTxBufMutex);
-             //       write(serialModemFd, buf, 21);
-                }
+                /* the bridge reads its settings again; the duplex or simplex setting reaches the services below */
+                refreshBridgedSettings();
+                sendBridgeControl(BRIDGE_CTL_RELOAD, NULL, 0);
 
                 uint8_t buffer[9];
                 buffer[0] = 0x61;
@@ -2461,22 +1561,129 @@ void* commandThread(void* arg)
 }
 
 /*
+ * relayToBridge()
+ *
+ * Passes a frame of a service to the bridge of a FRAME modem, wrapped in a
+ * relay frame (the bridge knows what the modem needs).  The frame goes into
+ * the command buffer, so it keeps its order relative to the control frames.
+ * A frame that does not fit is dropped.
+ *
+ * Parameters:
+ *   conn   - Connection id of the service.
+ *   tlv    - The service frame.
+ *   tlvLen - Its length.
+ *
+ * Returns: nothing.
+ */
+static void relayToBridge(uint8_t conn, const uint8_t* tlv, size_t tlvLen)
+{
+    uint8_t frame[BUFFER_LENGTH + BRIDGE_RELAY_HEADER];
+    size_t  n = bridgeRelayBuild(conn, tlv, tlvLen, frame, sizeof(frame));
+
+    if (n == 0)
+        return;
+    pthread_mutex_lock(&modemComBufMutex);
+    if (RingBuffer_freeSpace(&modemCommandBuffer) >= n)
+        RingBuffer_addData(&modemCommandBuffer, frame, n);
+    else
+        fprintf(stderr, "Modem_Host: bridge buffer full, frame dropped\n");
+    pthread_mutex_unlock(&modemComBufMutex);
+}
+
+/*
+ * modeRelayTxThread()
+ *
+ * Writes the frames in modemCommandBuffer to the bridge of a FRAME modem:
+ * relay frames (service frames) and control frames, one whole frame at a
+ * time and in the order they were queued.  Nothing is paced here; the bridge
+ * does that.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL; the thread ends by calling pthread_exit().
+ */
+void* modeRelayTxThread(void* arg)
+{
+    static uint8_t buf[BUFFER_LENGTH + BRIDGE_RELAY_HEADER];
+
+    while (atomic_load(&running))
+    {
+        bool wrote = false;
+
+        for (;;)
+        {
+            uint8_t head[3];
+            size_t  len;
+
+            pthread_mutex_lock(&modemComBufMutex);
+            if (RingBuffer_dataSize(&modemCommandBuffer) < 3)
+            {
+                pthread_mutex_unlock(&modemComBufMutex);
+                break;
+            }
+            RingBuffer_peek(&modemCommandBuffer, head, 3);
+            if (head[0] == BRIDGE_RELAY_START)
+                len = ((size_t)head[1] << 8) | head[2];
+            else if (head[0] == BRIDGE_CTL_START)
+                len = head[1];
+            else
+                len = 0;
+            if (len < 3 || len > sizeof(buf))
+            {
+                uint8_t junk[1];
+
+                RingBuffer_getData(&modemCommandBuffer, junk, 1);   /* resync */
+                pthread_mutex_unlock(&modemComBufMutex);
+                fprintf(stderr, "modem command: invalid header [%02X]\n", head[0]);
+                continue;
+            }
+            if (RingBuffer_dataSize(&modemCommandBuffer) < len)
+            {
+                pthread_mutex_unlock(&modemComBufMutex);
+                break;
+            }
+            RingBuffer_getData(&modemCommandBuffer, buf, len);
+            pthread_mutex_unlock(&modemComBufMutex);
+
+            for (size_t done = 0; done < len;)
+            {
+                ssize_t w = write(serialModemFd, buf + done, len - done);
+
+                if (w < 0)
+                {
+                    if (errno == EINTR || errno == EAGAIN)
+                        continue;
+                    reportError(modemName, "Modem", "bridge write failed.");
+                    break;
+                }
+                done += (size_t)w;
+            }
+            wrote = true;
+        }
+        delay(wrote ? 500 : MODEM_IDLE_POLL_US);
+    }
+
+    fprintf(stderr, "Mode TX thread exited.\n");
+    pthread_exit(NULL);
+    return NULL;
+}
+
+/*
  * processClientSocket()
  *
- * Serves one protocol service (D-Star, DMR, P25, YSF, NXDN, M17, FM and so
- * on) connected to the host's TCP port.  It reads frames of the form 0x61,
+ * Serves one protocol service connected to the host's TCP port.  It reads frames of the form 0x61,
  * 16 bit length, type, and handles the MODE frame that registers the
  * service: the name and transmit level are stored, addMode() and
- * setProtocol() are called, and the idle or add-mode command and the duplex
- * or simplex command are queued for the modem.  For other frames it
- * translates the OpenMT type into the frame the modem type expects and puts
- * it into rxModeBuffer, after checking that the buffer has room (frames that
- * do not fit are dropped).  Sample data, end of transmission, bit data and
- * the per-protocol frames each set or clear txOn, and the mode commands
+ * setProtocol() are called, the bridge is told the connection's name and the
+ * duplex or simplex command is queued for the service.  On a FRAME stream
+ * every other frame is passed to the bridge unchanged (relayToBridge()); on
+ * the BIT and SAMPLE streams sample data, bit data and their end frames are
+ * put into rxModeBuffer, after checking that the buffer has room (frames
+ * that do not fit are dropped), and set or clear txOn, and the mode commands
  * change the current mode.  When the service disconnects, it marks the
  * protocol inactive, removes the gateway and mode with delGateway() and
- * delMode(), queues the delete-mode command or sends the configuration
- * again, and closes the socket.
+ * delMode(), tells the bridge and closes the socket.
  *
  * Parameters:
  *   arg - Connection index into hostClient[], passed as a pointer sized
@@ -2494,9 +1701,6 @@ void* processClientSocket(void* arg)
     uint8_t typeLen  = 0;
     uint16_t offset  = 0;
     ssize_t len      = 0;
-    struct timespec ts;
-    uint8_t currType = 0;
-    uint8_t lastType = 0;
     bzero(buffer, BUFFER_LENGTH);
 
     int flags = fcntl(sockFd, F_GETFL, 0);
@@ -2581,54 +1785,27 @@ void* processClientSocket(void* arg)
             if (debugM)
                 hexDump((char*)"Modem mode data:", (unsigned char*)buffer, 62);
 
-            if (strncasecmp(modem, "mmdvm", 5) == 0)
             {
-                //     if (strcmp(currentMode, "idle") != 0)
-                {
-                    buffer[0] = 0xE0;
-                    buffer[1] = 0x04;
-                    buffer[2] = MODEM_MODE;
-                    buffer[3] = 0x00;  // IDLE_MODE
-                    pthread_mutex_lock(&modemComBufMutex);
-                    RingBuffer_addData(&modemCommandBuffer, buffer, 4);
-                    pthread_mutex_unlock(&modemComBufMutex);
+                /* The bridge needs the name that goes with the connection: the
+                 * mode's frames and settings are found by it. */
+                char    conn[BRIDGE_CTL_MAX];
+                size_t  nlen = strnlen(mode[conn_id].name, sizeof(mode[conn_id].name));
 
-                    buffer[0] = 0x61;
-                    buffer[1] = 0x00;
-                    buffer[2] = 0x09;
-                    buffer[3] = 0x04;
-                    memcpy(buffer + 4, TYPE_COMMAND, 4);
-                    if (modem_duplex)
-                        buffer[8] = COMM_SET_DUPLEX;
-                    else
-                        buffer[8] = COMM_SET_SIMPLEX;
-                    //    RingBuffer_addData(&rxModeBuffer, buffer, 9);
-                    setCurrentMode("idle");
-                    pthread_mutex_lock(&hostClient[conn_id].commandMutex);
-                    RingBuffer_addData(&hostClient[conn_id].command, buffer, 9);
-                    pthread_mutex_unlock(&hostClient[conn_id].commandMutex);
-                    char curMode[11];
-                    getCurrentMode(curMode, sizeof(curMode));
-                    setStatus(modemName, "main", "active_mode", curMode);
-                }
-            }
-            else
-            {
-                if (strcasecmp(modem, "openmths") == 0 || strcasecmp(modem, "openmtsx") == 0)
+                conn[0] = (char)conn_id;
+                memcpy(conn + 1, mode[conn_id].name, nlen);
+                sendBridgeControl(BRIDGE_CTL_MODE_CONN, conn, nlen + 1);
+
+                if (streamType != STREAM_FRAME)
                 {
-                    if (strcasecmp(modem, "openmths") == 0)
-                        registerAddMode(conn_id, mode[conn_id].name, buffer + 26);
-                    else
-                    {
-                        buffer[0] = 0x61;
-                        buffer[1] = 0x3e;
-                        buffer[2] = OPENMT_ADD_MODE;
-                        buffer[3] = conn_id;
-                        memcpy(buffer + 4, buffer + 26, 58);
-                        pthread_mutex_lock(&modemComBufMutex);
-                        RingBuffer_addData(&modemCommandBuffer, buffer, 62);
-                        pthread_mutex_unlock(&modemComBufMutex);
-                    }
+                    /* the modem of these streams holds a block per mode */
+                    buffer[0] = 0x61;
+                    buffer[1] = 0x3e;
+                    buffer[2] = OPENMT_ADD_MODE;
+                    buffer[3] = conn_id;
+                    memcpy(buffer + 4, buffer + 26, 58);
+                    pthread_mutex_lock(&modemComBufMutex);
+                    RingBuffer_addData(&modemCommandBuffer, buffer, 62);
+                    pthread_mutex_unlock(&modemComBufMutex);
                 }
 
                 buffer[0] = 0x61;
@@ -2647,46 +1824,17 @@ void* processClientSocket(void* arg)
             continue;
         }
 
-        clock_gettime(CLOCK_REALTIME, &ts);
+        if (streamType == STREAM_FRAME)
+        {
+            /* the bridge turns the frame into what its modem speaks */
+            relayToBridge(conn_id, buffer, respLen);
+            continue;
+        }
 
-        // *********** Convert from OpenMT type to modem specific type ***********
-        if (memcmp(buffer + 4, TYPE_LSF_M17, typeLen) == 0)
-            type = TYPE_M17_LSF;
-        else if (memcmp(buffer + 4, TYPE_STREAM_M17, typeLen) == 0)
-            type = TYPE_M17_STREAM;
-        else if (memcmp(buffer + 4, TYPE_PACKET_M17, typeLen) == 0)
-            type = TYPE_M17_PACKET;
-        else if (memcmp(buffer + 4, TYPE_EOT_M17, typeLen) == 0)
-            type = TYPE_M17_EOT;
-        else if (memcmp(buffer + 4, TYPE_HEADER_DSTAR, typeLen) == 0)
-            type = TYPE_DSTAR_HEADER;
-        else if (memcmp(buffer + 4, TYPE_DATA_DSTAR, typeLen) == 0)
-            type = TYPE_DSTAR_DATA;
-        else if (memcmp(buffer + 4, TYPE_EOT_DSTAR, typeLen) == 0)
-            type = TYPE_DSTAR_EOT;
-        else if (memcmp(buffer + 4, TYPE_HDR_P25, typeLen) == 0)
-            type = TYPE_P25_HDR;
-        else if (memcmp(buffer + 4, TYPE_LDU_P25, typeLen) == 0)
-            type = TYPE_P25_LDU;
-        else if (memcmp(buffer + 4, TYPE_LOST_P25, typeLen) == 0)
-            type = TYPE_P25_LOST;
-        else if (memcmp(buffer + 4, TYPE_DATA_YSF, typeLen) == 0)
-            type = TYPE_YSF_DATA;
-        else if (memcmp(buffer + 4, TYPE_LOST_YSF, typeLen) == 0)
-            type = TYPE_YSF_LOST;
-        else if (memcmp(buffer + 4, TYPE_DATA_NXDN, typeLen) == 0)
-            type = TYPE_NXDN_DATA;
-        else if (memcmp(buffer + 4, TYPE_LOST_NXDN, typeLen) == 0)
-            type = TYPE_NXDN_LOST;
-        else if (memcmp(buffer + 4, TYPE_DATA1_DMR, typeLen) == 0)
-            type = TYPE_DMR_DATA1;
-        else if (memcmp(buffer + 4, TYPE_DATA2_DMR, typeLen) == 0)
-            type = TYPE_DMR_DATA2;
-        else if (memcmp(buffer + 4, TYPE_LOST1_DMR, typeLen) == 0)
-            type = TYPE_DMR_LOST1;
-        else if (memcmp(buffer + 4, TYPE_LOST2_DMR, typeLen) == 0)
-            type = TYPE_DMR_LOST2;
-        else if (memcmp(buffer + 4, TYPE_ACK, typeLen) == 0)
+        // *********** Convert from OpenMT type to the stream's frame type ***********
+        if (typeLen != 1)
+            type = 0;
+        if (memcmp(buffer + 4, TYPE_ACK, typeLen) == 0)
             type = NET_ACK;
         else if (memcmp(buffer + 4, TYPE_NACK, typeLen) == 0)
             type = NET_NACK;
@@ -2698,13 +1846,6 @@ void* processClientSocket(void* arg)
             type = OPENMT_BIT_DATA;
         else if (memcmp(buffer + 4, TYPE_BITS_EOT, typeLen) == 0)
             type = OPENMT_BIT_EOT;
-        else if (memcmp(buffer + 4, TYPE_TO_MODEM, typeLen) == 0)
-            type = OPENMT_TO_MODEM;
-
- //       if (debugM)
-    //        hexDump((char*)"Protocol service data:", (unsigned char*)buffer, respLen);
-
-        uint16_t space = getModemSpace(NULL, 1);
 
         /* Sample frames/EOT are checked (and dropped singly, which keeps the
          * stream frame-aligned) in their own cases below.  Flushing the whole
@@ -2718,50 +1859,6 @@ void* processClientSocket(void* arg)
             pthread_mutex_unlock(&rxBufModeMutex);
         }
 
-        if (isCurrentMode("DSTAR"))
-        {
-            if (RingBuffer_dataSize(&rxModeBuffer) >= 200 || type == TYPE_DSTAR_EOT)
-                atomic_store(&bufReady, true);
-        }
-        else if (isCurrentMode("M17"))
-        {
-            if (RingBuffer_dataSize(&rxModeBuffer) >= 500 || type == TYPE_M17_EOT)
-                atomic_store(&bufReady, true);
-        }
-        else if (isCurrentMode("P25"))
-        {
-            //    if (RingBuffer_dataSize(&rxModeBuffer) >= 2400)
-            atomic_store(&bufReady, true);
-        }
-        else if (isCurrentMode("NXDN") || isCurrentMode("YSF"))
-        {
-            atomic_store(&bufReady, true);
-        }
-        else if (isCurrentMode("DMR"))
-        {
-            //    if (RingBuffer_dataSize(&rxModeBuffer) >= 2400)
-            atomic_store(&bufReady, true);
-            if (type == TYPE_DMR_DATA2)
-                space = getModemSpace(NULL, 2);
-        }
-
-        currType = type;
-        // This debug statement to be removed after debugging
-        if (type != lastType || debugM)
-        {
-            char curMode[11];
-            if (type == OPENMT_SAMP_DATA || type == OPENMT_BIT_DATA)
-                space = RingBuffer_freeSpace(&modemTxBuffer);
-            getCurrentMode(curMode, sizeof(curMode));
-            fprintf(stderr, "TM: %llu  Type: %02X  Mode: %4s  Conn: %2d  Modem Sp: %4d  TX Modem: %4d  BR: %d  TXON: %1d  FD: %u\n",
-                    (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000, type,
-                    curMode, conn_id, space, RingBuffer_dataSize(&rxModeBuffer),
-                    (int)atomic_load(&bufReady), (int)atomic_load(&txOn),
-                    getTimerDuration("frameDelay"));
-        }
-
-        lastType = type;
-
         switch (type)
         {
             case NET_NACK:
@@ -2774,25 +1871,12 @@ void* processClientSocket(void* arg)
                     fprintf(stderr, "cAck\n");
                 break;
 
-            case OPENMT_TO_MODEM:
-            {  // Packet type must be the first byte after type in buffer.
-                uint8_t buf[3];
-                buf[0] = 0xE0;
-                buf[1] = respLen - 8 + 2;
-                pthread_mutex_lock(&modemComBufMutex);
-                RingBuffer_addData(&modemCommandBuffer, buf, 2);
-                RingBuffer_addData(&modemCommandBuffer, buffer + 8, respLen - 8);
-                pthread_mutex_unlock(&modemComBufMutex);
-            }
-            break;
-
             case COMM_SET_MODE:
                 if (isCurrentModeIdle())
                 {
                     setCurrentMode(hostClient[conn_id].mode);
                     setProtocol(hostClient[conn_id].mode, true);
-                    if (strncasecmp(modem, "mmdvm", 5) != 0)
-                        setMode(conn_id);
+                    setMode(conn_id);
                     //           if (debugM)
                     fprintf(stderr, "Current mode set to %s.\n", hostClient[conn_id].mode);
                     setStatus(modemName, "main", "active_mode", hostClient[conn_id].mode);
@@ -2807,10 +1891,7 @@ void* processClientSocket(void* arg)
                     pthread_mutex_lock(&rxBufModeMutex);
                     RingBuffer_clear(&rxModeBuffer);
                     pthread_mutex_unlock(&rxBufModeMutex);
-                    if (strncasecmp(modem, "mmdvm", 5) == 0)
-                        setMode(0x00);
-                    else
-                        setMode(0x0f);
+                    setMode(0x0f);
                     //           if (debugM)
                     fprintf(stderr, "Current mode set to IDLE.\n");
                     setStatus(modemName, "main", "active_mode", "idle");
@@ -2870,220 +1951,6 @@ void* processClientSocket(void* arg)
                 pthread_mutex_unlock(&rxBufModeMutex);
             }
             break;
-
-            case TYPE_M17_LSF:
-            case TYPE_M17_STREAM:
-            case TYPE_M17_PACKET:
-            case TYPE_M17_EOT:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    atomic_store(&txOn, true);
-                    uint8_t buf[4];
-                    buf[0] = 0xE0;
-                    buf[1] = 0x34;
-                    buf[2] = type;
-                    buf[3] = 0x00;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 4);
-                    RingBuffer_addData(&rxModeBuffer, &buffer[4 + typeLen], 48);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                }
-                if (type == TYPE_M17_EOT)
-                {
-                    atomic_store(&txOn, false);
-                }
-            }
-            break;
-
-            case TYPE_DSTAR_HEADER:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    atomic_store(&txOn, true);
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = 0x2C;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    RingBuffer_addData(&rxModeBuffer, &buffer[4 + typeLen], 41);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                }
-            }
-            break;
-
-            case TYPE_DSTAR_DATA:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    atomic_store(&txOn, true);
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = 0x0F;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    RingBuffer_addData(&rxModeBuffer, &buffer[4 + typeLen], 12);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                }
-            }
-            break;
-
-            case TYPE_DSTAR_EOT:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = 0x03;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                    atomic_store(&txOn, false);
-                }
-            }
-            break;
-
-            case TYPE_P25_HDR:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    atomic_store(&txOn, true);
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = respLen - 8 + 3;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    RingBuffer_addData(&rxModeBuffer, &buffer[4 + typeLen], respLen - 8);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                }
-            }
-            break;
-
-            case TYPE_P25_LDU:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    atomic_store(&txOn, true);
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = 216 + 3;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    RingBuffer_addData(&rxModeBuffer, &buffer[4 + typeLen], 216);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                }
-            }
-            break;
-
-            case TYPE_P25_LOST:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = 0x03;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                    atomic_store(&txOn, false);
-                }
-            }
-            break;
-
-            case TYPE_YSF_DATA:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    atomic_store(&txOn, true);
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = respLen - 8 + 3;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    RingBuffer_addData(&rxModeBuffer, &buffer[4 + typeLen], respLen - 8);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                }
-            }
-            break;
-
-            case TYPE_YSF_LOST:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = 0x03;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                    atomic_store(&txOn, false);
-                }
-            }
-            break;
-
-            case TYPE_NXDN_DATA:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    atomic_store(&txOn, true);
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = respLen - 8 + 3;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    RingBuffer_addData(&rxModeBuffer, &buffer[4 + typeLen], respLen - 8);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                }
-            }
-            break;
-
-            case TYPE_NXDN_LOST:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = 0x03;
-                    buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 3);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-                    atomic_store(&txOn, false);
-                }
-            }
-            break;
-
-            case TYPE_DMR_DATA1:
-            case TYPE_DMR_DATA2:
-            case TYPE_DMR_LOST1:
-            case TYPE_DMR_LOST2:
-            {
-                if (hostClient[conn_id].active && isCurrentMode(hostClient[conn_id].mode))
-                {
-                    atomic_store(&txOn, true);
-                    uint8_t buf[3];
-                    buf[0] = 0xE0;
-                    buf[1] = respLen - 8 + 2;
-                    // buf[2] = type;
-                    pthread_mutex_lock(&rxBufModeMutex);
-                    RingBuffer_addData(&rxModeBuffer, buf, 2);
-                    RingBuffer_addData(&rxModeBuffer, &buffer[4 + typeLen], respLen - 8);
-                    pthread_mutex_unlock(&rxBufModeMutex);
-
-                    if (buffer[8] == 0x42 || type == TYPE_DMR_LOST1 || type == TYPE_DMR_LOST2)
-                        atomic_store(&txOn, false);
-                }
-            }
-            break;
         }
         delay(2000);
     }
@@ -3092,23 +1959,19 @@ void* processClientSocket(void* arg)
         connections--;
 
     hostClient[conn_id].active = false;
-    addModeKnown[conn_id] = false;
     setProtocol(mode[conn_id].name, false);
 
     pthread_mutex_lock(&shutDownMutex);
     delGateway(modemName, "main", mode[conn_id].name);
     delMode(modemName, "main", mode[conn_id].name);
-    if (strcasecmp(modem, "openmths") == 0 || strcasecmp(modem, "openmtsx") == 0)
+    if (streamType != STREAM_FRAME)
     {
         uint8_t buf[3] = {0x61, 0x03, (uint8_t)(OPENMT_DEL_MODE | (conn_id & 0x0f))};
         pthread_mutex_lock(&modemComBufMutex);
         RingBuffer_addData(&modemCommandBuffer, buf, 3);
         pthread_mutex_unlock(&modemComBufMutex);
     }
-    else if (strcasecmp(modem, "mmdvmhs") == 0)
-        set_ConfigHS(modemName);
-    else if (strcasecmp(modem, "mmdvm") == 0)
-        set_Config(modemName);
+    /* FRAME: the bridge sent the modem its new configuration when it was told the mode was off */
 
     delay(50000);
     close(sockFd);
@@ -3289,455 +2152,143 @@ void* startTCPServer(void* arg)
 }
 
 /*
- * processMMDVMSerial()
+ * modemReadFull()
  *
- * Reads and handles one frame from an MMDVM modem.  NAK, ACK, debug text,
- * version and status frames are handled here: a status frame updates the
- * free space counters for each mode (the M17 space is in byte 13, or byte 12
- * for mmdvmhs).  Voice and data frames of each protocol are wrapped in an
- * OpenMT frame (0x61, 16 bit length, 0x04, four character type) and put into
- * txModeBuffer, but only when the mode matches the current mode.  If
- * txModeBuffer is full it is cleared.
+ * Reads exactly n bytes from the modem port, waiting a while for slow ones.
+ *
+ * Parameters:
+ *   dst - Output buffer.
+ *   n   - Number of bytes wanted.
+ *
+ * Returns: true if all n bytes were read; false on a read error or when they
+ *   did not arrive within about two seconds.
+ */
+static bool modemReadFull(uint8_t* dst, size_t n)
+{
+    size_t got   = 0;
+    int    waits = 0;
+
+    while (got < n)
+    {
+        ssize_t len = modemRead(dst + got, n - got);
+
+        if (len < 0)
+            return false;
+        if (len == 0)
+        {
+            if (++waits > 400 || !atomic_load(&running))
+                return false;
+            delay(5000);
+        }
+        else
+        {
+            got += (size_t)len;
+            waits = 0;
+        }
+    }
+    return true;
+}
+
+/*
+ * bridgeActive()
+ *
+ * The bridge says which connection owns the modem now.  The host only keeps
+ * the name for the dashboard and for the services that ask.
+ *
+ * Parameters:
+ *   conn - Connection id, BRIDGE_CONN_NONE for idle.
+ *
+ * Returns: nothing.
+ */
+static void bridgeActive(uint8_t conn)
+{
+    const char* name = "idle";
+
+    if (conn < MAX_CLIENT_CONNECTIONS && hostClient[conn].active)
+        name = mode[conn].name;
+    setCurrentMode(name);
+    setStatus(modemName, "main", "active_mode", name);
+    if (debugM)
+        fprintf(stderr, "Current mode set to %s.\n", name);
+}
+
+/*
+ * processRelaySerial()
+ *
+ * Reads and handles one frame from the bridge of a FRAME modem.  A relay
+ * frame (0x62, length, connection id, service frame) is put into
+ * txModeBuffer, service frame first and the connection id behind it, for the
+ * connection's thread to send; a control frame tells which connection owns
+ * the modem.  Anything else is skipped.  The host does not look inside the
+ * service frames.
  *
  * Parameters: none.
  *
- * Returns: 0 on a serial error, 1 when a frame was handled, 2 when there was
- *   nothing to read.
+ * Returns: 0 on a serial error, 1 when something was handled, 2 when there
+ *   was nothing to read.
  */
-int processMMDVMSerial(void)
+int processRelaySerial(void)
 {
-    uint8_t buffer[BUFFER_LENGTH];
-    unsigned int respLen;
-    unsigned int offset;
-    unsigned int type;
+    uint8_t buffer[BUFFER_LENGTH + 8];
     ssize_t len;
 
     len = modemRead(buffer, 1);
-    if (len == 0) return 2;
-
+    if (len == 0)
+        return 2;
     if (len != 1)
     {
-        reportError(modemName, "Modem", "Modem_Host: error when reading from Modem, errno=%d", errno);
+        reportError(modemName, "Modem", "Modem_Host: error when reading from the bridge, errno=%d", errno);
         return 0;
     }
 
-    if (buffer[0] != 0xE0)
+    if (buffer[0] == BRIDGE_RELAY_START)
     {
-        fprintf(stderr, "Modem_Host: unknown byte from Modem, 0x%02X\n", buffer[0]);
-        return 1;
-    }
+        size_t total;
 
-    offset = 0;
-    while (offset < 2)
-    {
-        len = modemRead(buffer + 1 + offset, 2 - offset);
-        if (len == 0)
-            delay(5);
-        else
-            offset += len;
-    }
+        if (!modemReadFull(buffer + 1, 2))
+            return 1;
+        total = ((size_t)buffer[1] << 8) | buffer[2];
+        if (total < BRIDGE_RELAY_HEADER + 5 || total > sizeof(buffer))
+        {
+            fprintf(stderr, "Modem_Host: bad relay frame length %zu from the bridge\n", total);
+            return 1;
+        }
+        if (!modemReadFull(buffer + 3, total - 3))
+            return 1;
+        if (buffer[BRIDGE_RELAY_HEADER] != 0x61)
+        {
+            fprintf(stderr, "Modem_Host: relay frame without a service frame from the bridge\n");
+            return 1;
+        }
 
-    respLen = buffer[1];
-    if (respLen < 3)
-    {
-        fprintf(stderr, "Modem_Host: bad frame length %u from Modem, resyncing\n", (unsigned int)respLen);
-        return 1;
-    }
-    type    = buffer[2];
+        size_t tlvLen = total - BRIDGE_RELAY_HEADER;
 
-    offset += 1;
-    while (offset < respLen)
-    {
-        len = modemRead(buffer + offset, respLen - offset);
-
-        if (len == 0)
-            delay(5);
-        else
-            offset += len;
-    }
-
-    if (RingBuffer_freeSpace(&txModeBuffer) == 0)
-    {
-        fprintf(stderr, "txModeBuffer out of space.\n");
         pthread_mutex_lock(&txBufModeMutex);
-        RingBuffer_clear(&txModeBuffer);
+        if (RingBuffer_freeSpace(&txModeBuffer) < tlvLen + 1)
+        {
+            fprintf(stderr, "txModeBuffer out of space.\n");
+            RingBuffer_clear(&txModeBuffer);
+        }
+        RingBuffer_addData(&txModeBuffer, buffer + BRIDGE_RELAY_HEADER, tlvLen);
+        RingBuffer_addData(&txModeBuffer, buffer + 3, 1);       /* the connection id */
         pthread_mutex_unlock(&txBufModeMutex);
+        return 1;
     }
 
-    if (debugM)
+    if (buffer[0] == BRIDGE_CTL_START)
     {
-        hexDump((char*)"SERIAL", buffer, respLen);
-        if (type == TYPE_DSTAR_HEADER)
-        {
-            if (respLen != 46)
-                fprintf(stderr, "DSTAR header wrong length. [%d]\n", respLen);
-        }
-        if (type == TYPE_DSTAR_DATA)
-        {
-            if (respLen != 15 && respLen != 17)
-                fprintf(stderr, "DSTAR data wrong length. [%d]\n", respLen);
-        }
-        if (type == TYPE_M17_LSF || type == TYPE_M17_STREAM || type == TYPE_M17_PACKET)
-        {
-            if (respLen != 54)
-                fprintf(stderr, "M17 frame wrong length. [%d]\n", respLen);
-        }
+        if (!modemReadFull(buffer + 1, 1))
+            return 1;
+        if (buffer[1] < BRIDGE_CTL_LENGTH || buffer[1] > BRIDGE_CTL_MAX)
+            return 1;
+        if (!modemReadFull(buffer + 2, buffer[1] - 2U))
+            return 1;
+        if (buffer[2] == BRIDGE_CTL_ACTIVE && buffer[1] >= BRIDGE_CTL_LENGTH + 1)
+            bridgeActive(buffer[3]);
+        return 1;
     }
 
-    if (type == MODEM_NACK)
-    {
-        //     if (debugM)
-        fprintf(stderr, "Nack == Type: %02X  Err: %02X\n", buffer[3], buffer[4]);
-    }
-    else if (type == MODEM_ACK)
-    {
-        if (debugM)
-            fprintf(stderr, "Ack\n");
-    }
-    else if ((type & 0xf0) == 0xf0)
-    {
-        if (debugM)
-            hexDump((char*)"DEBUG1", buffer, respLen);
-        buffer[respLen] = 0;
-        fprintf(stderr, "DEBUG: %s\n", buffer + 3);
-    }
-    else if (type == MODEM_VERSION)
-    {
-        hexDump((char*)"Version", buffer, respLen);
-    }
-    else if (type == MODEM_STATUS)
-    {
-        if (debugM)
-            hexDump((char*)"STATUS", buffer, respLen);
-        if (strcasecmp(modem, "mmdvmhs") == 0)
-            setM17Space(buffer[13]);
-        else
-            setM17Space(buffer[12]);
-        setDSTARSpace(buffer[6]);
-        setDMRSpace(buffer[7], buffer[8]);
-        setP25Space(buffer[10]);
-        setYSFSpace(buffer[9]);
-        setNXDNSpace(buffer[11]);
-    }
-    else if (type == TYPE_M17_LSF && (respLen == 54 || respLen == 52))
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("M17")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x38;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_LSF_M17, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[4], 48);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_M17_STREAM && (respLen == 54 || respLen == 52))
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("M17")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x38;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_STREAM_M17, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[4], 48);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_M17_PACKET && (respLen == 54 || respLen == 52))
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("M17")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x38;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_PACKET_M17, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[4], 48);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if ((type == TYPE_M17_EOT || type == TYPE_M17_LOST) && respLen == 3)
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("M17")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x08;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_EOT_M17, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_DSTAR_HEADER && respLen == 46)
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DSTAR")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x31;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_HEADER_DSTAR, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[3], 41);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_DSTAR_DATA && (respLen == 15 || respLen == 17))
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DSTAR")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x14;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_DATA_DSTAR, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[3], 12);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if ((type == TYPE_DSTAR_EOT || type == TYPE_DSTAR_LOST) && respLen == 3)
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DSTAR")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x08;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_EOT_DSTAR, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_FM_DATA || type == TYPE_FM_STATUS || type == TYPE_FM_EOT || type == TYPE_FM_RSSI)
-    {
-        if (connections > 0 && respLen >= 3 && respLen <= 250 && (isCurrentModeIdle() || isCurrentMode("FM")))
-        {
-            const char* fmType = type == TYPE_FM_DATA ? TYPE_DATA_FM :
-                                 type == TYPE_FM_STATUS ? TYPE_STATUS_FM :
-                                 type == TYPE_FM_EOT ? TYPE_EOT_FM : TYPE_RSSI_FM;
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = respLen + 5;
-            buf[3] = 0x04;
-            memcpy(buf + 4, fmType, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            if (respLen > 3)
-                RingBuffer_addData(&txModeBuffer, &buffer[3], respLen - 3);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_P25_HDR && buffer[3] == 1 && (respLen >= 21 && respLen <= 105))
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("P25")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = respLen + 4;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_HDR_P25, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[4], respLen - 4);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_P25_LDU && buffer[3] == 1 && (respLen == 222 || respLen == 220))
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("P25")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0xE0;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_LDU_P25, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[4], 216);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_P25_LOST && respLen == 3)
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("P25")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x08;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_LOST_P25, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_YSF_DATA && (respLen == 124 || respLen == 126))
-    {
-        /* [placeholder] [120 byte frame] [optional 2 byte RSSI] */
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("YSF")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = respLen - 3 + 8;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_DATA_YSF, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[3], respLen - 3);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_YSF_LOST)
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("YSF")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x08;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_LOST_YSF, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_NXDN_DATA && (respLen == 52 || respLen == 54))
-    {
-        /* [placeholder] [48 byte frame] [optional 2 byte RSSI] */
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("NXDN")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = respLen - 3 + 8;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_DATA_NXDN, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[3], respLen - 3);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_NXDN_LOST)
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("NXDN")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = 0x08;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_LOST_NXDN, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_DMR_DATA1 && (respLen == 0x25 || respLen == 0x27))
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DMR")))
-        {
-            /*     uint8_t buf[10] = {0xE0, 0x04, 0x03, 0x02, 0x00};
-                 setProtocol("DMR", true);
-                 buf[2] = 0x1D;
-                 buf[3] = 0x01;
-                 write(serialModemFd, buf, 4);
-                 delay(1000);
-                 RingBuffer_addData(&modemCommandBuffer, buf, 4);
-                 fprintf(stderr, "Done\n"); */
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = respLen - 3 + 8;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_DATA1_DMR, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[3], respLen - 3);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_DMR_LOST1)
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DMR")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = respLen - 3 + 8;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_LOST1_DMR, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[3], respLen - 3);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_DMR_DATA2 && (respLen == 0x25 || respLen == 0x27))
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DMR")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = respLen - 3 + 8;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_DATA2_DMR, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[3], respLen - 3);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else if (type == TYPE_DMR_LOST2)
-    {
-        if (connections > 0 && (isCurrentModeIdle() || isCurrentMode("DMR")))
-        {
-            uint8_t buf[8];
-            buf[0] = 0x61;
-            buf[1] = 0x00;
-            buf[2] = respLen - 3 + 8;
-            buf[3] = 0x04;
-            memcpy(buf + 4, TYPE_LOST2_DMR, 4);
-            pthread_mutex_lock(&txBufModeMutex);
-            RingBuffer_addData(&txModeBuffer, buf, 8);
-            RingBuffer_addData(&txModeBuffer, &buffer[3], respLen - 3);
-            pthread_mutex_unlock(&txBufModeMutex);
-        }
-    }
-    else
-    {
-        //     if (debugM)
-        hexDump((char*)"Modem rec data:", buffer, respLen);
-    }
-
+    fprintf(stderr, "Modem_Host: unknown byte from the bridge, 0x%02X\n", buffer[0]);
     return 1;
 }
 
@@ -3772,8 +2323,8 @@ static bool frameHasText(const uint8_t* data, unsigned int n, const char* needle
  * Reads and handles one frame from an OpenMT modem.  The frame type is taken
  * from the upper four bits of byte 2.  NAK, ACK and version frames are
  * logged or noted.  Sample and bit data are put into txModeBuffer with the
- * connection id added at the end.  Timing frames are forwarded only in DMR
- * mode.  A status reply gives the free space; for the paced "openmt" modem
+ * connection id added at the end.  Timing frames are forwarded as they
+ * are; the bridge sends them only when they are wanted.  A status reply gives the free space; for the paced "openmt" modem
  * openmtCreditFromStatus() turns it into credit, openmtLastFree and
  * openmtCredit are stored and setSpace() is called.  A debug frame (type
  * 0xC0) with a firmware version text containing " id=" is printed once for
@@ -3814,28 +2365,6 @@ int processSerial(void)
     {
         //     if (debugM)
         fprintf(stderr, "Nack == Type: %02X  Err: %02X\n", buffer[3], buffer[4]);
-
-        if ((buffer[3] & 0xf0) == OPENMT_MEAS)
-        {
-            pthread_mutex_lock(&measMutex);
-            if (meas.pending)
-            {
-                meas.nak    = true;
-                meas.nakErr = buffer[4];
-                meas.done   = true;
-            }
-            pthread_mutex_unlock(&measMutex);
-        }
-    }
-    else if (type == OPENMT_MEAS)
-    {
-        pthread_mutex_lock(&measMutex);
-        if (meas.pending && respLen >= 14U && (buffer[2] & 0x0f) == meas.conn)
-        {
-            memcpy(meas.data, buffer + 3, 11);
-            meas.done = true;
-        }
-        pthread_mutex_unlock(&measMutex);
     }
     else if (type == OPENMT_ACK)
     {
@@ -3884,15 +2413,11 @@ int processSerial(void)
     }
     else if (type == OPENMT_TX_TIMING)
     {
-        /* TX/RX sample alignment report from the SX1255 bridge (8-byte
-         * payload). Only the DMR host uses it (to tell TDMA timeslots
-         * apart), and it must not reach any other host: m17_host, for
-         * one, treats any packet type it doesn't recognise as an M17
-         * frame and switches itself to FRAME mode. So forward it only
-         * while DMR is the active mode, through txModeBuffer in arrival
-         * order with the SAMP records -- its position in the sample
-         * stream is part of what it means -- and drop it otherwise. */
-        if (respLen == 3U + 8U && isCurrentMode("DMR"))
+        /* TX/RX sample alignment report (8-byte payload).  The bridge sends
+         * it only when the active mode wants it, so it can be forwarded as it
+         * is, through txModeBuffer in arrival order with the SAMP records --
+         * its position in the sample stream is part of what it means. */
+        if (respLen == 3U + 8U)
         {
             uint8_t buf[8];
             buf[0] = 0x61;
@@ -4011,6 +2536,139 @@ static void installCrashHandlers(void)
 }
 
 /*
+ * resolveStreamType()
+ *
+ * Finds out which kind of packet stream the modem delivers.  The bridge in
+ * front of the modem publishes it in the database (setting "streamType"),
+ * with a few facts about its modem the host needs for pacing.  The bridge
+ * may still be starting, so the host waits for it.
+ *
+ * Parameters: none.
+ *
+ * Returns: true when a bridge has published its stream type; sets
+ *   streamType and creditPacing.
+ */
+static bool resolveStreamType(void)
+{
+    StreamType published = STREAM_NONE;
+
+    for (int tries = 0; tries < 60 && atomic_load(&running); tries++)
+    {
+        published = bridgeReadStreamType(modemName);
+        if (published != STREAM_NONE)
+            break;
+        if (tries == 0)
+            fprintf(stderr, "Modem_Host: waiting for a bridge to publish its stream type...\n");
+        sleep(1);
+    }
+    if (published == STREAM_NONE)
+    {
+        reportError(modemName, "Modem", "Modem_Host: no bridge has published a stream type. Start the bridge for your modem first.");
+        return false;
+    }
+    streamType = published;
+
+    char tmp[16] = "";
+
+    readHostConfigN(modemName, "config", "creditPacing", tmp, sizeof(tmp));
+    creditPacing = (strcasecmp(tmp, "true") == 0);
+
+    fprintf(stderr, "Modem_Host: stream type %s (published by the bridge)\n", bridgeStreamName(streamType));
+    return true;
+}
+
+/*
+ * sendBridgeControl()
+ *
+ * Queues a control frame for the bridge on the serial port, through the
+ * command buffer the serial writer thread already empties, so the frame
+ * cannot land in the middle of another frame.
+ *
+ * Parameters:
+ *   type    - Control frame type, for example BRIDGE_CTL_RELOAD.
+ *   payload - Payload bytes, NULL when there are none.
+ *   plen    - Number of payload bytes.
+ *
+ * Returns: nothing.
+ */
+static void sendBridgeControl(uint8_t type, const char* payload, size_t plen)
+{
+    uint8_t frame[BRIDGE_CTL_MAX];
+    size_t  len = bridgeCtlBuild(type, (const uint8_t*)payload, plen, frame);
+
+    if (len == 0)
+        return;
+    /* the command buffer also carries the ADD_MODE and mode frames, so the order of the frames is kept */
+    pthread_mutex_lock(&modemComBufMutex);
+    RingBuffer_addData(&modemCommandBuffer, frame, len);
+    pthread_mutex_unlock(&modemComBufMutex);
+}
+
+/*
+ * refreshBridgedSettings()
+ *
+ * Reads again the settings Modem_Host itself needs when a bridge looks
+ * after the modem: whether the repeater runs duplex, which the services are
+ * told about.  Everything else is the bridge's business.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
+static void refreshBridgedSettings(void)
+{
+    char tmp[16] = "";
+
+    readHostConfigN(modemName, "config", "mode", tmp, sizeof(tmp));
+    modem_duplex = (strcasecmp(tmp, "duplex") == 0);
+}
+
+/*
+ * configWatchThread()
+ *
+ * Looks at the "config" settings of the modem every two seconds.  When
+ * something was added or changed, and a bridge is in front of the modem, it
+ * sends the bridge the reload control frame so the bridge reads its settings
+ * again.  The first reading after the start only sets the baseline.
+ *
+ * Parameters:
+ *   arg - Not used.
+ *
+ * Returns: NULL; the thread ends when the running flag is cleared.
+ */
+void* configWatchThread(void* arg)
+{
+    uint64_t last     = 0;
+    bool     haveLast = false;
+
+    while (atomic_load(&running))
+    {
+        for (int i = 0; i < 20 && atomic_load(&running); i++)
+            delay(100000);
+
+        uint64_t now;
+
+        if (!hostConfigDigest(modemName, "config", &now))
+            continue;
+
+        if (!haveLast)
+        {
+            last     = now;
+            haveLast = true;
+        }
+        else if (now != last)
+        {
+            last = now;
+            fprintf(stderr, "Modem_Host: settings changed, asking the bridge to read them again.\n");
+            refreshBridgedSettings();
+            sendBridgeControl(BRIDGE_CTL_RELOAD, NULL, 0);
+        }
+    }
+    pthread_exit(NULL);
+    return NULL;
+}
+
+/*
  * main()
  *
  * Starts the modem host.  Options: -m n (modem 1 to 10, sets the modem name
@@ -4019,7 +2677,7 @@ static void installCrashHandlers(void)
  * handlers, the software timers (status, txTimeout, chkComTimeout) and the
  * ring buffers, loads or creates the default configuration in the database,
  * opens and flushes the serial port, and starts the threads:
- * modeMMDVMTxThread for MMDVM modems, or modemTxThread and modeTxThread for
+ * modeRelayTxThread for FRAME streams, or modemTxThread and modeTxThread for
  * the others, then timerThread, startTCPServer and commandThread.  It sends
  * the start-up configuration for the modem type and, for the "openmt" modem,
  * also asks for the firmware version.  The main thread then reads the serial
@@ -4116,7 +2774,7 @@ int main(int argc, char** argv)
     if (getTimer("chkComTimeout", 2000) < 0) return 0;
 
     /* Initialize RingBuffers */
-    RingBuffer_Init(&modemCommandBuffer, 300);
+    RingBuffer_Init(&modemCommandBuffer, 16384);
     RingBuffer_Init(&modemTxBuffer, 8192);
     RingBuffer_Init(&rxModeBuffer, 64000);  /* TX_AHEAD (400 ms = 19200 B) + jitter */
     RingBuffer_Init(&txModeBuffer, 10000);
@@ -4130,43 +2788,33 @@ int main(int argc, char** argv)
         pthread_mutex_init(&hostClient[i].commandMutex, NULL);
     }
 
-    readHostConfig(modemName, "config", "modem", modem);
-    if (strlen(modem) == 0)
-    {
-        setHostConfig(modemName, "config", "modem", "none", "mmdvmhs");
-        readHostConfig(modemName, "config", "modem", modem);
-        setHostConfig(modemName, "config", "port", "none", "ttyAMA0");
-        setHostConfig(modemName, "config", "mode", "none", "simplex");
-        setHostConfig(modemName, "config", "rxInvert", "none", "false");
-        setHostConfig(modemName, "config", "txInvert", "none", "true");
-        setHostConfig(modemName, "config", "pttInvert", "none", "false");
-        setHostConfig(modemName, "config", "useCOSAsLockout", "none", "false");
-        setHostConfig(modemName, "config", "debug", "none", "false");
-        setHostConfig(modemName, "config", "txDelay", "none", "100");
-        setHostConfig(modemName, "config", "rxLevel", "none", "50");
-        setHostConfig(modemName, "config", "rxTxLevel", "none", "50");
-        setHostConfig(modemName, "config", "rxFrequency", "none", "449900000");
-        setHostConfig(modemName, "config", "txFrequency", "none", "449900000");
-        setHostConfig(modemName, "config", "rxDCOffset", "none", "0");
-        setHostConfig(modemName, "config", "txDCOffset", "none", "0");
-        setHostConfig(modemName, "config", "baud", "none", "460800");
-        setHostConfig(modemName, "config", "fmTxLevel", "none", "50");
-        setHostConfig(modemName, "config", "cwIdTxLevel", "none", "50");
-        setHostConfig(modemName, "main", "gateways", "none", "none");
-        setHostConfig(modemName, "main", "activeModes", "none", "none");
-        setHostConfig(modemName, "main", "username", "none", "admin");
-        setHostConfig(modemName, "main", "callsign", "none", "N0CALL");
-        setHostConfig(modemName, "main", "title", "none", "Repeater Dashboard");
-        setHostConfig(modemName, "main", "latitude", "none", "0.0");
-        setHostConfig(modemName, "main", "longitude", "none", "0.0");
-    }
+    /* The settings of the modem itself ("config") belong to its bridge, which creates them.  These are the
+       host's own: created on a new install without touching values already saved. */
+    addHostConfigDefault(modemName, "main", "gateways", "none", "none");
+    addHostConfigDefault(modemName, "main", "activeModes", "none", "none");
+    addHostConfigDefault(modemName, "main", "username", "none", "admin");
+    addHostConfigDefault(modemName, "main", "callsign", "none", "N0CALL");
+    addHostConfigDefault(modemName, "main", "title", "none", "Repeater Dashboard");
+    addHostConfigDefault(modemName, "main", "latitude", "none", "0.0");
+    addHostConfigDefault(modemName, "main", "longitude", "none", "0.0");
 
     /* Settings added after the first release: create them on older installs
        without touching values already saved. */
     addHostConfigDefault(modemName, "main", "location", "none", "");
     addHostConfigDefault(modemName, "main", "description", "none", "");
 
-    readHostConfig(modemName, "config", "port", commPort);
+    if (!resolveStreamType())
+        return 1;
+
+    {
+        /* "port" and "baud" now belong to the bridge; the host opens its virtual port */
+        char bridgePort[20] = "";
+
+        readHostConfigN(modemName, "config", "bridgePort", bridgePort, sizeof(bridgePort));
+        if (bridgePort[0] != '\0')
+            snprintf(commPort, sizeof(commPort), "%s", bridgePort);
+        refreshBridgedSettings();
+    }
     readHostConfig(modemName, "config", "baud", modemBaud);
 
     readHostConfig(modemName, "main", "callsign", callsign);
@@ -4184,18 +2832,18 @@ int main(int argc, char** argv)
 
     sleep(1);
 
-    if (strncasecmp(modem, "mmdvm", 5) == 0)
+    if (streamType == STREAM_FRAME)
     {
-        int err = pthread_create(&(modetxid), NULL, &modeMMDVMTxThread, NULL);
+        int err = pthread_create(&(modetxid), NULL, &modeRelayTxThread, NULL);
         if (err != 0)
         {
-            reportError(modemName, "Modem", "Can't create MMDVM mode tx thread:[%s]", strerror(err));
+            reportError(modemName, "Modem", "Can't create FRAME mode tx thread:[%s]", strerror(err));
             return 1;
         }
         else
         {
             if (debugM)
-                fprintf(stderr, "MMDVM mode tx thread created successfully\n");
+                fprintf(stderr, "FRAME mode tx thread created successfully\n");
         }
     }
     else
@@ -4249,6 +2897,10 @@ int main(int argc, char** argv)
             fprintf(stderr, "TCP server thread created successfully\n");
     }
 
+    err = pthread_create(&(cfgwatchid), NULL, &configWatchThread, NULL);
+    if (err != 0)
+        reportError(modemName, "Modem", "Can't create config watch thread:[%s]", strerror(err));
+
     err = pthread_create(&(commandid), NULL, &commandThread, NULL);
     if (err != 0)
     {
@@ -4265,170 +2917,8 @@ int main(int argc, char** argv)
     setHostConfig(modemName, "main", "activeModes", "none", "none");
     delay(10000);
 
-    if (strcasecmp(modem, "mmdvmhs") == 0)
-    {
-        readHostConfig(modemName, "config", "rxFrequency", modem_rxFrequency);
-        readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
-
-        set_ConfigHS(modemName);
-        delay(10000);
-
-        setFrequency(modem_rxFrequency, modem_txFrequency, modem_txFrequency, 255);
-        delay(10000);
-        uint8_t buf[3];
-        buf[0] = 0xE0;
-        buf[1] = 0x03;
-        buf[2] = 0x00;
-        // write(serialModemFd, buf, 3);
-        RingBuffer_addData(&modemCommandBuffer, buf, 3);
-    }
-    else if (strcasecmp(modem, "mmdvm") == 0)
-    {
-        set_Config(modemName);
-        delay(10000);
-        uint8_t buf[3];
-        buf[0] = 0xE0;
-        buf[1] = 0x03;
-        buf[2] = 0x00;
-        write(serialModemFd, buf, 3);
-    }
-    else if (strcasecmp(modem, "openmths") == 0)
-    {
-        uint8_t buf[4];
-        buf[0] = 0x61;
-        buf[1] = 0x04;
-        buf[2] = OPENMT_SET_CONFIG;
-        buf[3] = 0x81;
-        write(serialModemFd, buf, 4);
-        char tmp[10];
-        readHostConfig(modemName, "config", "mode", tmp);
-        if (strcasecmp(tmp, "duplex") == 0)
-            modem_duplex = true;
-        else
-            modem_duplex = false;
-        readHostConfig(modemName, "config", "rxLevel", tmp);
-        modem_rxLevel = atoi(tmp);
-    }
-    else if (strcasecmp(modem, "openmtsx") == 0)
-    {
-        /* Richer SET_CONFIG payload for the sx1255-openmt-bridge project
-         * specifically: plain SX1255 hardware parameters (frequency,
-         * gains, PLL bandwidth, RX/TX invert), overriding that bridge's
-         * own command-line defaults, rather than the single-byte
-         * "openmths" handshake above. Needs these additional keys under
-         * this modem's "config" section: rxFrequency, txFrequency,
-         * rxInvert, txInvert (already used by other modem types, see
-         * the "openmt" branch below), plus rxLnaGain, rxPgaGain,
-         * txMixerGain, txDacGain, rxPllBw, txPllBw (new, SX1255-
-         * specific). See sx1255-openmt-bridge's own README for the
-         * exact payload format and valid ranges for each field. */
-        char tmp[16];
-        uint32_t rx_freq_hz, tx_freq_hz;
-        uint8_t lna_gain_db, pga_gain_db;
-        int8_t mixer_gain_x2, dac_gain_db;
-        uint16_t rx_pll_bw_khz, tx_pll_bw_khz;
-        uint8_t invert_flags = 0;
-        uint8_t buf[21];
-
-        readHostConfig(modemName, "config", "rxFrequency", tmp);
-        rx_freq_hz = (uint32_t)strtoul(tmp, NULL, 10);
-        readHostConfig(modemName, "config", "txFrequency", tmp);
-        tx_freq_hz = (uint32_t)strtoul(tmp, NULL, 10);
-        readHostConfig(modemName, "config", "rxLnaGain", tmp);
-        lna_gain_db = (uint8_t)atoi(tmp);
-        readHostConfig(modemName, "config", "rxPgaGain", tmp);
-        pga_gain_db = (uint8_t)atoi(tmp);
-        readHostConfig(modemName, "config", "txMixerGain", tmp);
-        mixer_gain_x2 = (int8_t)(atof(tmp) * 2.0); /* 2dB steps */
-        readHostConfig(modemName, "config", "txDacGain", tmp);
-        dac_gain_db = (int8_t)atoi(tmp);
-        readHostConfig(modemName, "config", "rxPllBw", tmp);
-        rx_pll_bw_khz = (uint16_t)atoi(tmp);
-        readHostConfig(modemName, "config", "txPllBw", tmp);
-        tx_pll_bw_khz = (uint16_t)atoi(tmp);
-        readHostConfig(modemName, "config", "rxInvert", tmp);
-        if (strcasecmp(tmp, "true") == 0)
-            invert_flags |= 0x01U;
-        readHostConfig(modemName, "config", "txInvert", tmp);
-        if (strcasecmp(tmp, "true") == 0)
-            invert_flags |= 0x02U;
-        readHostConfig(modemName, "config", "mode", tmp);
-        if (strcasecmp(tmp, "duplex") == 0)
-            modem_duplex = true;
-        else
-            modem_duplex = false;
-
-        buf[0] = 0x61;
-        buf[1] = 21; /* total frame length, including 0x61 itself */
-        buf[2] = OPENMT_SET_CONFIG;
-        buf[3] = 1; /* payload version */
-        buf[4] = (uint8_t)(rx_freq_hz >> 24);
-        buf[5] = (uint8_t)(rx_freq_hz >> 16);
-        buf[6] = (uint8_t)(rx_freq_hz >> 8);
-        buf[7] = (uint8_t)rx_freq_hz;
-        buf[8] = (uint8_t)(tx_freq_hz >> 24);
-        buf[9] = (uint8_t)(tx_freq_hz >> 16);
-        buf[10] = (uint8_t)(tx_freq_hz >> 8);
-        buf[11] = (uint8_t)tx_freq_hz;
-        buf[12] = lna_gain_db;
-        buf[13] = pga_gain_db;
-        buf[14] = (uint8_t)mixer_gain_x2;
-        buf[15] = (uint8_t)dac_gain_db;
-        buf[16] = (uint8_t)(rx_pll_bw_khz >> 8);
-        buf[17] = (uint8_t)rx_pll_bw_khz;
-        buf[18] = (uint8_t)(tx_pll_bw_khz >> 8);
-        buf[19] = (uint8_t)tx_pll_bw_khz;
-        buf[20] = invert_flags;
-        write(serialModemFd, buf, 21);
-    }
-    else if (strcasecmp(modem, "openmt") == 0)
-    {
-        char tmp[10];
-        readHostConfig(modemName, "config", "rxInvert", tmp);
-        if (strcasecmp(tmp, "true") == 0)
-            modem_rxInvert = true;
-        else
-            modem_rxInvert = false;
-        readHostConfig(modemName, "config", "txInvert", tmp);
-        if (strcasecmp(tmp, "true") == 0)
-            modem_txInvert = true;
-        else
-            modem_txInvert = false;
-        readHostConfig(modemName, "config", "pttInvert", tmp);
-        if (strcasecmp(tmp, "true") == 0)
-            modem_pttInvert = true;
-        else
-            modem_pttInvert = false;
-        readHostConfig(modemName, "config", "mode", tmp);
-        if (strcasecmp(tmp, "duplex") == 0)
-            modem_duplex = true;
-        else
-            modem_duplex = false;
-        readHostConfig(modemName, "config", "rxLevel", tmp);
-        modem_rxLevel = atoi(tmp);
-
-        uint8_t buf[196];
-        memset(buf, 0, 196);
-        buf[0] = 0x61;
-        buf[1] = 0xc4;
-        buf[2] = OPENMT_SET_CONFIG;
-        buf[3] |= modem_duplex;
-        buf[3] |= modem_rxInvert << 1;
-        buf[3] |= modem_txInvert << 2;
-        buf[3] |= modem_pttInvert << 3;
-        buf[4] = modem_rxLevel;
-        write(serialModemFd, buf, 196);
-
-        /* Ask for the firmware version (61 03 D0).  The modem sends it by
-         * itself only the first time it is configured after a reset, so a
-         * restarted host would otherwise never see it. */
-        {
-            static const uint8_t getVersion[3] = {0x61, 0x03, 0xD0};
-
-            if (write(serialModemFd, getVersion, 3) != 3)
-                reportError(modemName, "Modem", "Modem_Host: could not request the modem firmware version");
-        }
-    }
+    /* The bridge configures the modem; tell it that the host has started. */
+    sendBridgeControl(BRIDGE_CTL_HOST_UP, NULL, 0);
 
     if (realtime)
     {
@@ -4446,8 +2936,8 @@ int main(int argc, char** argv)
 
     while (atomic_load(&running))
     {
-        if (strncasecmp(modem, "mmdvm", 5) == 0)
-            ret = processMMDVMSerial();
+        if (streamType == STREAM_FRAME)
+            ret = processRelaySerial();
         else
             ret = processSerial();
 

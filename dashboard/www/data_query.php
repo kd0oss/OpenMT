@@ -614,7 +614,7 @@ if ($command == "saveModeOption")
 else
 if ($command == "getRxOffsets")
 {
-    /* The RX frequency offset of every mode of the modem (openmths): mode \x1D offset, rows split by \x1E */
+    /* The RX frequency offset of every mode of the modem: mode \x1D offset, rows split by \x1E */
     global $mysql;
 
     if (isset($_GET['modem_name']))

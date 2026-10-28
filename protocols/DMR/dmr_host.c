@@ -4906,10 +4906,10 @@ int main(int argc, char** argv)
     dmrModFilter.pState      = dmrModState;
 
     char tmp[15];
-    readHostConfig(modemName, "config", "modem", tmp);
-    if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
+    readHostConfig(modemName, "config", "streamType", tmp);   /* published by the bridge: FRAME, BIT or SAMPLE */
+    if (strcasecmp(tmp, "SAMPLE") == 0)
         packetType = PACKET_TYPE_SAMP;
-    else if (strcasecmp(tmp, "openmths") == 0)
+    else if (strcasecmp(tmp, "BIT") == 0)
         packetType = PACKET_TYPE_BIT;
     else
         packetType = PACKET_TYPE_FRAME;
@@ -5032,16 +5032,27 @@ int main(int argc, char** argv)
             if (strlen(parameter) > 0)
             {
                 readHostConfig(modemName, "main", "callsign", stationCall);
-                uint8_t buf[9];
-                buf[0] = 0x61;
-                buf[1] = 0x00;
-                buf[2] = 0x09;
-                buf[3] = 0x04;
-                memcpy(buf + 4, TYPE_COMMAND, 4);
-                buf[8] = COMM_UPDATE_CONF;
-                pthread_mutex_lock(&gwCommBufMutex);
-                RingBuffer_addData(&gwCommand, buf, 9);
-                pthread_mutex_unlock(&gwCommBufMutex);
+                if (dmrGWConnected)
+                {
+                    uint8_t buf[9];
+                    buf[0] = 0x61;
+                    buf[1] = 0x00;
+                    buf[2] = 0x09;
+                    buf[3] = 0x04;
+                    memcpy(buf + 4, TYPE_COMMAND, 4);
+                    buf[8] = COMM_UPDATE_CONF;
+                    pthread_mutex_lock(&gwCommBufMutex);
+                    RingBuffer_addData(&gwCommand, buf, 9);
+                    pthread_mutex_unlock(&gwCommBufMutex);
+                }
+
+                /*
+                 * Acknowledge now rather than when the gateway answers, so the
+                 * dashboard does not time out if the gateway is slow, busy
+                 * logging in, or not running. The gateway re-reads its own
+                 * config when it receives the queued command.
+                 */
+                ackDashbCommand(modemName, "updateConfDMR", "success");
             }
 
             if (dmrGWConnected)

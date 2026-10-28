@@ -2768,10 +2768,10 @@ int main(int argc, char** argv)
     reset();
 
     char tmp[15];
-    readHostConfig(modemName, "config", "modem", tmp);
-    if (strcasecmp(tmp, "openmt") == 0 || strcasecmp(tmp, "openmtsx") == 0)
+    readHostConfig(modemName, "config", "streamType", tmp);   /* published by the bridge: FRAME, BIT or SAMPLE */
+    if (strcasecmp(tmp, "SAMPLE") == 0)
         packetType = PACKET_TYPE_SAMP;
-    else if (strcasecmp(tmp, "openmths") == 0)
+    else if (strcasecmp(tmp, "BIT") == 0)
         packetType = PACKET_TYPE_BIT;
     else
         packetType = PACKET_TYPE_FRAME;
@@ -2817,6 +2817,14 @@ int main(int argc, char** argv)
         if (isTimerTriggered("status"))
         {
             char parameter[31];
+
+            if (!p25GWConnected)
+            {
+                /* No gateway to wait for; nothing else to reload. */
+                readDashbCommand(modemName, "updateConfP25", parameter);
+                if (strlen(parameter) > 0)
+                    ackDashbCommand(modemName, "updateConfP25", "success");
+            }
 
             if (p25GWConnected)
             {

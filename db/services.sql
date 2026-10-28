@@ -26,6 +26,9 @@ CREATE TABLE IF NOT EXISTS modem_host.service_commands (
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Requests from the dashboard for the service manager';
 
 INSERT IGNORE INTO modem_host.services (unit, label, description, sort_order) VALUES
+  ('mmdvm-bridge.service','MMDVM bridge',    'MMDVM / MMDVM_HS modem bridge (only when this bridge is used)', 4),
+  ('openmths-bridge.service','OpenMT_HS bridge','OpenMT_HS modem bridge (only when this bridge is used)', 4),
+  ('openmt-bridge.service','OpenMT bridge','OpenMT sample modem bridge (only when this bridge is used)', 4),
   ('sx1255-bridge.service','SX1255 bridge',   'SX1255 radio bridge (only with the SX1255 modem)', 5),
   ('modem-host.service',   'Modem host',       'Talks to the modem. Every host needs it.',        10),
   ('dstar-host.service',   'D-STAR host',      'D-STAR protocol host',                            20),

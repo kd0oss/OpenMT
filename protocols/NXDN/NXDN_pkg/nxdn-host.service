@@ -2,14 +2,15 @@
 [Unit]
 Description=NXDN Service
 After=modem-host.service
-Requires=modem-host.service
+Wants=modem-host.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/OpenMT/protocols/NXDN
 ExecStart=/home/pi/OpenMT/protocols/NXDN/build/nxdn_host
-Restart=on-failure
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal

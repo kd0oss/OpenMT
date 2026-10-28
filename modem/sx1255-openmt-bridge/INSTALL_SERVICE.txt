@@ -9,6 +9,14 @@ Created by Rick KD0OSS
   sudo systemctl enable --now sx1255-bridge
   mysql -u root -p < db/services.sql          (adds the bridge to the dashboard Services tab)
 
-Set the modem host's serial port (modemtty) to the --pty-symlink path, /dev/sx1255modem.
-The modem host opens the bridge's PTY when it starts, so restart the modem host after the
-bridge is restarted.
+Settings: the bridge keeps the radio settings (rxFrequency, txFrequency, rxLnaGain, rxPgaGain,
+txMixerGain, txDacGain, rxPllBw, txPllBw, rxInvert, txInvert, mode) in the config database. It
+creates any that are missing, using the command line options as the defaults, and the saved
+values win from then on. When you change them in the dashboard the modem host tells the bridge,
+which reads them again and configures the SX1255 if they differ. Use --modem-name for a modem
+name other than modem1.
+
+The bridge publishes streamType (SAMPLE) and bridgePort (the name of the --pty-symlink path
+below /dev, sx1255 by default); the modem host connects to that port by itself. Restart the
+modem host after the bridge is restarted, since the modem host opens the bridge's PTY when it
+starts.

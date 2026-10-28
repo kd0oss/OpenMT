@@ -2453,16 +2453,16 @@ int main(int argc, char** argv)
         }
     }
 
-    char modemType[20] = "";
-    readHostConfig(modemName, "config", "modem", modemType);
+    char streamName[20] = "";
+    readHostConfig(modemName, "config", "streamType", streamName);   /* published by the bridge: FRAME, BIT or SAMPLE */
 
-    if (strcasecmp(modemType, "openmt") == 0 || strcasecmp(modemType, "openmtsx") == 0)
+    if (strcasecmp(streamName, "SAMPLE") == 0)
         packetType = PACKET_TYPE_SAMP;
-    else if (strcasecmp(modemType, "mmdvm") == 0)
+    else if (strcasecmp(streamName, "FRAME") == 0)
         packetType = PACKET_TYPE_FRAME;
     else
     {
-        fprintf(stderr, "FM_Service: FM mode is not available for modem type '%s'.\n", modemType);
+        fprintf(stderr, "FM_Service: FM mode is not available for a '%s' stream.\n", streamName);
         return 1;
     }
 

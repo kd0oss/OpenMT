@@ -2,7 +2,7 @@
 # Runs the SX1255 bridge. It makes the PTY that the modem host opens as its serial port.
 # Runs as root because it creates the symlink /dev/sx1255modem; change --pty-symlink to a path
 # in /run (and set modemtty to match) if you want to run it as the pi user instead.
-# Edit the options to match your radio (see: build/bridge --help).
+# Edit the options to match your radio (see: build/sx1255_bridge --help).
 [Unit]
 Description=SX1255 OpenMT Bridge
 After=network.target sound.target
