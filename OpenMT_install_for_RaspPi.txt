@@ -2,7 +2,9 @@
 ======================================================================
 # NOTE:
 # Modem types supported: MMDVM, MMDVM_HS, OPENMT, OPENMT_HS and the OpenMT SX1255
-# radio (through the sx1255-openmt-bridge program). See README.md.
+# radio. Modem_Host does not talk to a modem itself: a small BRIDGE program for your modem
+# family does, and Modem_Host talks to the bridge through a virtual serial port. You must
+# install and run exactly one bridge (see "Modem bridges" below and docs/BRIDGES.md).
 # If running M17 service on an MMDVM modem you will need the firmware modified for M17.
 # Software tested on Raspberry Pi 2 model B and Pi 3 model B.
 # The service files and the examples below assume the user "pi" and the OpenMT
@@ -19,7 +21,8 @@ sudo raspi-config
 
 # Edit /boot/firmware/cmdline.txt and add dwc_otg.lpm_enable=0, elevator=deadline and noswap.
 # Edit /boot/firmware/config.txt and add force_turbo=1 dtoverlay=miniuart-bt to [all] section.
-# If you are using SX1255 Shield you may need the audo overlay in the modem/bridge directory.
+# If you are using SX1255 Shield you may need the audio overlay in the
+# modem/sx1255-openmt-bridge/RaspberryPi_I2S_Slave directory (see its README.md).
 
 sudo apt install git
 sudo apt install nginx
@@ -167,7 +170,7 @@ server {
                 # With php-fpm (or other unix sockets):
                 fastcgi_pass unix:/run/php/php8.4-fpm.sock;
                 # With php-cgi (or other tcp sockets):
-             #   fastcgi_pass 127.0.0.1:9000;
+                #   fastcgi_pass 127.0.0.1:9000;
         }
 
         # deny access to .htaccess files, if Apache's document root
@@ -200,24 +203,54 @@ cd build
 cmake ..
 make
 
-##########################################################################
+########################################################################################################
 # The programs, and the directory each one is built in:
-#   modem/                         Modem_Host                (every modem needs it)
-#   modem/sx1255-openmt-bridge/    bridge                    (only for the SX1255 radio)
-#   protocols/DMR/                 dmr_host        protocols/DMR/gateway/     dmr_gateway
-#   protocols/DSTAR/               dstar_host      protocols/DSTAR/gateway/   dstar_gateway
-#   protocols/P25/                 p25_host        protocols/P25/gateway/     p25_gateway
-#   protocols/m17/                 m17_host        protocols/m17/gateway/     m17_gateway
-#   protocols/NXDN/                nxdn_host       protocols/NXDN/gateway/    nxdn_gateway
-#   protocols/YSF/                 ysf_host        protocols/YSF/gateway/     ysf_gateway
-#   protocols/FM/                  fm_host         protocols/FM/gateway/      fm_gateway
-#   tools/service_manager/         service_manager          (dashboard service control, see below)
-# Build only the ones you need.
+#   modem/                         Modem_Host           (every modem needs it)
+#   modem/mmdvm-bridge/            mmdvm_bridge         (MMDVM and MMDVM_HS boards)
+#   modem/openmths-bridge/         openmths_bridge      (OPENMT_HS firmware, ADF7021 hotspot boards)
+#   modem/openmt-bridge/           openmt_bridge        (OPENMT firmware, sample stream modem)
+#   modem/sx1255-openmt-bridge/    sx1255_bridge        (OpenMT SX1255 radio on the Pi)
+#   protocols/DMR/                 dmr_host             protocols/DMR/gateway/     dmr_gateway
+#   protocols/DSTAR/               dstar_host           protocols/DSTAR/gateway/   dstar_gateway
+#   protocols/P25/                 p25_host             protocols/P25/gateway/     p25_gateway
+#   protocols/m17/                 m17_host             protocols/m17/gateway/     m17_gateway
+#   protocols/NXDN/                nxdn_host            protocols/NXDN/gateway/    nxdn_gateway
+#   protocols/YSF/                 ysf_host             protocols/YSF/gateway/     ysf_gateway
+#   protocols/FM/                  fm_host              protocols/FM/gateway/      fm_gateway
+#   tools/service_manager/         service_manager      (dashboard service control, see below)
+# Build Modem_Host, ONE bridge (the one for your modem) and only the other programs you need.
 
-# Then cd to OpenMT/modem and start modem host using
+######## Modem bridges (required: install ONE, for your modem) ##########
+# Which bridge:
+#   mmdvm_bridge     MMDVM or MMDVM_HS board (set "board" to hotspot or full in the Modem tab)
+#   openmths_bridge  ADF7021 hotspot board with the OPENMT_HS firmware (see modem/OPENMT_HS/README.md
+#                    for building and flashing and the settings that must match: the TCXO frequency
+#                    and the serial speed)
+#   openmt_bridge    OPENMT modem that streams samples over a serial port
+#   sx1255_bridge    OpenMT SX1255 radio on the Pi (needs libasound2-dev, see above)
+# Do not run two bridges for the same modem name. Each bridge directory has an INSTALL_SERVICE.txt
+# with the exact steps; the pattern is the same for all of them. Example with the OpenMT bridge:
+
+cd OpenMT/modem/openmt-bridge
+mkdir -p build
+cd build
+cmake ..
+make
+
+# The bridge opens the real serial port of the modem. It creates the virtual port that Modem_Host
+# opens (a link such as /dev/openmt0) and keeps its settings in the database, creating the ones that
+# are missing with defaults. It runs as root because it creates the link in /dev. Start it first:
+
+sudo ./openmt_bridge -l /dev/openmt0
+# Options: -n <modem name> (default modem1)  -l <link of the virtual port>  -h help.
+# (sx1255_bridge uses long options, see build/sx1255_bridge --help.)
+
+# In a second terminal start the modem host.
+# Modem_Host waits up to a minute for the bridge to say what kind of modem it serves, then opens the
+# bridge's virtual port. It no longer needs the real serial port (/dev/ttyAMA0), the bridge does.
 
 cd OpenMT/modem/build
-sudo ./Modem_Host   # NOTE: sudo needed for access to /dev/ttyAMA0
+sudo ./Modem_Host
 
 # If setup properly the host should report no errors.
 # You can optionally add -x at startup to display more debug info.
@@ -229,31 +262,37 @@ ctrl+c to exit host
 
 sudo ./Modem_Host -d
 
-The initial run of the host will populate the database with default configuration.
+# The bridge is best run as a service (see "Starting everything when the Pi starts" below), so that
+# it always starts before the modem host.
+
+# The settings:
+#   Modem tab "port" and "baud" are the REAL modem port and speed and belong to the bridge. Defaults:
+#   OpenMT ttyAMA0 at 921600, OpenMT_HS ttyAMA0 at 460800.
+#   There is no device type list in the dashboard: the bridge you install decides what the modem is.
+#   Saving the Modem tab sends the new settings to the bridge, which sends them to the modem.
+#   The SX1255 bridge keeps its radio settings (frequencies, gains, PLL, inversion) in the same
+#   database; command line options only give the defaults for settings that do not exist yet.
+# After a bridge is restarted, restart the modem host as well (it opens the bridge's virtual port
+# when it starts). The service files do this for you.
+
+The initial run of the bridge and host will populate the database with default configuration.
 # Every program takes  -m <modem number 1-10>  (default 1) so that several modems can run
-# on one Pi, -d (daemon), -x (debug output) and -v (version).
+# on one Pi, -d (daemon), -x (debug output) and -v (version). (Bridges take -n <modem name>,
+# for example -n modem2, instead of -m.)
 # Every host and gateway also takes  -a <address>  to say where the program it talks to runs. The
 # default is 127.0.0.1 (this machine). A dotted address or a host name will do:
 #     p25_host -a 192.168.1.50          connect to a Modem_Host on another machine
 #     p25_gateway -a radio.local        connect to the P25 host on another machine
 # Hosts connect to Modem_Host, gateways connect to their own host. Modem_Host and the hosts already
 # listen on all addresses; open the ports in a firewall only on a network you trust, because the
-# links between the programs are not encrypted or authenticated.
-
-# For an ADF7021 hotspot board (MMDVM_HS compatible) running the OPENMT_HS firmware, choose the device
-# type OpenMT_HS (openmths) in the dashboard and set the modem's serial port. The firmware is in
-# modem/OPENMT_HS, see its README.md for building, flashing and the settings that must match
-# (the TCXO frequency and the serial speed).
-
-# Only for the OpenMT SX1255 radio: the bridge program talks to the radio and gives the modem host
-# a serial port (a PTY). See modem/sx1255-openmt-bridge/INSTALL_SERVICE.txt to run it as a service,
-# and set the modem host's serial port (modemtty) to /dev/sx1255modem.
+# links between the programs are not encrypted or authenticated. A bridge and Modem_Host must run
+# on the same machine (the virtual port is local).
 
 # Point a browser to the RaspPI address and confirm Dashboard is accessable.
 # Select Settings and a login box should appear. User name = admin, password = admin.
 # Update info in General and Modem tabs to match your setup.
 # Ignore modem config error, if encountered, for now.
-# Restart Modem_Host to use update configuration.
+# Restart the bridge and Modem_Host to use the updated configuration.
 # You will need to do this for each protocol service after running for fist time.
 
 # Now to start M17 mode cd back to OpenMT directory then to protocols/m17 sub-directory.
@@ -287,12 +326,20 @@ cd ../gateway/build
 ######## Starting everything when the Pi starts, and the Services tab ##########
 # Each program has a systemd service file next to it (modem/modem-host.service,
 # protocols/P25/p25-host.service, protocols/P25/gateway/p25-gateway.service and so on).
-# Install the ones you use. Example for the modem host, the P25 host and its gateway:
+# Install the ones you use. Example for the OpenMT bridge, the modem host, the P25 host and its gateway:
 
+sudo cp modem/openmt-bridge/openmt-bridge.service /etc/systemd/system/
+sudo mkdir -p /etc/systemd/system/modem-host.service.d
+sudo cp modem/openmt-bridge/modem-host.service.d/openmt.conf /etc/systemd/system/modem-host.service.d/
 sudo cp modem/modem-host.service /etc/systemd/system/
 sudo cp protocols/P25/p25-host.service /etc/systemd/system/
 sudo cp protocols/P25/gateway/p25-gateway.service /etc/systemd/system/
 
+# Each bridge has its own service file and a drop-in for modem-host.service in its directory
+# (mmdvm-bridge.service + mmdvm.conf, openmths-bridge.service + openmths.conf,
+# openmt-bridge.service + openmt.conf, sx1255-bridge.service + sx1255.conf). The drop-in makes the modem
+# host start after the bridge, and starting the modem host starts the bridge. Install only the drop-in
+# of the bridge you use. Bridge services run as root (they create the link in /dev).
 # Edit the paths and the User= line in each file if OpenMT is not in /home/pi/OpenMT.
 # The user must be allowed to use the serial port (sudo usermod -aG dialout pi) or the modem host
 # service can run as root. A gateway needs its host and a host needs the modem host: the files say
@@ -303,7 +350,7 @@ sudo cp protocols/P25/gateway/p25-gateway.service /etc/systemd/system/
 # sudo cp again and sudo systemctl daemon-reload.
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now modem-host p25-host p25-gateway
+sudo systemctl enable --now openmt-bridge modem-host p25-host p25-gateway
 
 # The dashboard (Settings -> Services) lists these services, starts, stops and restarts them,
 # chooses which of them start at boot, and has Restart and Shut down buttons for the Pi.
@@ -317,7 +364,8 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now openmt-service-manager
 
 # See tools/service_manager/README.txt. The Services tab warns when this program is not running.
-# The list of services is in the database (db/services.sql). To show another one add a row to
+# The list of services is in the database (db/services.sql, which also lists the four bridges).
+# To show another one add a row to
 # modem_host.services; a service that is not installed is shown as "Not installed".
 
 # Updating the reflector lists and the DMR/NXDN IDs from the dashboard
@@ -328,7 +376,8 @@ sudo systemctl enable --now openmt-service-manager
 # If the dashboard reports that it cannot start the update, check that "php -v" works for the
 # web server user and that exec() is not disabled in php.ini.
 
-# Calibrating the RX frequency of an OPENMT_HS board (optional)
+# Calibrating the RX frequency of an OPENMT_HS board (optional; the Calibration tab only appears
+# when the bridge in use supports it, which is the OpenMT_HS bridge)
 # Build the tool:   cd tools/calibrate && mkdir -p build && cd build && cmake .. && make
 # Set the modem Mode to Simplex first (a duplex hotspot repeats what it hears and cannot be measured).
 # Key a reference transmitter on the mode's RX frequency (-50 to -100 dBm) before the measurement and keep
@@ -336,4 +385,3 @@ sudo systemctl enable --now openmt-service-manager
 #   ./openmt_cal auto DMR
 # or use the Calibration tab in the dashboard settings. Offsets are saved per modem and
 # mode in the database and are applied the next time the mode connects.
-
