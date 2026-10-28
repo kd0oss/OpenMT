@@ -1,0 +1,41 @@
+/* Preprocessed by the Makefile: RAM_LEN_K (total RAM in bytes) */
+ENTRY(Reset_Handler)
+
+MEMORY
+{
+    FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 4K
+    RAM  (rwx) : ORIGIN = 0x20000000, LENGTH = RAM_LEN_K - 16
+}
+
+/* the last 16 bytes of RAM hold the "start the loader" flag */
+_estack = ORIGIN(RAM) + LENGTH(RAM);
+
+SECTIONS
+{
+    .text :
+    {
+        KEEP(*(.isr_vector))
+        *(.text .text.*)
+        *(.rodata .rodata.*)
+        . = ALIGN(4);
+    } > FLASH
+
+    .bss (NOLOAD) :
+    {
+        . = ALIGN(4);
+        _sbss = .;
+        *(.bss .bss.*)
+        *(COMMON)
+        . = ALIGN(4);
+        _ebss = .;
+    } > RAM
+
+    .data : { *(.data .data.*) } > RAM AT > FLASH
+
+    /DISCARD/ :
+    {
+        *(.ARM.exidx*)
+    }
+}
+
+ASSERT(SIZEOF(.data) == 0, "the loader must not have initialised variables")
