@@ -1,0 +1,22 @@
+# /etc/systemd/system/mmdvm-bridge.service
+# Runs the MMDVM / MMDVM_HS bridge. It opens the real modem port (the "port" and "baud"
+# settings in the dashboard) and makes the virtual port the modem host opens.
+# Runs as root because it creates the symlink /dev/mmdvm0.
+[Unit]
+Description=MMDVM Modem Bridge
+After=network.target mariadb.service
+Wants=mariadb.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/OpenMT/modem/mmdvm-bridge
+ExecStart=/home/pi/OpenMT/modem/mmdvm-bridge/build/mmdvm_bridge -l /dev/mmdvm0
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

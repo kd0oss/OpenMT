@@ -1,0 +1,24 @@
+OpenMT bridge as a service (stream type SAMPLE)
+
+The bridge talks to the OpenMT sample-stream modem on the real serial port. It sends the
+modem its configuration (duplex, invert flags, RX level) and asks for the firmware version;
+the modem host talks to the bridge through a virtual port and knows nothing about that.
+
+  cd modem/openmt-bridge && mkdir -p build && cd build && cmake .. && make
+  sudo cp ../openmt-bridge.service /etc/systemd/system/        (edit paths first)
+  sudo mkdir -p /etc/systemd/system/modem-host.service.d
+  sudo cp ../modem-host.service.d/openmt.conf /etc/systemd/system/modem-host.service.d/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now openmt-bridge
+  sudo systemctl restart modem-host
+  mysql -u root -p < db/services.sql          (adds the bridge to the dashboard Services tab)
+
+Do not run it together with another bridge on the same modem name.
+
+In the dashboard "port" and "baud" are now the real modem port. The bridge creates any
+missing setting (port ttyAMA0, baud 921600, mode, rxInvert, txInvert, pttInvert, rxLevel) at
+start, and sends the configuration again when the modem host sees a change. It publishes
+streamType (SAMPLE) and bridgePort (openmt0, the link /dev/openmt0); -l changes the link and
+-n the modem name (default modem1).
+
+Test without hardware: python3 modem/openmt-bridge/test/ob_test.py

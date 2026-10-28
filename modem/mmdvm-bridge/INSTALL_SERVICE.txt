@@ -1,0 +1,25 @@
+MMDVM bridge as a service (stream type FRAME)
+
+The bridge talks to the MMDVM or MMDVM_HS board on the real serial port. The modem host
+talks to the bridge through a virtual port, so the host knows nothing about the board.
+
+  cd modem/mmdvm-bridge && mkdir -p build && cd build && cmake .. && make
+  sudo cp ../mmdvm-bridge.service /etc/systemd/system/        (edit paths first)
+  sudo mkdir -p /etc/systemd/system/modem-host.service.d
+  sudo cp ../modem-host.service.d/mmdvm.conf /etc/systemd/system/modem-host.service.d/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now mmdvm-bridge
+  sudo systemctl restart modem-host
+  mysql -u root -p < db/services.sql          (adds the bridge to the dashboard Services tab)
+
+In the dashboard "port" and "baud" are now the real modem port, and "board" says hotspot
+or full. (An older install that has "modem" = mmdvmhs or mmdvm gets the matching "board"
+the first time the bridge runs.) The bridge creates any missing setting with its default
+at start, and reads them again when the modem host sees a change.
+
+The bridge writes two settings of its own so the modem host can find it: streamType
+(FRAME) and bridgePort (mmdvm0, the link /dev/mmdvm0). Use -l to change the link name and
+-n for a modem name other than modem1.
+
+Tests: python3 modem/mmdvm-bridge/test/mb_test.py (compares the frames with the ones the
+modem host built before the bridge existed).

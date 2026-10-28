@@ -1,0 +1,27 @@
+OpenMT_HS bridge as a service (stream type BIT)
+
+The bridge talks to the OpenMT_HS board on the real serial port. It owns everything that is
+specific to the board: the SET_CONFIG frame, the mode registers (ADD_MODE blocks), the RX
+offsets, and the calibration / probe measurements. The modem host talks to the bridge
+through a virtual port and only sees bit stream frames.
+
+  cd modem/openmths-bridge && mkdir -p build && cd build && cmake .. && make
+  sudo cp ../openmths-bridge.service /etc/systemd/system/     (edit paths first)
+  sudo mkdir -p /etc/systemd/system/modem-host.service.d
+  sudo cp ../modem-host.service.d/openmths.conf /etc/systemd/system/modem-host.service.d/
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now openmths-bridge
+  sudo systemctl restart modem-host
+  mysql -u root -p < db/services.sql          (adds the bridge to the dashboard Services tab)
+
+Do not run it together with another bridge on the same modem name.
+
+In the dashboard "port" and "baud" are now the real modem port. The bridge creates any
+missing setting (port ttyAMA0, baud 460800, mode simplex) at start. It publishes streamType
+(BIT) and bridgePort (openmths0, the link /dev/openmths0); use -l to change the link and -n
+for a modem name other than modem1.
+
+Dashboard commands reloadOffsets, "calibrate ..." and "probe ..." are forwarded by the
+modem host to the bridge, which runs the measurement and answers in the same way as before.
+
+Test without hardware: BRIDGE=1 modem/OPENMT_HS/test/run_sim.sh

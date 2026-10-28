@@ -1,0 +1,22 @@
+# /etc/systemd/system/openmt-bridge.service
+# Runs the OpenMT bridge. It opens the real modem port (the "port" and "baud"
+# settings in the dashboard) and makes the virtual port the modem host opens.
+# Runs as root because it creates the symlink /dev/openmt0.
+[Unit]
+Description=OpenMT Modem Bridge
+After=network.target mariadb.service
+Wants=mariadb.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/OpenMT/modem/openmt-bridge
+ExecStart=/home/pi/OpenMT/modem/openmt-bridge/build/openmt_bridge -l /dev/openmt0
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
