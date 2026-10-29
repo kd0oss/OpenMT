@@ -1003,6 +1003,22 @@ span.psw
   z-index: 3;
 }
 
+.modemSel
+{
+  position: absolute;
+  top: 28px;
+  left: 235px;
+  font-size: 14px;
+  color: #999999;
+  z-index: 3;
+}
+
+.modemSel select
+{
+  margin-left: 4px;
+  font-size: 14px;
+}
+
 .lclock
 {
   position: absolute;
@@ -1197,10 +1213,10 @@ function openPage(tabln,tab,pageName,elmnt,color)
 
   // 2. Create a URLSearchParams object
   const urlParams = new URLSearchParams(queryString);
-  if (urlParams.has('modemId'))
+  if (urlParams.has('modemId') && /^[0-9]{1,2}$/.test(urlParams.get('modemId')) && Number(urlParams.get('modemId')) >= 1)
   {
     modemId = Number(urlParams.get('modemId'));
-    modemName = "modem"+urlParams.get('modemId');
+    modemName = "modem"+modemId;
   }
 
   if (pageName == "settingstab" && !authenticated)
@@ -1252,6 +1268,54 @@ async function fetchWithTimeout(url, ms)
   }
 }
 
+/* Fill the modem selector from the database; modem 1 is the default. */
+async function loadModemList()
+{
+  var sel = document.getElementById('modemSelect');
+  var nums = [1];
+
+  try
+  {
+    var resp = await fetchWithTimeout("data_query.php?command=getModems", 5000);
+    if (resp.ok)
+    {
+      var info = await resp.json();
+      if (info.modems && info.modems.length > 0)
+        nums = info.modems;
+    }
+  }
+  catch (err)
+  {
+    console.warn("loadModemList failed:", err.message);
+  }
+
+  if (nums.indexOf(modemId) < 0)
+    nums.push(modemId);
+  nums.sort(function(a, b) { return a - b; });
+
+  sel.innerHTML = "";
+  for (var i = 0; i < nums.length; i++)
+  {
+    var opt = document.createElement('option');
+    opt.value = String(nums[i]);
+    opt.textContent = String(nums[i]);
+    sel.appendChild(opt);
+  }
+  sel.value = String(modemId);
+}
+
+/* Monitor another modem: reload the page for it so every tab and refresh loop follows. */
+function selectModem(value)
+{
+  var url = new URL(window.location.href);
+
+  if (value == "1")
+    url.searchParams.delete('modemId');
+  else
+    url.searchParams.set('modemId', value);
+  window.location.href = url.toString();
+}
+
 /* Show the computer model and operating system in the bottom bar. */
 async function showSystemInfo()
 {
@@ -1278,6 +1342,7 @@ function initDashBd()
 {
   getConfig();
   showSystemInfo();
+  loadModemList();
   setTimeout(fetchStatus, 2000);
   setTimeout(fetchDashConfig, 3000);
   setTimeout(buildHistoryTable, 3000);
@@ -3615,6 +3680,11 @@ async function calAuto(mode)
 
 <span class='lclock' id='lclock'></span>
 <span class='clock' id='clock'></span>
+
+<span class='modemSel'>
+<label for='modemSelect'>Modem</label>
+<select id='modemSelect' onchange='selectModem(this.value)'><option value='1'>1</option></select>
+</span>
 
 <!-- OpenMT Logo -->
 <div style="position:absolute; top:0; right:12px; height:70px; display:flex; align-items:center;">

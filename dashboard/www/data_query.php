@@ -924,6 +924,23 @@ if ($command == "serviceAction")
     }
 }
 else
+if ($command == "getModems")
+{
+    /* The modem numbers that have settings in the database (modem1, modem2, ...), for the selector. */
+    global $mysql;
+    $nums = array();
+    $rows = db_select($mysql, "SELECT DISTINCT modem_name FROM modem_host.config", "", array());
+    foreach ($rows as $row)
+    {
+        if (preg_match('/^modem([0-9]{1,2})$/', $row[0], $m))
+            $nums[] = (int)$m[1];
+    }
+    if (!in_array(1, $nums)) $nums[] = 1;
+    sort($nums);
+    header('Content-Type: application/json');
+    echo json_encode(array('modems' => array_values(array_unique($nums))));
+}
+else
 if ($command == "getSystemInfo")
 {
     /* The computer model and the operating system, shown in the bottom bar of the dashboard. */
