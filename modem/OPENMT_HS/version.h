@@ -71,7 +71,7 @@
 
 #define FW_VERSION      "v" VER_MAJOR "." VER_MINOR "." VER_REV " " VERSION_DATE
 
-#define DESCRIPTION     BOARD_INFO "-" FW_VERSION " " TCXO_FREQ "MHz " RF_DUAL RF_CHIP
+#define DESCRIPTION     "OPENMTHS " BOARD_INFO "-" FW_VERSION " " TCXO_FREQ "MHz " RF_DUAL RF_CHIP
 
 #if defined(MADEBYMAKEFILE)
 #include "GitVersion.h"
@@ -86,4 +86,3 @@ const char HARDWARE[] = concat(DESCRIPTION, __TIME__, __DATE__);
 #endif
 
 #endif
-

@@ -233,6 +233,8 @@ m_scanStart(0U),
 m_scanStartMs(0U),
 m_rssiChecked(false),
 m_rssiLast(0U),
+m_scanLedMs(0U),
+m_scanLedPhase(false),
 m_reload(false),
 m_txWaiting(false),
 m_txWaitStart(0U),
@@ -531,6 +533,7 @@ void COpenMT::process()
     processRX();
     processTX();
     processScan();
+    updateScanLEDs();
     processStatus();
 }
 
@@ -1122,11 +1125,39 @@ void COpenMT::flushRX()
     m_rxBits = 0U;
 }
 
-// The modem has no idea which protocol a connection carries, so the mode
-// LEDs follow the modulation: GMSK -> D-Star, 2FSK -> POCSAG, 3/4FSK -> DMR.
+// True while the modem is only scanning: two or more modes, none streaming or locked by the host.
+bool COpenMT::isScanning() const
+{
+    return m_current >= 0 && m_modeCount >= 2U && !m_streaming && !m_hostLocked;
+}
+
+// Scan indicator: the D-Star and DMR LEDs blink alternately, whichever mode is being listened to.
+void COpenMT::updateScanLEDs()
+{
+    if (!isScanning())
+        return;
+
+    uint32_t now = io.getMillis();
+    if ((now - m_scanLedMs) < OPENMT_SCAN_LED_MS)
+        return;
+
+    m_scanLedMs    = now;
+    m_scanLedPhase = !m_scanLedPhase;
+    io.setMode(m_scanLedPhase ? STATE_DSTAR : STATE_DMR);
+}
+
+// The modem has no idea which protocol a connection carries. While scanning, two LEDs blink
+// alternately (updateScanLEDs). Otherwise the mode LEDs follow the modulation of the mode in
+// use: GMSK -> D-Star, 2FSK -> POCSAG, 3/4FSK -> DMR.
 void COpenMT::setModeLEDs()
 {
     MMDVM_STATE state = STATE_IDLE;
+
+    if (isScanning())
+    {
+        io.setMode(m_scanLedPhase ? STATE_DSTAR : STATE_DMR);
+        return;
+    }
 
     if (m_current >= 0)
     {

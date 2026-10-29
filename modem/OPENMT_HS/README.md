@@ -97,8 +97,9 @@ You need the GNU Arm Embedded toolchain (`arm-none-eabi-gcc`).
     make nobl       # USB build without the bootloader offset
     make clean
 
-The result is in `bin/`: `mmdvm_f1.hex` and `.bin` for `hs`, `mmdvm_f1bl.*` for `bl`
-and `mmdvm_f1nobl.*` for `nobl` (the file names are those of MMDVM_HS).  `GitVersion.h`
+The result is in `bin/`: `openmths_f1.hex` and `.bin` for `hs`, `openmths_f1bl.*` for `bl`
+and `openmths_f1nobl.*` for `nobl` (MMDVM_HS called these `mmdvm_f1*`).  The firmware reports
+itself as `OPENMTHS <board>-<version> ...` in the version reply.  `GitVersion.h`
 is made from git by the Makefile; the one in the tree holds `0000000`.  The Makefile
 also still has the F4 and F7 targets of MMDVM_HS; their libraries are not part of
 this tree, so only the three STM32F103 targets above can be built.

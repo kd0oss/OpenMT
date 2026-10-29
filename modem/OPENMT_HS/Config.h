@@ -123,6 +123,8 @@
 // #define OPENMT_RSSI_SCAN           1
 // #define OPENMT_RSSI_THRESHOLD      115U
 // #define OPENMT_RSSI_SETTLE_MS      2U
+// Scan indicator: the D-Star and DMR LEDs blink alternately this many ms each while scanning:
+// #define OPENMT_SCAN_LED_MS         250U
 // RX offset measurement (MEAS command): listen time per reading (ms). The step and
 // AFC range are used by the openmt_cal raw/sweep diagnostics only:
 // #define OPENMT_MEAS_SETTLE_MS      60U

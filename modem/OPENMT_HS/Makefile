@@ -34,21 +34,21 @@ OBJDIR_F4=obj_f4
 OBJDIR_F7=obj_f7
 
 # Output files
-BINELF_F1=mmdvm_f1.elf
-BINHEX_F1=mmdvm_f1.hex
-BINBIN_F1=mmdvm_f1.bin
-BINELF_F1BL=mmdvm_f1bl.elf
-BINHEX_F1BL=mmdvm_f1bl.hex
-BINBIN_F1BL=mmdvm_f1bl.bin
-BINELF_F1NOBL=mmdvm_f1nobl.elf
-BINHEX_F1NOBL=mmdvm_f1nobl.hex
-BINBIN_F1NOBL=mmdvm_f1nobl.bin
-BINELF_F4=mmdvm_f4.elf
-BINHEX_F4=mmdvm_f4.hex
-BINBIN_F4=mmdvm_f4.bin
-BINELF_F7=mmdvm_f7.elf
-BINHEX_F7=mmdvm_f7.hex
-BINBIN_F7=mmdvm_f7.bin
+BINELF_F1=openmths_f1.elf
+BINHEX_F1=openmths_f1.hex
+BINBIN_F1=openmths_f1.bin
+BINELF_F1BL=openmths_f1bl.elf
+BINHEX_F1BL=openmths_f1bl.hex
+BINBIN_F1BL=openmths_f1bl.bin
+BINELF_F1NOBL=openmths_f1nobl.elf
+BINHEX_F1NOBL=openmths_f1nobl.hex
+BINBIN_F1NOBL=openmths_f1nobl.bin
+BINELF_F4=openmths_f4.elf
+BINHEX_F4=openmths_f4.hex
+BINBIN_F4=openmths_f4.bin
+BINELF_F7=openmths_f7.elf
+BINHEX_F7=openmths_f7.hex
+BINBIN_F7=openmths_f7.bin
 
 # Header directories
 INC_F1= . $(F1_LIB_PATH)/CMSIS/ $(F1_LIB_PATH)/Device/ $(F1_LIB_PATH)/STM32F10x_StdPeriph_Driver/inc/ $(F1_LIB_PATH)/usb/inc/
@@ -106,7 +106,7 @@ ifeq ($(OS),Windows_NT)
 	DFU_UTIL=./$(F1_LIB_PATH)/utils/win/dfu-util.exe
 	STM32FLASH=./$(F1_LIB_PATH)/utils/win/stm32flash.exe
 else
-	CLEANCMD=rm -f $(OBJDIR_F1)/*.d $(OBJDIR_F4)/*.d $(OBJDIR_F7)/*.d $(OBJ_F1BL) $(OBJ_F4) $(OBJ_F7) $(BINDIR)/*.hex $(BINDIR)/mmdvm_f1.bin $(BINDIR)/mmdvm_f1bl.bin $(BINDIR)/mmdvm_f1nobl.bin $(BINDIR)/*.elf
+	CLEANCMD=rm -f $(OBJDIR_F1)/*.d $(OBJDIR_F4)/*.d $(OBJDIR_F7)/*.d $(OBJ_F1BL) $(OBJ_F4) $(OBJ_F7) $(BINDIR)/*.hex $(BINDIR)/openmths_f1.bin $(BINDIR)/openmths_f1bl.bin $(BINDIR)/openmths_f1nobl.bin $(BINDIR)/*.elf
 	MDDIRS=mkdir $@
 
 	ifeq ($(shell uname -s),Linux)

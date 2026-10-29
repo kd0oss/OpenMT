@@ -218,6 +218,14 @@ const uint16_t OPENMT_TX_BUFFER_SLACK = 8U;
 #define OPENMT_RSSI_SETTLE_MS       2U
 #endif
 
+// While scanning (two or more modes registered, nothing streaming or locked) the
+// D-Star and DMR LEDs blink alternately, this many ms each, whichever mode is
+// being listened to. A mode LED shows the modulation of the mode in use only
+// while a mode is streaming or locked, or when a single mode is registered.
+#if !defined(OPENMT_SCAN_LED_MS)
+#define OPENMT_SCAN_LED_MS          250U
+#endif
+
 // RX frequency measurement (MEAS command, used by the calibration program).
 // The mode is loaded with the ADF7021 internal AFC switched off; the AFC readback
 // is then the intermediate frequency (100 kHz without error), read twice,
@@ -371,6 +379,8 @@ private:
     uint32_t   m_scanStartMs;
     bool       m_rssiChecked;      // the carrier check of this dwell is done
     uint32_t   m_rssiLast;         // time of the last RSSI debug event
+    uint32_t   m_scanLedMs;        // time of the last scan LED change
+    bool       m_scanLedPhase;     // false: DMR LED, true: D-Star LED
     bool       m_reload;           // current mode changed during TX
 
     // TX
@@ -404,6 +414,8 @@ private:
     void    putRXBit(uint8_t bit);
     void    flushRX();
     void    setModeLEDs();
+    bool    isScanning() const;
+    void    updateScanLEDs();
 };
 
 #endif
