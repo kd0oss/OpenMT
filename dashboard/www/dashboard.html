@@ -814,6 +814,18 @@ span.psw
   z-index: 3;
 }
 
+.sysInfo
+{
+  position: absolute;
+  top: 0;
+  max-width: 35%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  color: #c0c0c0;
+}
+
 .smsText
 {
   position: relative;
@@ -1240,10 +1252,32 @@ async function fetchWithTimeout(url, ms)
   }
 }
 
+/* Show the computer model and operating system in the bottom bar. */
+async function showSystemInfo()
+{
+  try
+  {
+    var resp = await fetchWithTimeout("data_query.php?command=getSystemInfo", 5000);
+    if (!resp.ok)
+      return;
+    var info = await resp.json();
+    var os = [];
+    if (info.os) os.push(info.os);
+    if (info.kernel) os.push("kernel " + info.kernel);
+    document.getElementById('sysModel').textContent = info.model || "";
+    document.getElementById('sysOs').textContent = os.join("  |  ");
+  }
+  catch (err)
+  {
+    console.warn("showSystemInfo failed:", err.message);
+  }
+}
+
 /* Load configuration and start refresh processes */
 function initDashBd()
 {
   getConfig();
+  showSystemInfo();
   setTimeout(fetchStatus, 2000);
   setTimeout(fetchDashConfig, 3000);
   setTimeout(buildHistoryTable, 3000);
@@ -3848,6 +3882,8 @@ press Save first.</div>
 
 <div class='creator'>
 <span  id='creator'>Created by: Rick KD0OSS (c)2026</span>
+<span id='sysModel' class='sysInfo' style='left:8px;'></span>
+<span id='sysOs' class='sysInfo' style='right:8px;'></span>
 </div>
 
 <script type='text/javascript' charset='utf-8'>

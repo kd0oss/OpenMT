@@ -924,6 +924,28 @@ if ($command == "serviceAction")
     }
 }
 else
+if ($command == "getSystemInfo")
+{
+    /* The computer model and the operating system, shown in the bottom bar of the dashboard. */
+    $model = "";
+    $f = @file_get_contents('/proc/device-tree/model');
+    if ($f === false || trim($f, "\0 \n") == "")
+        $f = @file_get_contents('/sys/firmware/devicetree/base/model');
+    if ($f !== false)
+        $model = trim($f, "\0 \n");
+
+    $os = "";
+    $rel = @parse_ini_file('/etc/os-release');
+    if (is_array($rel) && isset($rel['PRETTY_NAME']))
+        $os = $rel['PRETTY_NAME'];
+    if ($os == "")
+        $os = php_uname('s');
+
+    header('Content-Type: application/json');
+    echo json_encode(array('model' => $model, 'os' => $os, 'kernel' => php_uname('r'), 'arch' => php_uname('m')),
+                     JSON_INVALID_UTF8_SUBSTITUTE);
+}
+else
 if ($command == "getSystemActions")
 {
     /* The power actions listed in the database; the dashboard builds its buttons from them. */
