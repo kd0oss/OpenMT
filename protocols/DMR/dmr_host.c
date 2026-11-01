@@ -4400,7 +4400,7 @@ void* startClient(void* arg)
             dmrRxBits(buffer + 8, respLen - 8);
             dmrSlotWatchdog();
         }
-        else if (memcmp(type, "DMD", 3) == 0)
+        else if (memcmp(type, "DMD", 3) == 0 || memcmp(type, "DML", 3) == 0)   /* DML: the modem lost the slot (no terminator) */
         {
             pthread_mutex_lock(&rxBufMutex);
             RingBuffer_addData(&rxBuffer, buffer, respLen);

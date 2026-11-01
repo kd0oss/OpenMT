@@ -3314,6 +3314,16 @@ bool rs241213_decode(uint8_t* data)
         return false;
     }
 
+    // the code is shortened: an error "found" beyond the 24 symbols of the code word is no error of it (the pattern
+    // has more errors than the code corrects), and would write outside HB
+    for (j = 0; j < count; j++)
+    {
+        if (locn[j] >= 24)
+        {
+            return false;
+        }
+    }
+
     // compute err+eras evaluator poly omega(x)
     //  = s(x)*lambda(x) (modulo x**nroots). in index form. Also find
     //  deg(omega).

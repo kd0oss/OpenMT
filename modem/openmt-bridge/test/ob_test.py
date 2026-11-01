@@ -83,10 +83,15 @@ d = read_n(master, 8)
 check(d == frame, 'frame with 0xFE inside is relayed unchanged: %s' % d.hex())
 check(drain(master) == b'', 'no config sent for it')
 
-# mode frames are for modems with modes: this one gets none of them
-for t in (0x30, 0x40, 0x50):
-    os.write(host, bytes([0x61, 4, t | 1, 0]))
-check(drain(master) == b'', 'SET_MODE, ADD_MODE and DEL_MODE are dropped')
+# ADD_MODE and DEL_MODE go to the modem as the old host sent them; SET_MODE was never sent to this modem type
+add = bytes([0x61, 4, 0x41, 0])
+dele = bytes([0x61, 4, 0x51, 0])
+os.write(host, bytes([0x61, 4, 0x31, 0]))
+os.write(host, add)
+os.write(host, dele)
+d = read_n(master, len(add) + len(dele))
+check(d == add + dele, 'ADD_MODE and DEL_MODE are passed on, SET_MODE is dropped: %s' % d.hex())
+check(drain(master) == b'', 'nothing else came')
 os.write(host, bytes([0xFE, 8, 5]) + b'probe')
 time.sleep(0.3)
 check('ack|modemHost|result|error' in open(out).read(), 'a passed-on dashboard command is answered')
@@ -96,17 +101,28 @@ os.write(master, bytes([0x61, 5, 0xE0, 1, 2]))
 d = read_n(host, 5)
 check(d == bytes([0x61, 5, 0xE0, 1, 2]), 'modem frame reaches the host')
 
-# TX timing reports go to the DMR connection only
+# TX timing reports: the modem sends them with connection number 0.  They go to the DMR connection only, marked
+# with its number (here 1; the M17 service is connection 2), and are dropped when there is no DMR connection.
 os.write(host, bytes([0xFE, 3 + 1 + 3, 4, 1]) + b'DMR')
 os.write(host, bytes([0xFE, 3 + 1 + 3, 4, 2]) + b'M17')
 time.sleep(0.2)
-tm_dmr = bytes([0x61, 0x0B, 0xB1]) + bytes(8)
-tm_m17 = bytes([0x61, 0x0B, 0xB2]) + bytes(8)
+tm_fw  = bytes([0x61, 0x0B, 0xB0]) + bytes(8)           # as the modem sends it
+tm_dmr = bytes([0x61, 0x0B, 0xB1]) + bytes(8)           # as the host gets it
 samp   = bytes([0x61, 5, 0x71, 7, 7])
-os.write(master, samp + tm_m17 + samp + tm_dmr + samp)
-d = read_n(host, 5 + 5 + 11 + 5)
-check(d == samp + samp + tm_dmr + samp, 'TX timing of a non-DMR connection is dropped, DMR kept, order kept: %s' % d.hex())
+os.write(master, samp + tm_fw + samp)
+d = read_n(host, 5 + 11 + 5)
+check(d == samp + tm_dmr + samp, 'TX timing is marked for the DMR connection, order kept: %s' % d.hex())
 check(drain(host) == b'', 'nothing else arrives')
+
+os.write(host, bytes([0xFE, 3, 6]))                     # HOST_UP: the connections are forgotten
+time.sleep(0.2)
+drain(master)
+os.write(host, bytes([0xFE, 3 + 1 + 3, 4, 2]) + b'M17')
+time.sleep(0.2)
+os.write(master, samp + tm_fw + samp)
+d = read_n(host, 5 + 5)
+check(d == samp + samp, 'TX timing is dropped when there is no DMR connection: %s' % d.hex())
+check(drain(host) == b'', 'nothing else arrives after that')
 
 # a control frame split in two writes
 os.write(host, bytes([0xFE, 3]))

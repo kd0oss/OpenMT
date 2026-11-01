@@ -446,11 +446,35 @@ bool saveLastCall(uint8_t pos, const char* modem_name, const char* mode, const c
     }
 
     sb_init(&query, 512);
-    sb_append(&query, "DELETE FROM modem_host.last_call WHERE pos = 2 AND isTx = false");
+
+    /* Row 2 of the dashboard's status box is for the second time slot of DMR only.  A call of another protocol removes
+       it for this modem whatever it holds (a transmission of slot 2 that was never closed would otherwise stay there
+       and show TX for ever); for DMR the old received row 2 goes as before. */
+    sb_append(&query, "DELETE FROM modem_host.last_call WHERE pos = 2 AND modem_name = '");
+    sbAppendEscaped(&query, mysql_conn, modem_name);
+    if (strncmp(mode, "DMR", 3) != 0)
+        sb_append(&query, "'");
+    else
+        sb_append(&query, "' AND isTx = false");
     mysql_query(mysql_conn, sb_cstr(&query));
 
+    /* a time slot has one row: the one it had at the other position (the slots swap rows when only one is active) goes */
+    if (strncmp(mode, "DMR", 3) == 0)
+    {
+        sb_clear(&query);
+        sb_append(&query, "DELETE FROM modem_host.last_call WHERE modem_name = '");
+        sbAppendEscaped(&query, mysql_conn, modem_name);
+        sb_append(&query, "' AND mode = '");
+        sbAppendEscaped(&query, mysql_conn, mode);
+        sb_append(&query, "' AND pos <> ");
+        sb_append(&query, pos == 1 ? "1" : "2");
+        mysql_query(mysql_conn, sb_cstr(&query));
+    }
+
     sb_clear(&query);
-    sb_append(&query, "DELETE FROM modem_host.last_call WHERE pos = ");
+    sb_append(&query, "DELETE FROM modem_host.last_call WHERE modem_name = '");
+    sbAppendEscaped(&query, mysql_conn, modem_name);
+    sb_append(&query, "' AND pos = ");
     if (pos == 1)
         sb_append(&query, "1");
     else

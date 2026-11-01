@@ -170,7 +170,7 @@ server {
                 # With php-fpm (or other unix sockets):
                 fastcgi_pass unix:/run/php/php8.4-fpm.sock;
                 # With php-cgi (or other tcp sockets):
-                #   fastcgi_pass 127.0.0.1:9000;
+             #   fastcgi_pass 127.0.0.1:9000;
         }
 
         # deny access to .htaccess files, if Apache's document root
@@ -203,21 +203,21 @@ cd build
 cmake ..
 make
 
-########################################################################################################
+##########################################################################
 # The programs, and the directory each one is built in:
-#   modem/                         Modem_Host           (every modem needs it)
-#   modem/mmdvm-bridge/            mmdvm_bridge         (MMDVM and MMDVM_HS boards)
-#   modem/openmths-bridge/         openmths_bridge      (OPENMT_HS firmware, ADF7021 hotspot boards)
-#   modem/openmt-bridge/           openmt_bridge        (OPENMT firmware, sample stream modem)
-#   modem/sx1255-openmt-bridge/    sx1255_bridge        (OpenMT SX1255 radio on the Pi)
-#   protocols/DMR/                 dmr_host             protocols/DMR/gateway/     dmr_gateway
-#   protocols/DSTAR/               dstar_host           protocols/DSTAR/gateway/   dstar_gateway
-#   protocols/P25/                 p25_host             protocols/P25/gateway/     p25_gateway
-#   protocols/m17/                 m17_host             protocols/m17/gateway/     m17_gateway
-#   protocols/NXDN/                nxdn_host            protocols/NXDN/gateway/    nxdn_gateway
-#   protocols/YSF/                 ysf_host             protocols/YSF/gateway/     ysf_gateway
-#   protocols/FM/                  fm_host              protocols/FM/gateway/      fm_gateway
-#   tools/service_manager/         service_manager      (dashboard service control, see below)
+#   modem/                         Modem_Host                (every modem needs it)
+#   modem/mmdvm-bridge/            mmdvm_bridge             (MMDVM and MMDVM_HS boards)
+#   modem/openmths-bridge/         openmths_bridge          (OPENMT_HS firmware, ADF7021 hotspot boards)
+#   modem/openmt-bridge/           openmt_bridge            (OPENMT firmware, sample stream modem)
+#   modem/sx1255-openmt-bridge/    sx1255_bridge            (OpenMT SX1255 radio on the Pi)
+#   protocols/DMR/                 dmr_host        protocols/DMR/gateway/     dmr_gateway
+#   protocols/DSTAR/               dstar_host      protocols/DSTAR/gateway/   dstar_gateway
+#   protocols/P25/                 p25_host        protocols/P25/gateway/     p25_gateway
+#   protocols/m17/                 m17_host        protocols/m17/gateway/     m17_gateway
+#   protocols/NXDN/                nxdn_host       protocols/NXDN/gateway/    nxdn_gateway
+#   protocols/YSF/                 ysf_host        protocols/YSF/gateway/     ysf_gateway
+#   protocols/FM/                  fm_host         protocols/FM/gateway/      fm_gateway
+#   tools/service_manager/         service_manager          (dashboard service control, see below)
 # Build Modem_Host, ONE bridge (the one for your modem) and only the other programs you need.
 
 ######## Modem bridges (required: install ONE, for your modem) ##########
@@ -385,3 +385,4 @@ sudo systemctl enable --now openmt-service-manager
 #   ./openmt_cal auto DMR
 # or use the Calibration tab in the dashboard settings. Offsets are saved per modem and
 # mode in the database and are applied the next time the mode connects.
+

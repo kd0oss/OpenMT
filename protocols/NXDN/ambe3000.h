@@ -46,18 +46,31 @@ typedef struct
     uint16_t rate[6];       /* PKT_RATEP words, used when rateIndex < 0 */
     int      rateIndex;     /* PKT_RATET index, or -1 to use the words */
     char     product[32];
+    unsigned int bits;      /* bits of a channel frame: 0 = AMBE_BITS (72); 88 for the P25 IMBE rate without FEC */
 } Ambe;
 
 /* The rate words for AMBE+2 2450 + 1150 bit/s (3600, FEC on, 72 bit channel frame): 0431 0754 2400 0000 0000 6F48 */
 void ambeDefaultRate(Ambe* a);
 
+/* Changes the rate of an open chip (PKT_RATEP with these six words) and the size of a channel frame.  The vocoder is
+   initialised afterwards.  Used for the P25 IMBE rate: 0558 086B 0000 0000 0000 0158 is IMBE, 4400 bit/s, no FEC (88 bit
+   frames, 11 bytes); ambeDefaultRate()'s words are the DMR / NXDN rate. */
+bool ambeSetRate(Ambe* a, const uint16_t words[6], unsigned int bits);
+
 /* Opens the port, resets the chip and selects the rate. 'baud' is 230400 or 460800 for most dongles. */
 bool ambeOpen(Ambe* a, const char* device, unsigned int baud);
 void ambeClose(Ambe* a);
 
-/* 160 samples in, 9 bytes out */
+/* 160 samples in, 9 bytes out (11 at the 88 bit rate: the block buffers are (bits + 7) / 8 bytes) */
 bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block);
 /* 9 bytes in, 160 samples out */
 bool ambeDecode(Ambe* a, const uint8_t* block, int16_t* pcm);
+
+/* The same in two halves, so several frames can be sent before the answers are read: the chip answers in order,
+   and a frame at a time costs a full round trip (about 24 ms) for each 20 ms of speech. */
+bool ambeEncodeSend(Ambe* a, const int16_t* pcm);
+bool ambeEncodeRecv(Ambe* a, uint8_t* block);
+bool ambeDecodeSend(Ambe* a, const uint8_t* block);
+bool ambeDecodeRecv(Ambe* a, int16_t* pcm);
 
 #endif

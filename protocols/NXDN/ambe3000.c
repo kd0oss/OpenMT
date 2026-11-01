@@ -78,6 +78,12 @@ static void dump(const char* dir, uint8_t type, const uint8_t* p, size_t len)
     fprintf(stderr, "\n");
 }
 
+/* Bits of a channel frame at the rate that is set */
+static unsigned int frameBits(const Ambe* a)
+{
+    return a->bits != 0U ? a->bits : AMBE_BITS;
+}
+
 /*
  * ambeDefaultRate()
  *
@@ -95,6 +101,7 @@ void ambeDefaultRate(Ambe* a)
 
     memcpy(a->rate, words, sizeof(words));
     a->rateIndex = -1;
+    a->bits = AMBE_BITS;
 }
 
 /*
@@ -532,6 +539,56 @@ bool ambeOpen(Ambe* a, const char* device, unsigned int baud)
 }
 
 /*
+ * ambeSetRate()
+ *
+ * Sets the rate of a chip that is open: the six rate control words are sent (PKT_RATEP) and the vocoder is started
+ * afresh.  The size of the channel frames follows.
+ *
+ * Parameters:
+ *   a     - The AMBE connection.
+ *   words - The six rate control words.
+ *   bits  - Bits of a channel frame at this rate (72, 88).
+ *
+ * Returns: true if the chip accepted the rate, false if it did not answer or refused.
+ */
+bool ambeSetRate(Ambe* a, const uint16_t words[6], unsigned int bits)
+{
+    uint8_t req[13];
+    uint8_t rx[PKT_MAX];
+    size_t  rxLen = 0U;
+
+    req[0] = FIELD_RATEP;
+    for (unsigned int i = 0U; i < 6U; i++)
+    {
+        req[1U + i * 2U] = (uint8_t)(words[i] >> 8);
+        req[2U + i * 2U] = (uint8_t)words[i];
+    }
+
+    if (!control(a, req, sizeof(req), rx, &rxLen, 1000))
+    {
+        fprintf(stderr, "AMBE: no answer to the rate setting\n");
+        return false;
+    }
+    if (rxLen >= 2U && rx[1] != 0x00U)
+    {
+        fprintf(stderr, "AMBE: the chip refused the rate setting (status 0x%02X)\n", rx[1]);
+        return false;
+    }
+
+    memcpy(a->rate, words, 6U * sizeof(uint16_t));
+    a->rateIndex = -1;
+    a->bits = bits;
+
+    /* the encoder and the decoder start afresh at the new rate */
+    {
+        uint8_t init[2] = { FIELD_INIT, 0x03U };
+
+        control(a, init, sizeof(init), rx, &rxLen, 2000);
+    }
+    return true;
+}
+
+/*
  * ambeClose()
  *
  * Closes the serial port of the chip.
@@ -563,11 +620,9 @@ void ambeClose(Ambe* a)
  * Returns: true if a block was returned, false on a timeout or an unexpected
  *   answer.
  */
-bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block)
+bool ambeEncodeSend(Ambe* a, const int16_t* pcm)
 {
     uint8_t tx[2U + AMBE_SAMPLES * 2U];
-    uint8_t rx[PKT_MAX];
-    size_t  rxLen;
 
     tx[0] = FIELD_SPEECHD;
     tx[1] = (uint8_t)AMBE_SAMPLES;
@@ -577,8 +632,13 @@ bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block)
         tx[3U + i * 2U] = (uint8_t)pcm[i];
     }
 
-    if (!sendPacket(a->fd, TYPE_SPEECH, tx, sizeof(tx)))
-        return false;
+    return sendPacket(a->fd, TYPE_SPEECH, tx, sizeof(tx));
+}
+
+bool ambeEncodeRecv(Ambe* a, uint8_t* block)
+{
+    uint8_t rx[PKT_MAX];
+    size_t  rxLen;
 
     for (unsigned int tries = 0U; tries < 8U; tries++)
     {
@@ -602,13 +662,13 @@ bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block)
                     unsigned int bits = rx[pos + 1U];
                     size_t bytes = (bits + 7U) / 8U;
 
-                    if (bits != AMBE_BITS || pos + 2U + bytes > rxLen)
+                    if (bits != frameBits(a) || pos + 2U + bytes > rxLen)
                     {
                         fprintf(stderr, "AMBE: the chip returned %u bits per frame, expected %u. "
-                                        "The rate setting is not the 3600 bit/s rate with FEC.\n", bits, AMBE_BITS);
+                                        "The rate setting is not the one that was asked for.\n", bits, frameBits(a));
                         return false;
                     }
-                    memcpy(block, rx + pos + 2U, AMBE_BLOCK_BYTES);
+                    memcpy(block, rx + pos + 2U, bytes);
                     return true;
                 }
                 break;
@@ -616,6 +676,12 @@ bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block)
         }
     }
     return false;
+}
+
+
+bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block)
+{
+    return ambeEncodeSend(a, pcm) && ambeEncodeRecv(a, block);
 }
 
 /*
@@ -632,18 +698,23 @@ bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block)
  * Returns: true if speech was returned, false on a timeout or an unexpected
  *   answer.
  */
-bool ambeDecode(Ambe* a, const uint8_t* block, int16_t* pcm)
+bool ambeDecodeSend(Ambe* a, const uint8_t* block)
 {
-    uint8_t tx[2U + AMBE_BLOCK_BYTES];
-    uint8_t rx[PKT_MAX];
-    size_t  rxLen;
+    uint8_t tx[2U + 18U];
+    unsigned int bits  = frameBits(a);
+    unsigned int bytes = (bits + 7U) / 8U;
 
     tx[0] = FIELD_CHANNEL;
-    tx[1] = (uint8_t)AMBE_BITS;
-    memcpy(tx + 2U, block, AMBE_BLOCK_BYTES);
+    tx[1] = (uint8_t)bits;
+    memcpy(tx + 2U, block, bytes);
 
-    if (!sendPacket(a->fd, TYPE_CHANNEL, tx, sizeof(tx)))
-        return false;
+    return sendPacket(a->fd, TYPE_CHANNEL, tx, 2U + bytes);
+}
+
+bool ambeDecodeRecv(Ambe* a, int16_t* pcm)
+{
+    uint8_t rx[PKT_MAX];
+    size_t  rxLen;
 
     for (unsigned int tries = 0U; tries < 8U; tries++)
     {
@@ -663,4 +734,9 @@ bool ambeDecode(Ambe* a, const uint8_t* block, int16_t* pcm)
         }
     }
     return false;
+}
+
+bool ambeDecode(Ambe* a, const uint8_t* block, int16_t* pcm)
+{
+    return ambeDecodeSend(a, block) && ambeDecodeRecv(a, pcm);
 }

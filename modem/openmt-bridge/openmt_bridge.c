@@ -50,8 +50,13 @@
 
 #define OPENMT_START      0x61U
 #define OPENMT_SET_CONFIG 0x20U
+#define OPENMT_SET_MODE   0x30U
+#define OPENMT_ADD_MODE   0x40U
+#define OPENMT_DEL_MODE   0x50U
 #define OPENMT_GET_VERSION 0xD0U
+#define OPENMT_TX_TIMING  0xB0U
 #define CONFIG_FRAME      196U
+#define MAX_CONN          16U
 
 static char      modemName[10] = "modem1";
 static int       modemFd = -1;
@@ -60,6 +65,12 @@ static volatile sig_atomic_t running = 1;
 
 static uint8_t   hostBuf[2048];
 static size_t    hostLen = 0;
+static uint8_t   modemBuf[2048];
+static size_t    modemLen = 0;
+
+/* The host tells the name of each connection (MODE_CONN); the frames of the
+ * modem carry the connection in the low nibble of the type byte. */
+static char      connName[MAX_CONN][12];
 
 /*
  * rd()
@@ -94,6 +105,7 @@ static bool writeAll(const uint8_t* buf, size_t len)
 {
     size_t done = 0;
 
+    bridgeWaitTxEmpty(modemFd);        /* PL011 driver race, see bridge_common.h */
     while (done < len)
     {
         ssize_t n = write(modemFd, buf + done, len - done);
@@ -177,6 +189,10 @@ static void sendConfig(bool askVersion)
 
     if (!writeAll(buf, sizeof(buf)))
         fprintf(stderr, "openmt_bridge: could not send the configuration to the modem\n");
+    else
+        fprintf(stderr, "openmt_bridge: configuration sent: %s, rxInvert %s, txInvert %s, pttInvert %s, rxLevel %u\n",
+                (buf[3] & 0x01U) ? "duplex" : "simplex", (buf[3] & 0x02U) ? "on" : "off",
+                (buf[3] & 0x04U) ? "on" : "off", (buf[3] & 0x08U) ? "on" : "off", (unsigned)buf[4]);
 
     if (askVersion)
     {
@@ -218,10 +234,23 @@ static void processHost(void)
 
             if (used > 0)
             {
-                if (type == BRIDGE_CTL_HOST_UP)
+                if (type == BRIDGE_CTL_MODE_CONN && plen >= 2 && payload[0] < MAX_CONN)
+                {
+                    size_t n = plen - 1 < sizeof(connName[0]) - 1 ? plen - 1 : sizeof(connName[0]) - 1;
+
+                    memcpy(connName[payload[0]], payload + 1, n);
+                    connName[payload[0]][n] = '\0';
+                }
+                else if (type == BRIDGE_CTL_HOST_UP)
+                {
+                    memset(connName, 0, sizeof(connName));
+                    fprintf(stderr, "openmt_bridge: host started, registrations cleared\n");
                     sendConfig(true);
+                }
                 else if (type == BRIDGE_CTL_RELOAD)
                     sendConfig(false);
+                else if (type == BRIDGE_CTL_COMMAND)
+                    bridgeAckUnsupported(modemName);
                 pos += used;
             }
             else if (more)
@@ -244,7 +273,12 @@ static void processHost(void)
             }
             if (left < p[1])
                 break;
-            if (!writeAll(p, p[1]))
+            uint8_t frameType = p[2] & 0xf0U;
+
+            /* ADD_MODE and DEL_MODE go to the modem, as the host always sent them to this modem type: the modem
+             * answers them, and it may use the mode block (the DSP settings of the mode).  SET_MODE (select a mode,
+             * or idle) was never sent to this modem type, so it is not passed on. */
+            if (frameType != OPENMT_SET_MODE && !writeAll(p, p[1]))
                 fprintf(stderr, "openmt_bridge: write to the modem failed\n");
             pos += p[1];
         }
@@ -257,6 +291,141 @@ static void processHost(void)
     {
         memmove(hostBuf, hostBuf + pos, hostLen - pos);
         hostLen -= pos;
+    }
+}
+
+/*
+ * writePty()
+ *
+ * Passes bytes to the virtual port the host reads, keeping the rest of a
+ * partial write instead of losing it.  A reader that is gone loses the bytes,
+ * as on a real port.
+ *
+ * Parameters:
+ *   buf - Bytes.
+ *   len - Number of bytes.
+ *
+ * Returns: nothing.
+ */
+static void writePty(const uint8_t* buf, size_t len)
+{
+    size_t done = 0;
+
+    while (done < len)
+    {
+        ssize_t n = write(ptyFd, buf + done, len - done);
+
+        if (n > 0)
+        {
+            done += (size_t)n;
+        }
+        else if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        else if (n < 0 && errno == EAGAIN)
+        {
+            struct pollfd p = {ptyFd, POLLOUT, 0};
+
+            if (poll(&p, 1, 20) <= 0)
+                return;
+        }
+        else
+        {
+            return;
+        }
+    }
+}
+
+/*
+ * processModem()
+ *
+ * Passes the bytes received from the modem on to the host.  A TX timing
+ * report (0xB0) is only of use to the DMR service, which tells its two time
+ * slots apart by it, and other services take it for a frame of their own, so
+ * it is passed on only when a connection named DMR exists, marked with that connection's number.  Every
+ * other byte goes on unchanged.  A partly received frame waits for the rest.
+ *
+ * Parameters:
+ *   flush - true to pass on a partial frame as well (the modem went quiet).
+ *
+ * Returns: nothing.
+ */
+static void processModem(bool flush)
+{
+    size_t pos  = 0;
+    size_t sent = 0;        /* bytes before this are passed on */
+
+    while (pos < modemLen)
+    {
+        const uint8_t* p    = modemBuf + pos;
+        size_t         left = modemLen - pos;
+
+        if (p[0] != OPENMT_START)
+        {
+            pos++;
+            continue;
+        }
+        if (left < 3)
+            break;
+        if (p[1] < 3)
+        {
+            pos++;
+            continue;
+        }
+        if (left < p[1])
+            break;
+        if ((p[2] & 0xf0U) == OPENMT_TX_TIMING)
+        {
+            /* The modem does not say whose report it is (its connection number is 0).  The report is for the DMR
+             * connection: it is marked with that connection's number, so the host hands it to that service alone.
+             * With no DMR connection nobody wants it and it is dropped. */
+            int dmr = -1;
+
+            for (unsigned i = 0; i < MAX_CONN; i++)
+            {
+                if (connName[i][0] != '\0' && strcasecmp(connName[i], "DMR") == 0)
+                {
+                    dmr = (int)i;
+                    break;
+                }
+            }
+            if (dmr >= 0)
+            {
+                static bool told;
+
+                if (!told)
+                {
+                    told = true;
+                    fprintf(stderr, "openmt_bridge: first TX timing report goes to connection %d (DMR)\n", dmr);
+                }
+                modemBuf[pos + 2] = (uint8_t)(OPENMT_TX_TIMING | (unsigned)dmr);
+            }
+            else
+            {
+                static bool told;
+
+                if (!told)
+                {
+                    told = true;
+                    fprintf(stderr, "openmt_bridge: TX timing report dropped, no connection named DMR is registered "
+                                    "(it is told again after the host restarts)\n");
+                }
+                if (pos > sent)
+                    writePty(modemBuf + sent, pos - sent);
+                sent = pos + p[1];
+            }
+        }
+        pos += p[1];
+    }
+    if (flush)
+        pos = modemLen;
+    if (pos > sent)
+        writePty(modemBuf + sent, pos - sent);
+    if (pos > 0)
+    {
+        memmove(modemBuf, modemBuf + pos, modemLen - pos);
+        modemLen -= pos;
     }
 }
 
@@ -328,6 +497,7 @@ int main(int argc, char** argv)
         bridgePublishPort(modemName, basename(linkCopy));
     }
     bridgePublishStreamType(modemName, STREAM_SAMPLE);
+    bridgePublishCaps(modemName, true, 12, false);
     fprintf(stderr, "openmt_bridge: %s at %s baud, host port %s -> %s\n", devPath, tmp, link, slave);
 
     sendConfig(false);
@@ -341,18 +511,22 @@ int main(int argc, char** argv)
 
         if (fds[0].revents & (POLLIN | POLLERR | POLLHUP))
         {
-            uint8_t buf[1024];
-            ssize_t n = read(modemFd, buf, sizeof(buf));
+            ssize_t n = read(modemFd, modemBuf + modemLen, sizeof(modemBuf) - modemLen);
 
             if (n < 0 && errno != EAGAIN && errno != EINTR)
             {
                 fprintf(stderr, "openmt_bridge: modem port error: %s\n", strerror(errno));
                 break;
             }
-            if (n > 0 && write(ptyFd, buf, (size_t)n) < 0 && errno != EAGAIN)
+            if (n > 0)
             {
-                /* nothing reads the virtual port: the bytes are lost, as on a real port */
+                modemLen += (size_t)n;
+                processModem(modemLen == sizeof(modemBuf));
             }
+        }
+        else if (modemLen > 0)
+        {
+            processModem(true);         /* quiet: a partial frame will not be completed */
         }
         if (fds[1].revents & POLLIN)
         {

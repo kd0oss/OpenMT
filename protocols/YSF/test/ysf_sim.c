@@ -58,6 +58,8 @@ static int modemFd = -1;
 static int gwFd = -1;
 static bool frameMode = false;
 static bool bitMode = false;
+static FILE* dumpFile = NULL;
+static bool dumpDone = false;
 static double noiseRms = 0.0;
 static unsigned int hangSeconds = 3U;
 
@@ -860,6 +862,20 @@ static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int max
                     s[i] = (int16_t)(p->data[8 + i * 2] | (p->data[9 + i * 2] << 8));
 
                 ysfRxSamples(&rx, s, 96);
+
+                /* YSF_SIM_DUMP=<prefix>: the samples of the first call the host transmits, for the OpenMT Radio tests */
+                if (getenv("YSF_SIM_DUMP") != NULL && !dumpDone)
+                {
+                    if (dumpFile == NULL)
+                    {
+                        char path[512];
+
+                        snprintf(path, sizeof(path), "%s.openmt", getenv("YSF_SIM_DUMP"));
+                        dumpFile = fopen(path, "wb");
+                    }
+                    if (dumpFile != NULL)
+                        fwrite(p->data + 8, 1, 192U, dumpFile);
+                }
             }
             else if (memcmp(p->data + 4, "BITS", 4) == 0)
             {
@@ -877,6 +893,13 @@ static void collectTransmit(TxCapture* c, unsigned int quietMs, unsigned int max
             }
         }
         collectGateway();
+    }
+
+    if (dumpFile != NULL)
+    {
+        fclose(dumpFile);
+        dumpFile = NULL;
+        dumpDone = true;
     }
 
     if (bitMode)

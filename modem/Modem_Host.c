@@ -1027,6 +1027,18 @@ void* modeRxThread(void* arg)
                         fast = true;
                     }
                 }
+                else if (len > 9 && memcmp(buf + 4, TYPE_TX_TIMING, 4) == 0)
+                {
+                    /* a report the bridge addressed to one connection (the DMR service) */
+                    uint8_t tag = buf[len - 1];
+
+                    mine = (tag == conn_id);
+                    if (!mine && (tag >= MAX_CLIENT_CONNECTIONS || !hostClient[tag].active))
+                    {
+                        RingBuffer_getData(&txModeBuffer, buf, len);    /* nobody to give it to */
+                        fast = true;
+                    }
+                }
                 else
                 {
                     mine = strcasecmp(hostClient[conn_id].mode, currentMode) == 0;
@@ -1488,16 +1500,32 @@ void* commandThread(void* arg)
                     uint16_t len = 0;
                     RingBuffer_peek(&txModeBuffer, byte, 3);
                     len = (byte[1] << 8) + byte[2] + 1;  // length plus conn id byte.
-                    uint8_t tmp[len];
-                    RingBuffer_peek(&txModeBuffer, tmp, len);
+                    if (len < 5 || len > 1024)
+                    {
+                        uint8_t junk[1];
+
+                        RingBuffer_getData(&txModeBuffer, junk, 1);     /* corrupt header: resync */
+                        fast = true;
+                        pthread_mutex_unlock(&txBufModeMutex);
+                        continue;
+                    }
                     if (RingBuffer_dataSize(&txModeBuffer) >= len)
                     {
                         uint8_t buf[len];
+                        /* a report the bridge addressed to one connection (the DMR service) goes to that one only:
+                         * other services take a packet type they do not know for a frame of their own */
+                        bool    addressed = false;
+                        uint8_t tag       = 0;
+
                         RingBuffer_getData(&txModeBuffer, buf, len);
+                        addressed = len > 9 && memcmp(buf + 4, TYPE_TX_TIMING, 4) == 0;
+                        tag       = buf[len - 1];
                         fast = true;
                         len--;  // do not include conn id byte.
                         for (uint8_t i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
                         {
+                            if (addressed && i != tag)
+                                continue;
                             if (hostClient[i].active)
                             {
                                 if (write(hostClient[i].sockfd, buf, len) < 0)
@@ -2413,10 +2441,12 @@ int processSerial(void)
     }
     else if (type == OPENMT_TX_TIMING)
     {
-        /* TX/RX sample alignment report (8-byte payload).  The bridge sends
-         * it only when the active mode wants it, so it can be forwarded as it
-         * is, through txModeBuffer in arrival order with the SAMP records --
-         * its position in the sample stream is part of what it means. */
+        /* TX/RX sample alignment report (8-byte payload).  The bridge marks
+         * it with the number of the connection it is for (the DMR service)
+         * and sends it only if there is one.  It goes through txModeBuffer in
+         * arrival order with the SAMP records -- its position in the sample
+         * stream is part of what it means -- and modeRxThread hands it to
+         * that connection alone. */
         if (respLen == 3U + 8U)
         {
             uint8_t buf[8];
@@ -2697,6 +2727,9 @@ int main(int argc, char** argv)
     int ret;
     int c;
 
+    /* Under systemd (journal) stdout is a pipe and would be block buffered: the -x debug lines appeared late or never */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
     while ((c = getopt(argc, argv, ":m:s:u:p:c:dxvr")) != -1)
     {
         switch (c)
@@ -2885,6 +2918,13 @@ int main(int argc, char** argv)
             fprintf(stderr, "Timer thread created successfully\n");
     }
 
+    /* The bridge configures the modem; tell it that the host has started.  This has to come before the first
+     * service can connect: HOST_UP makes the bridge forget the modes an earlier host registered, so a service
+     * that registered first would be forgotten (and, for example, the DMR timing reports not passed on). */
+    setHostConfig(modemName, "main", "gateways", "none", "none");
+    setHostConfig(modemName, "main", "activeModes", "none", "none");
+    sendBridgeControl(BRIDGE_CTL_HOST_UP, NULL, 0);
+
     err = pthread_create(&(tcpid), NULL, &startTCPServer, NULL);
     if (err != 0)
     {
@@ -2913,12 +2953,7 @@ int main(int argc, char** argv)
             fprintf(stderr, "Command thread created successfully\n");
     }
 
-    setHostConfig(modemName, "main", "gateways", "none", "none");
-    setHostConfig(modemName, "main", "activeModes", "none", "none");
     delay(10000);
-
-    /* The bridge configures the modem; tell it that the host has started. */
-    sendBridgeControl(BRIDGE_CTL_HOST_UP, NULL, 0);
 
     if (realtime)
     {

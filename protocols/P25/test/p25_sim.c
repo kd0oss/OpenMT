@@ -798,6 +798,19 @@ int main(int argc, char** argv)
 
     printf("  host sent %d packets and %d commands to the modem\n", txCount, txCommands);
 
+    if (getenv("P25_SIM_DUMP") != NULL)
+    {
+        char path[512];
+        FILE* f;
+
+        snprintf(path, sizeof(path), "%s.%s", getenv("P25_SIM_DUMP"), kind == KIND_SAMP ? "openmt" : "bits");
+        f = fopen(path, "wb");
+        for (int i = 0; f != NULL && i < txCount; i++)
+            fwrite(txPackets[i]->data + 8, 1, (size_t)txPackets[i]->len - 8U, f);
+        if (f != NULL)
+            fclose(f);
+    }
+
     int expectFrames = kind == KIND_FRAME ? callCount : callCount - 1; /* frame mode sends the terminator as a frame, the others as an end of transmission */
 
     if (kind == KIND_FRAME)

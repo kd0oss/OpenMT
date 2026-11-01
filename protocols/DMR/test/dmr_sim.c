@@ -460,6 +460,84 @@ static void duplexTest(void)
     checkRebuilt("to the gateway", gwCtl, gb, gwCount);
 }
 
+
+/*
+ * wakeupTest()
+ *
+ * Duplex test: a radio wakes the repeater with the wake-up CSBK (BS outbound activation) and, as radios do, repeats it
+ * a few times before it hears the downlink.  The firmware flags the first one idle (0xC3) and the repeats are plain data
+ * (0x43).  The repeats must not make a slot active: after a call on slot 2 and its terminator the host has to un-key the
+ * modem (a DMR_START off), which it only does when no slot is left active.
+ */
+__attribute__((unused)) static void wakeupTest(void)
+{
+    uint8_t wake[33];
+
+    printf("\nDuplex test: repeated wake-up CSBK, then a call from the radio on slot 2\n");
+    simDrain(&gwC, 100, 500, NULL, NULL);
+    simDrain(&modemC, 100, 500, NULL, NULL);
+
+    memset(slotData[0].tdata, 0x00, 12);
+    slotData[0].tdata[0] = (uint8_t)(CSBKO_BSDWNACT | 0x80U);
+    slotData[0].tdata[9] = 1;
+    setColorCode(1U, 0U);
+    setPI(false, 0U);
+    setLCSS(0U, 0U);
+    memset(wake, 0x00, sizeof(wake));
+    CSBK_encode(wake, 0U);
+    DMRSlotType_encode(1U, DT_CSBK, wake);
+    addDMRDataSync(wake, false);
+
+    /* a wake-up and then no call at all: the host must un-key the modem by itself after its hang time */
+    {
+        uint8_t pkt[42] = {0x61, 0x00, 42, 0x04, 'D', 'M', 'D', '1'};
+        int off0 = 0;
+
+        pkt[8] = 0xC3U;
+        memcpy(pkt + 9, wake, 33);
+        txCount = 0;
+        simSendRaw(&modemC, pkt, 42);
+        simDrain(&modemC, 5000, 8000, grabTx, NULL);
+        for (int i = 0; i < txCount; i++)
+            if (txPackets[i]->len == 10 && txPackets[i]->data[8] == 0x1D && txPackets[i]->data[9] == 0x00)
+                off0++;
+        simCheck(off0 >= 1, "a wake-up with no call after it: the host un-keyed the modem after its hang time (%d DMR_START off)", off0);
+    }
+
+    txCount = 0;
+    txCommands = 0;
+    for (int i = 0; i < 4; i++)
+    {
+        uint8_t pkt[42] = {0x61, 0x00, 42, 0x04, 'D', 'M', 'D', '1'};
+
+        pkt[8] = (i == 0) ? 0xC3U : 0x43U;
+        memcpy(pkt + 9, wake, 33);
+        simSendRaw(&modemC, pkt, 42);
+        simDrain(&modemC, 60, 60, grabTx, NULL);
+    }
+
+    for (int i = 0; i < FRAMES; i++)
+    {
+        uint8_t pkt[42] = {0x61, 0x00, 42, 0x04, 'D', 'M', 'D', '2'};
+
+        pkt[8] = ctl[i];
+        memcpy(pkt + 9, burst[i], 33);
+        simSendRaw(&modemC, pkt, 42);
+        simDrain(&modemC, 20, 20, grabTx, NULL);
+    }
+    simDrain(&modemC, 800, 4000, grabTx, NULL);
+
+    int off = 0;
+
+    if (getenv("DMR_SIM_DEBUG") != NULL)
+        for (int i = 0; i < txCount; i++)
+            printf("  to modem: %.4s len %d ctl %02X %02X\n", txPackets[i]->data + 4, txPackets[i]->len, txPackets[i]->data[8], txPackets[i]->data[9]);
+    for (int i = 0; i < txCount; i++)
+        if (txPackets[i]->len == 10 && txPackets[i]->data[8] == 0x1D && txPackets[i]->data[9] == 0x00)
+            off++;
+    simCheck(off >= 1, "the repeated wake-ups left no slot active: the host un-keyed the modem after the call (%d DMR_START off)", off);
+}
+
 /*
  * dataTest()
  *
@@ -809,6 +887,7 @@ int main(int argc, char** argv)
         simSend(&modemC, "COMM", comm, 1);
         usleep(300000);
         makeCall();
+        /* wakeupTest(); -- tests a host-side watchdog that was taken out again: the fault was the radio, not dmr_host */
         duplexTest();
         lateEntryTest();
         dataTest();
@@ -818,6 +897,15 @@ int main(int argc, char** argv)
     }
 
     /* 3. network -> radio */
+    if (getenv("DMR_SIM_DUPLEX_SAMPLE") != NULL && kind != KIND_FRAME)
+    {
+        /* sample modem told to be duplex: the host sends the continuous two slot downlink with the CACH (for the tests of
+           a radio in repeater mode); DMR_SIM_SLOT2 puts the call into time slot 2 */
+        const uint8_t comm[1] = {0x00};
+
+        simSend(&modemC, "COMM", comm, 1);
+        usleep(300000);
+    }
     makeCall();
     printf("\nTest 1: call from the network to the radio (header, %d voice bursts, terminator)\n", VOICE_COUNT);
 
@@ -836,7 +924,7 @@ int main(int argc, char** argv)
 
         payload[0] = ctl[i];
         memcpy(payload + 1, burst[i], 33);
-        simSend(&gwC, "DMD1", payload, 34);
+        simSend(&gwC, getenv("DMR_SIM_SLOT2") != NULL ? "DMD2" : "DMD1", payload, 34);
         simDrain(&modemC, gapMs, gapMs, grabTx, NULL); /* exactly one gap, so the bursts leave at the rate of the air */
     }
 

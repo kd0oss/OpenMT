@@ -410,6 +410,20 @@ int main(int argc, char** argv)
                      "the transmission ends with a BITS packet");
     }
 
+    /* M17_SIM_DUMP=<prefix>: the samples the host transmitted for the call, for the OpenMT Radio tests */
+    if (getenv("M17_SIM_DUMP") != NULL && kind == KIND_SAMP)
+    {
+        char path[512];
+        snprintf(path, sizeof(path), "%s.openmt", getenv("M17_SIM_DUMP"));
+        FILE* df = fopen(path, "wb");
+
+        for (int i = 0; df != NULL && i < txCount; i++)
+            if (memcmp(txPackets[i]->data + 4, "SAMP", 4) == 0 && txPackets[i]->len > 8)
+                fwrite(txPackets[i]->data + 8, 1, (size_t)(txPackets[i]->len - 8), df);
+        if (df != NULL)
+            fclose(df);
+    }
+
     /* 4. radio -> network */
     printf("\nTest 2: the transmission comes back from the radio, to the network\n");
     simDrain(&gwC, 100, 500, NULL, NULL);
