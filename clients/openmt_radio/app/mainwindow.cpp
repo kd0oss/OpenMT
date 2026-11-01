@@ -761,6 +761,7 @@ void MainWindow::onConnect()
     es.ambeGapUs = ambeGap_->value();
 
     QString error;
+    log_->clear();                                      /* a new connection starts with an empty log */
     status_->setText("Connecting...");
 
     if (!radio_->start(es, error))

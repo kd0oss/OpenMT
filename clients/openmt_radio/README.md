@@ -217,6 +217,6 @@ The receiver accepts the base station, mobile and direct mode slot 1 and 2 sync 
 1. Make sure no `nxdn_host` is running for the same modem number: this program registers as the NXDN service.
 2. Enter the Modem_Host address and modem number, your RAN, unit id and the call target.
 3. Enter the dongle's serial device and baud rate (460800 is the AMBE3000R default), or tick "No dongle" to test the link only.
-4. Pick the sound card devices, press Connect, then hold Push To Talk (or the space bar, which works wherever the cursor is except in a text or number box).
+4. Pick the sound card devices, press Connect, then hold Push To Talk (or the space bar, which works wherever the cursor is except in a text or number box). The log is cleared each time you press Connect.
 
 The block layout is detected when connecting; set it by hand only if reception or transmission sounds wrong.
