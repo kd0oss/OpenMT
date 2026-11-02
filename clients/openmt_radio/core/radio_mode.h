@@ -34,12 +34,22 @@ struct CallInfo
     std::string  text;      /* mode specific: callsigns, text ... */
 };
 
+/* A text message: sent by this radio (received false) or heard (received true) */
+struct MessageInfo
+{
+    bool         received;
+    std::string  from;
+    std::string  to;
+    std::string  text;      /* UTF-8 */
+};
+
 struct RadioEvents
 {
     /* 8 kHz speech of the received call, 160 samples at a time */
     std::function<void(const int16_t*, size_t)> rxAudio;
     std::function<void(const CallInfo&)>        call;
     std::function<void(const std::string&)>     log;
+    std::function<void(const MessageInfo&)>     message;
 };
 
 class RadioMode
@@ -68,6 +78,18 @@ public:
        the key is not down and holds it a moment for the next digit; 0-9 * # A-D */
     virtual bool supportsDtmf() const { return false; }
     virtual bool sendDtmf(char digit) { (void)digit; return false; }
+
+    /* Text: a mode that can send a text message (M17 packet mode) says so.  sendMessage() queues it and returns at once; false
+       and an error text when it cannot be sent.  setMetaText() sets the text that goes with every voice transmission
+       (M17 LSF metadata) from the next one on */
+    virtual bool supportsMessages() const { return false; }
+    virtual bool sendMessage(const std::string& to, const std::string& text, std::string& error)
+    {
+        (void)to; (void)text;
+        error = "this mode cannot send messages";
+        return false;
+    }
+    virtual void setMetaText(const std::string& text) { (void)text; }
 
     /* From the link's reader thread: Modem_Host says whether the modem is duplex */
     virtual void modemDuplex(bool duplex) { (void)duplex; }

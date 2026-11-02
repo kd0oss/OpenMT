@@ -92,6 +92,31 @@ bool RadioController::sendDtmf(char digit)
     return engine_.sendDtmf(digit);
 }
 
+bool RadioController::messagesSupported() const
+{
+    return engine_.messagesSupported();
+}
+
+bool RadioController::sendMessage(const QString& to, const QString& text, QString& error)
+{
+    std::string err;
+    QByteArray utf8 = text.toUtf8();
+
+    if (!engine_.sendMessage(to.toStdString(), std::string(utf8.constData(), (size_t)utf8.size()), err))
+    {
+        error = QString::fromStdString(err);
+        return false;
+    }
+    return true;
+}
+
+void RadioController::setMetaText(const QString& text)
+{
+    QByteArray utf8 = text.toUtf8();
+
+    engine_.setMetaText(std::string(utf8.constData(), (size_t)utf8.size()));
+}
+
 bool RadioController::releaseModem()
 {
     return engine_.releaseModem();

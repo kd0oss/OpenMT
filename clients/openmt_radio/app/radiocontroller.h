@@ -29,6 +29,9 @@ public:
     bool openDongle(const QString& device, unsigned int baud, int chunkBytes, int gapUs, QString& error);
     bool dongleOpen() const;
     bool sendDtmf(char digit);
+    bool messagesSupported() const;
+    bool sendMessage(const QString& to, const QString& text, QString& error);
+    void setMetaText(const QString& text);
 
 public slots:
     void pushMic(const QVector<qint16>& pcm);

@@ -113,6 +113,62 @@ static int capture(const char* samplesPath)
     return 0;
 }
 
+/* A text message in packet mode, long enough for several frames; m17_radio_sim checks it at the gateway of m17_host */
+static const char* const MESSAGE = "Testing M17 packet mode from OpenMT Radio: the quick brown fox jumps over the lazy dog, 0123456789.";
+
+static int captureMessage(const char* samplesPath)
+{
+    FakeHost host;
+    RadioEngine engine;
+    EngineSettings s;
+
+    s.mode            = MODE_M17;
+    s.noVocoder       = true;
+    s.link.basePort   = host.port;
+    s.link.modem      = 1;
+    s.link.txAheadMs  = 0;
+    s.m17.callsign    = "KD0OSS";
+    s.m17.dest        = "ALL";
+    s.m17.can         = 5;
+    s.m17.txDelayMs   = 300;
+    s.m17.modeHangMs  = 200;
+
+    std::string error;
+
+    if (!engine.start(s, error))
+    {
+        std::printf("start failed: %s\n", error.c_str());
+        return 2;
+    }
+    if (!engine.sendMessage("W1AW", MESSAGE, error))
+    {
+        std::printf("the message was not accepted: %s\n", error.c_str());
+        return 2;
+    }
+    if (!waitFor([&host]() { std::lock_guard<std::mutex> l(host.mutex); return host.seots >= 1U; }, 10000))
+    {
+        std::printf("no end of transmission\n");
+        return 2;
+    }
+
+    {
+        std::lock_guard<std::mutex> l(host.mutex);
+        FILE* f = std::fopen(samplesPath, "wb");
+
+        for (size_t i = 0U; f && i < host.samples.size(); i++)
+        {
+            uint8_t b[2] = {(uint8_t)(host.samples[i] & 0xFF), (uint8_t)((host.samples[i] >> 8) & 0xFF)};
+            std::fwrite(b, 1, 2, f);
+        }
+        if (f)
+            std::fclose(f);
+        std::printf("wrote %zu samples\n", host.samples.size());
+    }
+
+    engine.stop();
+    return 0;
+}
+
 static int replay(const char* samplesPath)
 {
     FakeHost host;
@@ -210,6 +266,8 @@ int main(int argc, char** argv)
 {
     if (argc == 3 && std::strcmp(argv[1], "capture") == 0)
         return capture(argv[2]);
+    if (argc == 3 && std::strcmp(argv[1], "capture-msg") == 0)
+        return captureMessage(argv[2]);
     if (argc == 3 && std::strcmp(argv[1], "replay") == 0)
         return replay(argv[2]);
 

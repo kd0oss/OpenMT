@@ -34,7 +34,7 @@ static const char* const OFF_STYLE = "background:#444;color:#ccc;border-radius:4
 
 MainWindow::MainWindow(QWidget* parent) :
     QMainWindow(parent),
-    host_(nullptr), modem_(nullptr), mode_(nullptr), nxBox_(nullptr), dmrBox_(nullptr), p25Box_(nullptr), p25Nac_(nullptr), p25Src_(nullptr), p25Dst_(nullptr), p25Group_(nullptr), ysfBox_(nullptr), ysfCall_(nullptr), ysfDest_(nullptr), ysfDgid_(nullptr), dstarBox_(nullptr), dstarCall_(nullptr), dstarSuffix_(nullptr), dstarUr_(nullptr), dstarRpt1_(nullptr), dstarRpt2_(nullptr), dstarMsg_(nullptr), m17Box_(nullptr), m17Call_(nullptr), m17Dest_(nullptr), m17Can_(nullptr), m17Filter_(nullptr), fmBox_(nullptr), fmTxTone_(nullptr), fmToneLevel_(nullptr), fmDtmfLevel_(nullptr), fmDtmfHang_(nullptr), fmSquelch_(nullptr), fmRxTone_(nullptr), fmDelay_(nullptr), fmSquelchLevel_(nullptr), fmAuto_(nullptr), dmrCc_(nullptr),
+    host_(nullptr), modem_(nullptr), mode_(nullptr), nxBox_(nullptr), dmrBox_(nullptr), p25Box_(nullptr), p25Nac_(nullptr), p25Src_(nullptr), p25Dst_(nullptr), p25Group_(nullptr), ysfBox_(nullptr), ysfCall_(nullptr), ysfDest_(nullptr), ysfDgid_(nullptr), dstarBox_(nullptr), dstarCall_(nullptr), dstarSuffix_(nullptr), dstarUr_(nullptr), dstarRpt1_(nullptr), dstarRpt2_(nullptr), dstarMsg_(nullptr), m17Box_(nullptr), m17Call_(nullptr), m17Dest_(nullptr), m17Can_(nullptr), m17Filter_(nullptr), m17Meta_(nullptr), m17MsgTo_(nullptr), m17Msg_(nullptr), m17Send_(nullptr), fmBox_(nullptr), fmTxTone_(nullptr), fmToneLevel_(nullptr), fmDtmfLevel_(nullptr), fmDtmfHang_(nullptr), fmSquelch_(nullptr), fmRxTone_(nullptr), fmDelay_(nullptr), fmSquelchLevel_(nullptr), fmAuto_(nullptr), dmrCc_(nullptr),
     dmrSrc_(nullptr), dmrDst_(nullptr), dmrGroup_(nullptr), dmrOperation_(nullptr), dmrSlot_(nullptr), dmrTiming_(nullptr), ran_(nullptr), src_(nullptr), dst_(nullptr), group_(nullptr),
     ambeDev_(nullptr), ambeBaud_(nullptr), noVocoder_(nullptr), capture_(nullptr), invertRx_(nullptr), txLevel_(nullptr), rxLevel_(nullptr), ambeChunk_(nullptr), ambeGap_(nullptr), layout_(nullptr), audioIn_(nullptr),
     audioOut_(nullptr), rate_(nullptr), micGain_(nullptr), spkGain_(nullptr), connect_(nullptr), release_(nullptr), ptt_(nullptr), dtmf_(nullptr), dtmfPad_(nullptr),
@@ -240,6 +240,32 @@ void MainWindow::buildUi()
                            "already filtered; root raised cosine is the host's own and tolerates more noise on a clean signal");
     m17f->addRow("CAN", m17Can_);
     m17f->addRow("Receive filter", m17Filter_);
+    m17Meta_ = new QLineEdit(mg);
+    m17Meta_->setMaxLength(52);
+    m17Meta_->setPlaceholderText("text sent with every transmission");
+    m17Meta_->setToolTip("Metadata text (up to 52 characters) sent in the link setup frame of every voice transmission, and shown by "
+                         "radios that display it. It can be changed while connected: the next transmission carries the new text");
+    m17f->addRow("Text with voice", m17Meta_);
+    m17MsgTo_ = new QLineEdit("ALL", mg);
+    m17MsgTo_->setMaxLength(9);
+    m17MsgTo_->setToolTip("The callsign a text message is for (ALL for everyone)");
+    m17Msg_ = new QLineEdit(mg);
+    m17Msg_->setPlaceholderText("message, sent in packet mode");
+    m17Msg_->setToolTip("A text message (SMS) sent as an M17 packet to the callsign above. Press Enter or Send. Up to 796 bytes");
+    m17Send_ = new QPushButton("Send", mg);
+    m17Send_->setFocusPolicy(Qt::NoFocus);
+    m17Send_->setEnabled(false);
+    m17Send_->setToolTip("Sends the message as an M17 packet (needs a connection)");
+    QWidget* msgRow = new QWidget(mg);
+    QHBoxLayout* msgLayout = new QHBoxLayout(msgRow);
+    msgLayout->setContentsMargins(0, 0, 0, 0);
+    msgLayout->addWidget(m17Msg_, 1);
+    msgLayout->addWidget(m17Send_);
+    m17f->addRow("Message to", m17MsgTo_);
+    m17f->addRow("Message", msgRow);
+    QObject::connect(m17Send_, SIGNAL(clicked()), this, SLOT(onM17Send()));
+    QObject::connect(m17Msg_, SIGNAL(returnPressed()), this, SLOT(onM17Send()));
+    QObject::connect(m17Meta_, SIGNAL(editingFinished()), this, SLOT(onM17Meta()));
     m17Box_ = mg;
 
     /* FM */
@@ -490,6 +516,8 @@ void MainWindow::loadSettings()
     m17Call_->setText(s.value("m17Call", "N0CALL").toString());
     m17Dest_->setText(s.value("m17Dest", "ALL").toString());
     m17Can_->setValue(s.value("m17Can", 0).toInt());
+    m17Meta_->setText(s.value("m17Meta", "").toString());
+    m17MsgTo_->setText(s.value("m17MsgTo", "ALL").toString());
     fmTxTone_->setValue(s.value("fmTxTone", 88.5).toDouble());
     fmToneLevel_->setValue(s.value("fmToneLevel", 1.5).toDouble());
     fmDtmfLevel_->setValue(s.value("fmDtmfLevel", 2.5).toDouble());
@@ -560,6 +588,8 @@ void MainWindow::saveSettings()
     s.setValue("m17Call", m17Call_->text());
     s.setValue("m17Dest", m17Dest_->text());
     s.setValue("m17Can", m17Can_->value());
+    s.setValue("m17Meta", m17Meta_->text());
+    s.setValue("m17MsgTo", m17MsgTo_->text());
     s.setValue("fmTxTone", fmTxTone_->value());
     s.setValue("fmToneLevel", fmToneLevel_->value());
     s.setValue("fmDtmfLevel", fmDtmfLevel_->value());
@@ -604,6 +634,7 @@ void MainWindow::setConnected(bool connected)
     dtmf_->setEnabled(connected && radio_->dtmfSupported());
     if (!dtmf_->isEnabled())
         dtmf_->setChecked(false);
+    m17Send_->setEnabled(connected && radio_->messagesSupported());
 
     /* the settings cannot change while the radio runs */
     host_->setEnabled(!connected);
@@ -743,6 +774,11 @@ void MainWindow::onConnect()
     if (es.m17.dest.empty())
         es.m17.dest = "ALL";
     es.m17.can = (unsigned int)m17Can_->value();
+    {
+        QByteArray meta = m17Meta_->text().toUtf8();
+
+        es.m17.metaText = std::string(meta.constData(), (size_t)meta.size());
+    }
     es.m17.rxFilter = m17Filter_->currentData().toInt();
     es.fm.txCtcss = (float)fmTxTone_->value();
     es.fm.txToneLevel = (float)fmToneLevel_->value();
@@ -977,12 +1013,12 @@ void MainWindow::onCallEvent(int event, unsigned int src, unsigned int dst, bool
     case openmt::CALL_RX_LOST:
         setIndicator(rxLed_, "RX", QString());
         if (src == 0U && dst == 0U)
-            heard_->setText(QString("Last heard: %1  BER %2%%  %3 (%4)")
+            heard_->setText(QString("Last heard: %1  BER %2%  %3 (%4)")
                                 .arg(text.isEmpty() ? QString("unknown") : text).arg((double)ber, 0, 'f', 1)
                                 .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
                                 .arg(event == openmt::CALL_RX_END ? "end" : "lost"));
         else
-            heard_->setText(QString("Last heard: %1 -> %2%3  BER %4%%  %5 (%6)")
+            heard_->setText(QString("Last heard: %1 -> %2%3  BER %4%  %5 (%6)")
                                 .arg(src).arg(group ? "TG " : "").arg(dst).arg((double)ber, 0, 'f', 1)
                                 .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
                                 .arg(event == openmt::CALL_RX_END ? "end" : "lost"));
@@ -1028,6 +1064,30 @@ void MainWindow::onLinkLost()
 void MainWindow::onLog(const QString& text)
 {
     log_->appendPlainText(QDateTime::currentDateTime().toString("hh:mm:ss  ") + text);
+}
+
+void MainWindow::onM17Send()
+{
+    if (!connected_)
+        return;
+
+    QString text = m17Msg_->text().trimmed();
+
+    if (text.isEmpty())
+        return;
+
+    QString error;
+
+    if (radio_->sendMessage(m17MsgTo_->text().trimmed().toUpper(), text, error))
+        m17Msg_->clear();                       /* it is queued: the log says when it has been sent */
+    else
+        onLog("M17: the message was not sent: " + error);
+}
+
+void MainWindow::onM17Meta()
+{
+    if (connected_)
+        radio_->setMetaText(m17Meta_->text());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

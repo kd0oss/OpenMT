@@ -50,6 +50,8 @@ private slots:
     void onSpeakerLevel(float level);
     void onLinkLost();
     void onLog(const QString& text);
+    void onM17Send();
+    void onM17Meta();
     void onGains();
     void onModeChanged();
     void onDmrOperation();
@@ -87,6 +89,10 @@ private:
     QLineEdit*      m17Dest_;
     QSpinBox*       m17Can_;
     QComboBox*      m17Filter_;
+    QLineEdit*      m17Meta_;
+    QLineEdit*      m17MsgTo_;
+    QLineEdit*      m17Msg_;
+    QPushButton*    m17Send_;
     QWidget*        fmBox_;
     QDoubleSpinBox* fmTxTone_;
     QDoubleSpinBox* fmToneLevel_;

@@ -60,6 +60,27 @@ static std::string trimmed(const std::string& s)
     return s.substr(0U, n);
 }
 
+/* The first 'max' bytes of UTF-8 text, without cutting a character in two */
+static std::string cutUtf8(const std::string& text, size_t max)
+{
+    if (text.size() <= max)
+        return text;
+
+    size_t n = max;
+
+    while (n > 0U && ((unsigned char)text[n] & 0xC0U) == 0x80U)         /* text[n] continues a character: back up */
+        n--;
+    return text.substr(0U, n);
+}
+
+/* The CRC of a packet: the M17 CRC over the bytes, most significant byte first */
+static uint16_t packetCrc(const uint8_t* data, size_t len)
+{
+    M17::M17LinkSetupFrame helper;
+
+    return __builtin_bswap16(helper.m17Crc(data, len));
+}
+
 /* ------------------------------------------------------------------------------------------------------------ */
 
 M17Mode::M17Mode(ModemLink& link, const M17Config& cfg, const RadioEvents& events) :
@@ -95,12 +116,18 @@ M17Mode::M17Mode(ModemLink& link, const M17Config& cfg, const RadioEvents& event
     rxOuterSum_(0.0),
     lastFn_(-1),
     rxUnsupportedLogged_(false),
+    rxMetaHave_(0U),
+    rxMetaText_(),
+    pktData_(),
+    pktNext_(-1),
     txMutex_(),
     txCv_(),
     mic_(),
     ptt_(false),
     txActive_(false),
-    hangUntil_(0U)
+    hangUntil_(0U),
+    metaText_(cutUtf8(cfg.metaText, MAX_META_BYTES)),
+    messages_()
 {
     std::memset(hist_, 0, sizeof(hist_));
     std::memset(errRing_, 0, sizeof(errRing_));
@@ -427,6 +454,10 @@ void M17Mode::rxStart()
     seq_ = -1;
     seqRun_ = 0U;
     rxMuted_ = 0UL;
+    rxMetaHave_ = 0U;
+    rxMetaText_.clear();
+    pktData_.clear();
+    pktNext_ = 0;                       /* a packet is expected to begin with its first frame */
 
     info.event = CALL_RX_START;
     info.src = info.dst = 0U;
@@ -483,38 +514,36 @@ void M17Mode::rxFrame(uint64_t c)
         v[k] = y(first + (uint64_t)SYMBOL_LEN * k);
 
     /* The sync word fixes the sampling instant to a sample, a fifth of a symbol, and a signal that has been through a modem
-       is blurred enough for that to matter. Look at the symbols at a quarter sample steps around it, and keep the instant
-       at which they fall into the four levels most tightly (the symbols of a frame are equally spread over the four) */
+       is blurred enough for that to matter (and the sync word that a frame was found by can be a sample or two away from the
+       best instant of the symbols after it).  Look at the symbols at quarter sample steps around it and keep the instant at
+       which they lie closest to the four levels (the outer symbols are at the sync word's level, the inner ones a third of it) */
     {
         double bestCost = 1.0e300, bv[FRAME_SYMBOLS];
-        const double step = 0.25, span = 1.0;
+        const double step = 0.25, span = 2.5;
+        const double lv[4] = { -outer_, -outer_ / 3.0, outer_ / 3.0, outer_ };
 
         for (double d = -span; d <= span + 1e-9; d += step)
         {
-            double w[FRAME_SYMBOLS], srt[FRAME_SYMBOLS];
+            double w[FRAME_SYMBOLS];
+            double cost = 0.0;
 
             for (unsigned int k = 0U; k < FRAME_SYMBOLS; k++)
             {
                 double pos = (double)(first + (uint64_t)SYMBOL_LEN * k) + d;
                 uint64_t i0 = (uint64_t)std::floor(pos);
                 double fr = pos - (double)i0;
+                double x = y(i0) * (1.0 - fr) + y(i0 + 1U) * fr;
+                double best = 1.0e300;
 
-                w[k] = y(i0) * (1.0 - fr) + y(i0 + 1U) * fr;
-                srt[k] = w[k];
-            }
-            std::sort(srt, srt + FRAME_SYMBOLS);
+                w[k] = x;
+                for (unsigned int g = 0U; g < 4U; g++)
+                {
+                    double e = x - c0 - lv[g];
 
-            double cost = 0.0;
-
-            for (unsigned int g = 0U; g < 4U; g++)
-            {
-                double m = 0.0;
-
-                for (unsigned int k = g * 48U; k < (g + 1U) * 48U; k++)
-                    m += srt[k];
-                m /= 48.0;
-                for (unsigned int k = g * 48U; k < (g + 1U) * 48U; k++)
-                    cost += (srt[k] - m) * (srt[k] - m);
+                    if (e * e < best)
+                        best = e * e;
+                }
+                cost += best;
             }
             if (cost < bestCost)
             {
@@ -541,9 +570,8 @@ void M17Mode::rxFrame(uint64_t c)
         frame[k / 4U] = (uint8_t)(frame[k / 4U] | (dibit << (6U - 2U * (k % 4U))));
     }
 
-    int before = decoder_.bitErr;
     M17::M17FrameType type = decoder_.decodeFrame(frame);
-    int errs = decoder_.bitErr - before;
+    int errs = decoder_.bitErr;                 /* the bit errors the error correction found in this frame */
 
     if (type == M17::M17FrameType::LINK_SETUP || type == M17::M17FrameType::STREAM)
     {
@@ -571,8 +599,161 @@ void M17Mode::rxFrame(uint64_t c)
         }
 
         if (type == M17::M17FrameType::STREAM && rxActive_)
+        {
+            rxMeta(lsf);
             rxStream();
+        }
     }
+    else if (type == M17::M17FrameType::PACKET)
+    {
+        if (rxActive_)
+        {
+            if (errs > 0)
+                rxErrs_ += (unsigned long)errs;
+            rxBits_ += 368UL;
+            rxFrames_++;
+            rxOuterSum_ += outer_;
+            if (errs > rxMaxErrs_)
+                rxMaxErrs_ = errs;
+            if (errs > 12)
+                rxBadFrames_++;
+        }
+        rxPacket();
+    }
+}
+
+/* The metadata text of the call being received: up to four blocks of 13 bytes, one in the link setup frame of each superframe
+   (the LICH of six stream frames carries the whole link setup frame).  The first byte is the number of blocks as a bit field
+   (0001, 0011, 0111, 1111) and the number of this block as one bit (0001, 0010, 0100, 1000). */
+void M17Mode::rxMeta(M17::M17LinkSetupFrame& lsf)
+{
+    if (!lsf.valid())
+        return;
+
+    M17::streamType_t st = lsf.getType();
+
+    if (st.fields.dataMode != 1U || st.fields.encType != 0U || st.fields.encSubType != (uint16_t)M17::M17_META_TEXT)
+        return;
+
+    const uint8_t* raw   = lsf.metadata().raw_data;
+    unsigned int   total = (unsigned int)(raw[0] >> 4);
+    unsigned int   blk   = (unsigned int)(raw[0] & 0x0FU);
+    unsigned int   idx;
+
+    if (blk == 1U)
+        idx = 0U;
+    else if (blk == 2U)
+        idx = 1U;
+    else if (blk == 4U)
+        idx = 2U;
+    else if (blk == 8U)
+        idx = 3U;
+    else
+        return;                         /* no text in this link setup frame */
+    if ((total != 1U && total != 3U && total != 7U && total != 15U) || (total & blk) == 0U)
+        return;
+
+    rxMetaBlocks_[idx].assign((const char*)raw + 1, 13U);
+    rxMetaHave_ |= blk;
+    if ((rxMetaHave_ & total) != total)
+        return;
+
+    std::string text;
+
+    for (unsigned int i = 0U; i < 4U; i++)
+        if (total & (1U << i))
+            text += rxMetaBlocks_[i];
+
+    size_t z = text.find('\0');
+
+    if (z != std::string::npos)
+        text.resize(z);
+    text = trimmed(text);
+    if (text.empty() || text == rxMetaText_)
+        return;
+    rxMetaText_ = text;
+
+    log("M17: text with the call from " + rxSrc_ + ": " + text);
+
+    CallInfo info;
+
+    info.event = CALL_RX_INFO;
+    info.src = info.dst = 0U;
+    info.group = true;
+    info.ber = 0.0F;
+    info.text = rxStartText() + "  \"" + text + "\"";
+    if (ev_.call)
+        ev_.call(info);
+}
+
+/* A packet frame: 25 bytes of the packet and a byte with the end flag (top bit) and the frame number, or in the last frame the
+   number of bytes it holds (the next five bits).  A packet is the type byte (05 is a text message), the data and the CRC. */
+void M17Mode::rxPacket()
+{
+    M17::M17PacketFrame pf = decoder_.getPacketFrame();
+    const M17::pktPayload_t& p = pf.payload();
+    bool         last = (p[25] & 0x80U) != 0U;
+    unsigned int n    = (unsigned int)((p[25] >> 2) & 0x1FU);
+
+    if (pktNext_ < 0)
+        return;                         /* its start was not heard */
+
+    if (!last)
+    {
+        if ((int)n != pktNext_)
+        {
+            log("M17: a packet frame was lost: the packet is dropped");
+            pktNext_ = -1;
+            return;
+        }
+        pktData_.insert(pktData_.end(), p.begin(), p.begin() + 25);
+        pktNext_ = (int)n + 1;
+        if (pktNext_ > 31)
+            pktNext_ = -1;
+        return;
+    }
+
+    if (n == 0U || n > 25U)
+    {
+        pktNext_ = -1;
+        return;
+    }
+    pktData_.insert(pktData_.end(), p.begin(), p.begin() + n);
+    pktNext_ = -1;
+
+    size_t len = pktData_.size();
+
+    if (len < 4U || packetCrc(pktData_.data(), len - 2U) != (uint16_t)(((unsigned int)pktData_[len - 2U] << 8) | pktData_[len - 1U]))
+    {
+        log("M17: a packet was heard with a wrong checksum (frames lost to bit errors): dropped");
+        return;
+    }
+
+    if (pktData_[0] != 0x05U)
+    {
+        char t[160];
+
+        std::snprintf(t, sizeof(t), "M17: a packet of type %02X, %u bytes, was heard from %s: only text messages (type 05) are shown",
+                      (unsigned int)pktData_[0], (unsigned int)(len - 3U), rxSrc_.c_str());
+        log(t);
+        return;
+    }
+
+    std::string text((const char*)pktData_.data() + 1, len - 3U);
+    size_t z = text.find('\0');
+
+    if (z != std::string::npos)
+        text.resize(z);
+
+    MessageInfo mi;
+
+    mi.received = true;
+    mi.from = rxActive_ ? rxSrc_ : std::string("?");
+    mi.to = rxActive_ ? rxDst_ : std::string("?");
+    mi.text = text;
+    log("M17: message from " + mi.from + " to " + mi.to + ": " + text);
+    if (ev_.message)
+        ev_.message(mi);
 }
 
 /* The payload of a stream frame: two Codec2 blocks of 20 ms */
@@ -727,6 +908,17 @@ void M17Mode::txThread()
 
     while (running_)
     {
+        if (!ptt_ && !messages_.empty())
+        {
+            Message m = messages_.front();
+
+            messages_.pop_front();
+            lock.unlock();
+            txPacket(m.to, m.text);
+            lock.lock();
+            continue;
+        }
+
         if (!ptt_)
         {
             txCv_.wait_for(lock, std::chrono::milliseconds(100));
@@ -741,6 +933,201 @@ void M17Mode::txThread()
         txCall();
         lock.lock();
     }
+}
+
+/* The preamble lets the receivers settle */
+void M17Mode::txPreamble()
+{
+    uint8_t pre[48];
+    unsigned int bytes = (cfg_.txDelayMs * 12U) / 10U;      /* 1200 bytes a second */
+
+    std::memset(pre, 0x77, sizeof(pre));
+    while (bytes > 0U)
+    {
+        unsigned int chunk = bytes > sizeof(pre) ? (unsigned int)sizeof(pre) : bytes;
+
+        txBytes(pre, chunk);
+        bytes -= chunk;
+    }
+}
+
+bool M17Mode::sendMessage(const std::string& to, const std::string& text, std::string& error)
+{
+    std::string dest = trimmed(to);
+    std::string body = text;
+
+    if (dest.empty())
+        dest = "ALL";
+    if (dest.size() > 9U)
+    {
+        error = "the callsign the message is for is longer than 9 characters";
+        return false;
+    }
+    while (!body.empty() && (body.back() == '\n' || body.back() == '\r'))
+        body.pop_back();
+    if (body.empty())
+    {
+        error = "there is no text to send";
+        return false;
+    }
+    if (body.find('\0') != std::string::npos)
+    {
+        error = "the text has a zero byte in it";
+        return false;
+    }
+    if (body.size() > MAX_SMS_BYTES)
+    {
+        error = "the message is " + std::to_string(body.size()) + " bytes; the most that fits in a packet is " +
+                std::to_string(MAX_SMS_BYTES);
+        return false;
+    }
+    if (!running_)
+    {
+        error = "not connected";
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(txMutex_);
+
+        if (messages_.size() >= 4U)
+        {
+            error = "four messages are waiting to be sent already";
+            return false;
+        }
+        Message m;
+
+        m.to = dest;
+        m.text = body;
+        messages_.push_back(m);
+    }
+    txCv_.notify_all();
+    return true;
+}
+
+void M17Mode::setMetaText(const std::string& text)
+{
+    std::lock_guard<std::mutex> lock(txMutex_);
+
+    metaText_ = cutUtf8(text, MAX_META_BYTES);
+}
+
+/* A text message in packet mode: the link setup frame (packet type), the packet in frames of 25 bytes (type byte 05, the text,
+   a zero byte and the CRC) and the end of transmission */
+void M17Mode::txPacket(const std::string& to, const std::string& text)
+{
+    {
+        /* a call being received is over for us */
+        std::lock_guard<std::mutex> lock(rxMutex_);
+        rxEnd(CALL_RX_LOST);
+        rxReset();
+    }
+
+    std::vector<uint8_t> packet;
+
+    packet.push_back(0x05U);
+    packet.insert(packet.end(), text.begin(), text.end());
+    packet.push_back(0x00U);
+
+    uint16_t crc = packetCrc(packet.data(), packet.size());
+
+    packet.push_back((uint8_t)(crc >> 8));
+    packet.push_back((uint8_t)(crc & 0xFFU));
+
+    txActive_ = true;
+
+    CallInfo info;
+    info.event = CALL_TX_START;
+    info.src = info.dst = 0U;
+    info.group = true;
+    info.ber = 0.0F;
+    info.text = cfg_.callsign + ">" + to + " (message)";
+    if (ev_.call)
+        ev_.call(info);
+
+    link_.requestMode();
+    link_.txBegin();
+    std::memset(modState_, 0, sizeof(modState_));
+
+    M17::M17FrameEncoder encoder;
+    M17::M17LinkSetupFrame lsf;
+    M17::frame_t frame;
+
+    encoder.reset();
+    lsf.setSource(cfg_.callsign);
+    lsf.setDestination(to);
+
+    M17::streamType_t st;
+    st.value = 0U;
+    st.fields.dataMode = 0U;            /* packet */
+    st.fields.dataType = 0U;
+    st.fields.encType = 0U;
+    st.fields.encSubType = 0U;
+    st.fields.CAN = cfg_.can & 0x0FU;
+    lsf.setType(st);
+    lsf.updateCrc();
+
+    txPreamble();
+    encoder.encodeLsf(lsf, frame);
+    txBytes(frame.data(), frame.size());
+
+    unsigned int frames = 0U;
+    size_t       pos = 0U;
+    bool         ok = true;
+
+    while (ok && pos < packet.size() && running_)
+    {
+        M17::pktPayload_t payload;
+        size_t left = packet.size() - pos;
+        size_t n = left > 25U ? 25U : left;
+
+        payload.fill(0x00);
+        std::memcpy(payload.data(), packet.data() + pos, n);
+        if (pos + n >= packet.size())
+            payload[25] = (uint8_t)(0x80U | (n << 2));                  /* the last frame: how many bytes it holds */
+        else
+            payload[25] = (uint8_t)((frames & 0x1FU) << 2);             /* the frame number */
+        pos += n;
+
+        encoder.encodePacketFrame(payload, frame);
+        txBytes(frame.data(), frame.size());
+        frames++;
+        if (!link_.isOpen())
+            ok = false;
+    }
+
+    if (link_.isOpen())
+    {
+        encoder.encodeEotFrame(frame);
+        txBytes(frame.data(), frame.size());
+        txFlush();
+        link_.txEnd();
+    }
+
+    hangUntil_ = nowMs() + cfg_.modeHangMs;
+    txActive_ = false;
+
+    MessageInfo mi;
+
+    mi.received = false;
+    mi.from = cfg_.callsign;
+    mi.to = to;
+    mi.text = text;
+    if (ok)
+    {
+        log("M17: message sent to " + to + ": " + text);
+        if (ev_.message)
+            ev_.message(mi);
+    }
+    else
+    {
+        log("M17: the message to " + to + " could not be sent (the link closed)");
+    }
+
+    info.event = CALL_TX_END;
+    info.text = std::to_string(frames) + " packet frames";
+    if (ev_.call)
+        ev_.call(info);
 }
 
 void M17Mode::txCall()
@@ -788,6 +1175,29 @@ void M17Mode::txCall()
     lsf.setSource(cfg_.callsign);
     lsf.setDestination(cfg_.dest);
 
+    /* The metadata text: blocks of 13 bytes, at most four, one in the link setup frame of each superframe in turn */
+    std::string meta;
+    {
+        std::lock_guard<std::mutex> lock(txMutex_);
+
+        meta = metaText_;
+    }
+    unsigned int metaBlocks = (unsigned int)((meta.size() + 12U) / 13U);
+    uint8_t      metaData[4][14];
+
+    std::memset(metaData, 0, sizeof(metaData));
+    for (unsigned int b = 0U; b < metaBlocks; b++)
+    {
+        size_t from = (size_t)b * 13U;
+        size_t n = meta.size() - from < 13U ? meta.size() - from : 13U;
+
+        metaData[b][0] = (uint8_t)((((1U << metaBlocks) - 1U) << 4) | (1U << b));
+        std::memset(metaData[b] + 1, ' ', 13U);                         /* padded with spaces */
+        std::memcpy(metaData[b] + 1, meta.data() + from, n);
+    }
+    if (metaBlocks > 0U)
+        lsf.setMetaText(metaData[0]);
+
     M17::streamType_t st;
     st.value = 0U;
     st.fields.dataMode   = 1U;          /* stream */
@@ -798,20 +1208,7 @@ void M17Mode::txCall()
     lsf.setType(st);
     lsf.updateCrc();
 
-    /* the preamble lets the receivers settle */
-    {
-        uint8_t pre[48];
-        unsigned int bytes = (cfg_.txDelayMs * 12U) / 10U;      /* 1200 bytes a second */
-
-        std::memset(pre, 0x77, sizeof(pre));
-        while (bytes > 0U)
-        {
-            unsigned int chunk = bytes > sizeof(pre) ? (unsigned int)sizeof(pre) : bytes;
-
-            txBytes(pre, chunk);
-            bytes -= chunk;
-        }
-    }
+    txPreamble();
 
     encoder.encodeLsf(lsf, frame);
     txBytes(frame.data(), frame.size());
@@ -847,6 +1244,15 @@ void M17Mode::txCall()
             pcm[i] = 0;
 
         M17::payload_t payload;
+
+        /* the next block of the text goes into the link setup frame at the start of a superframe, when the LICH starts over */
+        if (metaBlocks > 1U && frames > 0U && frames % 6U == 0U)
+        {
+            M17::frame_t unused;
+
+            lsf.setMetaText(metaData[(frames / 6U) % metaBlocks]);
+            encoder.encodeLsf(lsf, unused);
+        }
 
         codec_->encode(pcm, payload.data());
         codec_->encode(pcm + Codec2Codec::Samples, payload.data() + Codec2Codec::BlockBytes);

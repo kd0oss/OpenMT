@@ -44,6 +44,7 @@ struct M17Config
     float        rxGain     = 1.0F;     /* scales the samples from Modem_Host (-1 turns the polarity round) */
     float        micGain    = 1.0F;     /* scales the speech before the vocoder */
     bool         standIn    = false;    /* tests: a stand in for Codec2 that passes the 8 byte block through */
+    std::string  metaText;              /* sent with every voice transmission (LSF metadata text), at most 52 bytes of UTF-8 */
 };
 
 class M17Mode : public RadioMode
@@ -68,6 +69,17 @@ public:
     void micAudio(const int16_t* pcm, size_t count);
     bool transmitting() const;
 
+    /* Text: the metadata text of the voice transmissions (changes from the next transmission on) and text messages
+       (SMS, M17 packet mode).  A message is sent as soon as the transmitter is free. */
+    bool supportsMessages() const { return true; }
+    bool sendMessage(const std::string& to, const std::string& text, std::string& error);
+    void setMetaText(const std::string& text);
+
+    /* Limits of the text: the metadata holds four blocks of 13 bytes; a packet is at most 800 bytes: the type byte, the text, a
+       zero byte and the 2 byte CRC */
+    static const size_t MAX_META_BYTES = 52U;
+    static const size_t MAX_SMS_BYTES  = 796U;
+
 private:
     enum RxState { RX_SEARCH = 0, RX_FRAME };
 
@@ -85,6 +97,8 @@ private:
     void rxTrack();
     void rxFrame(uint64_t c);
     void rxStream();
+    void rxMeta(M17::M17LinkSetupFrame& lsf);
+    void rxPacket();
     void rxEnd(CallEvent how);
     void rxStart();
     void rxReset();
@@ -93,6 +107,8 @@ private:
 
     void txThread();
     void txCall();
+    void txPacket(const std::string& to, const std::string& text);
+    void txPreamble();
     void txBytes(const uint8_t* bytes, size_t count);
     void txFlush();
 
@@ -134,6 +150,11 @@ private:
     double           rxOuterSum_;
     int              lastFn_;
     bool             rxUnsupportedLogged_;
+    std::string      rxMetaBlocks_[4];      /* the text blocks of the call being received */
+    unsigned int     rxMetaHave_;           /* bit field of the blocks received */
+    std::string      rxMetaText_;           /* the text complete so far, shown once per call and change */
+    std::vector<uint8_t> pktData_;          /* the packet being received */
+    int              pktNext_;              /* the frame number expected next, -1 = no packet under way */
 
     /* transmit */
     std::mutex         txMutex_;
@@ -142,6 +163,12 @@ private:
     bool               ptt_;
     std::atomic<bool>  txActive_;
     uint64_t           hangUntil_;
+    std::string        metaText_;           /* the metadata text for the next voice transmission */
+    struct Message
+    {
+        std::string to, text;
+    };
+    std::deque<Message> messages_;          /* waiting to be sent */
     arm_fir_interpolate_instance_q15 modFilter_;
     q15_t              modState_[16];
 };

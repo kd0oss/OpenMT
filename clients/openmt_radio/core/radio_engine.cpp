@@ -295,6 +295,27 @@ bool RadioEngine::sendDtmf(char digit)
     return mode_->sendDtmf(digit);
 }
 
+bool RadioEngine::messagesSupported() const
+{
+    return running_ && mode_ && mode_->supportsMessages();
+}
+
+bool RadioEngine::sendMessage(const std::string& to, const std::string& text, std::string& error)
+{
+    if (!running_ || !mode_)
+    {
+        error = "not connected";
+        return false;
+    }
+    return mode_->sendMessage(to, text, error);
+}
+
+void RadioEngine::setMetaText(const std::string& text)
+{
+    if (running_ && mode_)
+        mode_->setMetaText(text);
+}
+
 void RadioEngine::ptt(bool down)
 {
     if (!running_ || !mode_)

@@ -131,14 +131,38 @@ frames identical and in order, end). The same samples are decoded with noise of 
 type, CAN), stream frames (frame number, 16 bytes of speech, and a piece of the link setup in every one so a call can be joined
 late) and the end frame. Set your callsign, the destination (ALL calls everyone) and the channel access number in the window.
 **Codec2 is loaded when the mode starts**: install the library (`sudo apt install libcodec2-1.2` on Debian or Ubuntu) or the
-mode says so and does not start. Only unencrypted voice stream calls are received and sent: no packet data, encryption or
-meta text. **Receive filter**: the output of a real modem (checked on a capture from an ADF7021 modem) is already filtered, and the host's root raised cosine on top of it blurs the symbols together and turns the speech into loud noise; the default `Light` filter (two samples averaged) decodes such a capture. `Root raised cosine` is the host's own filter and tolerates more noise on a clean signal (it is the one the noise figures below were measured with). The sampling instant is refined for every frame (quarter sample steps around the sync word, keeping the one at which the symbols fall into the four levels most tightly), which took a captured call from 15 of 129 frames lost to 2. Stream frames whose number does not follow the one before are not played, so a signal too poor to decode gives silence instead of noise. The mode registers with Modem_Host as module `M17`, like `m17_host`. The receiver does not find a reversed signal by
+mode says so and does not start. Only unencrypted voice stream calls are received and sent, plus text (below): no encryption,
+no other packet data. **Receive filter**: the output of a real modem (checked on a capture from an ADF7021 modem) is already filtered, and the host's root raised cosine on top of it blurs the symbols together and turns the speech into loud noise; the default `Light` filter (two samples averaged) decodes such a capture. `Root raised cosine` is the host's own filter and tolerates more noise on a clean signal (it is the one the noise figures below were measured with). The sampling instant is refined for every frame (quarter sample steps up to two and a half samples either side of the sync word, keeping the one at which the symbols lie closest to the four levels), which took a captured call from 15 of 129 frames lost to 2. Stream frames whose number does not follow the one before are not played, so a signal too poor to decode gives silence instead of noise. The mode registers with Modem_Host as module `M17`, like `m17_host`. The receiver does not find a reversed signal by
 itself (the link setup and stream syncs are each other's opposite), so use the invert setting if one is needed.
+
+#### Text: metadata with voice and messages in packet mode
+
+**Text with voice** (up to 52 characters, UTF-8) goes into the link setup frame of every voice transmission as metadata text: four
+blocks of 13 bytes at most, one block in each superframe (6 stream frames, 240 ms) in turn, so a receiver that listens for a second
+has all of it. The first byte of a block is the number of blocks as a bit field (0001, 0011, 0111, 1111) and the number of this
+block as one bit; the text is padded with spaces. The text can be changed while connected (the field applies when you leave it) and
+is used from the next transmission on. A received call that carries such text shows it in the "Last heard" line and in the log
+(`M17: text with the call from KD0OSS: ...`) as soon as all its blocks have been heard.
+
+**Message** sends a text message (SMS) in packet mode to the callsign in **Message to** (ALL for everyone). Type the text, then press
+Enter or **Send** (connected only). The radio sends the link setup frame (packet mode, your callsign, the destination, the CAN), the
+packet in frames of 25 bytes (the type byte 05 for SMS, the UTF-8 text, a zero byte, the CRC; the last byte of a frame has the end flag, and
+the frame number or in the last frame the byte count) and the end of transmission. A message is at most 796 bytes of text (800 bytes in
+all); four can wait to be sent, and each goes out as soon as the transmitter is free (not while the key is down). The log says when it
+was sent. A received packet is put together, its CRC is checked, and a text message is written in the log (`M17: message from
+KD0OSS to W1AW: ...`); other packet types are named in the log and not shown. A packet whose start was not heard, or from which a frame was lost, is dropped.
+
+The receiver also reads the link setup frame of a call (stream or packet) and starts the call from it, which needed the sampling
+instant of the first frame after the preamble to be searched wider than before: with the narrower search that frame often failed its
+CRC, which a stream call never showed (the pieces of the link setup in the stream frames start it late) but a packet call, with no
+such pieces, depends on. The bit error figures in the end-of-call log line used the difference between two frames' counts and now use the
+count of each frame.
 
 `tests/run_m17_interop.sh <build dir>` runs the mode against the real `m17_host` (built with the stubbed database): the host
 transmits a call (from `m17_sim`, N0CALL to ALL, 12 stream frames) that the radio must decode (callsigns, end, all 24 speech
 blocks), and the radio transmits a call that the host must pass to its gateway port (link setup frame with KD0OSS, ALL and
-CAN 5, 10 stream frames with the speech identical and in order, end). With the root raised cosine filter the host's call is also decoded with noise of 400
+CAN 5, 10 stream frames with the speech identical and in order, end), and the radio sends a text message that the host must pass to its
+gateway port as a packet-mode call (link setup frame, packet frames, end; the CRC and the text are checked, and the host's own log says it detected an SMS packet). With the root raised cosine filter the host's call is also decoded with noise of 400
 (rms, on a symbol peak of about 1900), a clock error of 1000 ppm, a DC offset and 30% of the level; at noise of 600 it is lost.
 
 ### FM

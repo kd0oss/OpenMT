@@ -1258,6 +1258,199 @@ static void testM17Loopback()
 }
 
 
+/* M17 text: the metadata text of a voice call (up to four blocks, one in each superframe in turn) and text messages in packet
+   mode, each sent and then heard again through the fake host */
+static void testM17Text()
+{
+    FakeHost host;
+    Recorder rec;
+    RadioEngine engine;
+    EngineSettings s;
+    std::vector<MessageInfo> messages;
+    std::mutex messagesMutex;
+
+    s.mode                = MODE_M17;
+    s.noVocoder           = true;
+    s.link.host           = "127.0.0.1";
+    s.link.basePort       = host.port;
+    s.link.modem          = 1;
+    s.link.txAheadMs      = 0;
+    s.m17.callsign        = "KD0OSS";
+    s.m17.dest            = "ALL";
+    s.m17.can             = 3;
+    s.m17.txDelayMs       = 100;
+    s.m17.modeHangMs      = 200;
+    s.m17.metaText        = "Rick in Texas, 444.900 MHz";      /* 26 bytes: two blocks */
+
+    engine.events.rxAudio = [&rec](const int16_t* p, size_t n)
+    {
+        std::lock_guard<std::mutex> lock(rec.mutex);
+        rec.rx.insert(rec.rx.end(), p, p + n);
+    };
+    engine.events.call = [&rec](const CallInfo& c)
+    {
+        std::lock_guard<std::mutex> lock(rec.mutex);
+        rec.calls.push_back(c);
+    };
+    engine.events.log = [&rec](const std::string& t)
+    {
+        std::lock_guard<std::mutex> lock(rec.mutex);
+        rec.logs.push_back(t);
+    };
+    engine.events.message = [&messages, &messagesMutex](const MessageInfo& m)
+    {
+        std::lock_guard<std::mutex> lock(messagesMutex);
+        messages.push_back(m);
+    };
+
+    std::string error;
+    bool started = engine.start(s, error);
+    CHECK(started, "m17 text start: %s", error.c_str());
+    if (!started)
+        return;
+    CHECK(engine.messagesSupported(), "M17 does not say it supports messages");
+
+    unsigned int seots = 0U;
+
+    /* sends what the radio sent back to it as received samples and waits for the end of that call */
+    auto loopBack = [&]() -> bool
+    {
+        if (!waitFor([&host, &seots]() { std::lock_guard<std::mutex> l(host.mutex); return host.seots > seots; }, 15000))
+            return false;
+
+        std::vector<int16_t> sent;
+        {
+            std::lock_guard<std::mutex> l(host.mutex);
+            seots = host.seots;
+            sent  = host.samples;
+            host.samples.clear();
+        }
+        {
+            std::lock_guard<std::mutex> l(rec.mutex);
+            rec.calls.clear();
+        }
+        std::vector<int16_t> air(2400U, 0);
+        air.insert(air.end(), sent.begin(), sent.end());
+        air.insert(air.end(), 4800U, 0);
+        host.inject(air);
+        return waitFor([&rec]()
+        {
+            std::lock_guard<std::mutex> l(rec.mutex);
+            for (size_t i = 0U; i < rec.calls.size(); i++)
+                if (rec.calls[i].event == CALL_RX_END || rec.calls[i].event == CALL_RX_LOST)
+                    return true;
+            return false;
+        }, 8000);
+    };
+
+    /* voice with the metadata text: 36 frames, so every block comes round */
+    {
+        std::vector<int16_t> pcm(72U * 160U, 1000);
+
+        engine.ptt(true);
+        for (size_t pos = 0U; pos < pcm.size(); pos += 160U)
+        {
+            engine.pushMic(pcm.data() + pos, 160U);
+            sleepMs(20);
+        }
+        engine.ptt(false);
+        CHECK(loopBack(), "the voice call with text did not come back");
+
+        std::lock_guard<std::mutex> l(rec.mutex);
+        bool text = false;
+
+        for (size_t i = 0U; i < rec.calls.size(); i++)
+            if (rec.calls[i].event == CALL_RX_INFO && rec.calls[i].text.find("\"Rick in Texas, 444.900 MHz\"") != std::string::npos)
+                text = true;
+        CHECK(text, "the metadata text was not received with the voice call");
+    }
+
+    /* the text changes between calls (and the longest text, four blocks) */
+    engine.setMetaText("0123456789 0123456789 0123456789 0123456789 012");     /* 49 bytes: four blocks */
+    {
+        std::vector<int16_t> pcm(72U * 160U, 1000);
+
+        engine.ptt(true);
+        for (size_t pos = 0U; pos < pcm.size(); pos += 160U)
+        {
+            engine.pushMic(pcm.data() + pos, 160U);
+            sleepMs(20);
+        }
+        engine.ptt(false);
+        CHECK(loopBack(), "the second voice call did not come back");
+
+        std::lock_guard<std::mutex> l(rec.mutex);
+        bool text = false;
+
+        for (size_t i = 0U; i < rec.calls.size(); i++)
+            if (rec.calls[i].event == CALL_RX_INFO &&
+                rec.calls[i].text.find("\"0123456789 0123456789 0123456789 0123456789 012\"") != std::string::npos)
+                text = true;
+        CHECK(text, "the four block metadata text was not received");
+    }
+
+    /* messages: one frame (a short one, and one that fills the frame exactly: 1 + 21 + 1 + 2 = 25 bytes), several frames, UTF-8, the longest */
+    std::vector<std::string> texts;
+
+    texts.push_back("Hi");
+    texts.push_back("123456789012345678901");
+    texts.push_back("The repeater is back on the air after the storm. Thanks to everybody who helped put the antenna back up!");
+    texts.push_back("Caf\xC3\xA9 \xE2\x82\xAC" "5 \xE2\x80\x94 na\xC3\xAFve");
+    texts.push_back(std::string(796U, 'x'));
+
+    for (size_t t = 0U; t < texts.size(); t++)
+    {
+        std::string err;
+
+        {
+            std::lock_guard<std::mutex> l(messagesMutex);
+            messages.clear();
+        }
+        CHECK(engine.sendMessage("W1AW", texts[t], err), "message %zu not accepted: %s", t, err.c_str());
+        bool backOk = loopBack();
+        CHECK(backOk, "message %zu did not come back", t);
+        if (!backOk)
+        {
+            std::lock_guard<std::mutex> l(rec.mutex);
+            for (size_t i = 0U; i < rec.logs.size(); i++)
+                std::printf("  log: %s\n", rec.logs[i].c_str());
+            for (size_t i = 0U; i < rec.calls.size(); i++)
+                std::printf("  call %d: %s\n", (int)rec.calls[i].event, rec.calls[i].text.c_str());
+        }
+        sleepMs(100);
+
+        std::lock_guard<std::mutex> l(messagesMutex);
+        bool sentOk = false, heard = false;
+
+        for (size_t i = 0U; i < messages.size(); i++)
+        {
+            if (!messages[i].received && messages[i].text == texts[t] && messages[i].to == "W1AW")
+                sentOk = true;
+            if (messages[i].received && messages[i].text == texts[t] && messages[i].from == "KD0OSS" && messages[i].to == "W1AW")
+                heard = true;
+        }
+        CHECK(sentOk, "message %zu: no event for the message sent", t);
+        CHECK(heard, "message %zu (%zu bytes): the message was not received intact", t, texts[t].size());
+        if (!heard)
+        {
+            std::lock_guard<std::mutex> lg(rec.mutex);
+            for (size_t i = 0U; i < rec.logs.size(); i++)
+                if (rec.logs[i].find("packet") != std::string::npos || rec.logs[i].find("message from") != std::string::npos)
+                    std::printf("  log: %s\n", rec.logs[i].c_str());
+        }
+    }
+
+    std::string err;
+
+    CHECK(!engine.sendMessage("W1AW", std::string(797U, 'x'), err), "a message that is too long was accepted");
+    CHECK(!engine.sendMessage("W1AW", "", err), "an empty message was accepted");
+    CHECK(!engine.sendMessage("TOOLONGCALLSIGN", "x", err), "a callsign that is too long was accepted");
+
+    engine.stop();
+    std::printf("m17 text ok\n");
+}
+
+
 /* Amplitude of one frequency in a block of samples */
 static double goertzelAmp(const int16_t* x, size_t n, double freq, double fs)
 {
@@ -1759,8 +1952,14 @@ static void testDongleReopen()
     voc.close();
 }
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc > 1 && std::strcmp(argv[1], "m17text") == 0)         /* only the M17 text test (while working on it) */
+    {
+        testM17Text();
+        std::printf("FAILS: %d\n", failures);
+        return failures ? 1 : 0;
+    }
     testResampler();
     testNxdnLoopback();
     testDmrLoopback();
@@ -1768,6 +1967,7 @@ int main()
     testYsfLoopback();
     testDstarLoopback();
     testM17Loopback();
+    testM17Text();
     testFmLoopback();
     testFmDtmf();
     testDongle();

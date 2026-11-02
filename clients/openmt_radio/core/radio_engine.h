@@ -77,6 +77,9 @@ public:
     bool releaseModem();
     bool dtmfSupported() const;
     bool sendDtmf(char digit);
+    bool messagesSupported() const;
+    bool sendMessage(const std::string& to, const std::string& text, std::string& error);
+    void setMetaText(const std::string& text);
     void pushMic(const int16_t* pcm8k, size_t count);
 
     std::string vocoderDescription() const;

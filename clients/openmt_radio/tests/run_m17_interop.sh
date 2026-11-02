@@ -54,4 +54,12 @@ echo "=== 2. the radio transmits, m17_host receives"
 run_pair "$work/m17_radio_sim" "$work/radio_tx.raw"
 grep -v "^  ok" "$work/sim.log" || true
 grep -q "^PASS" "$work/sim.log" || status_all=1
+
+echo
+echo "=== 3. the radio sends a text message in packet mode, m17_host receives"
+"$tool" capture-msg "$work/radio_msg.raw"
+run_pair "$work/m17_radio_sim" "$work/radio_msg.raw" --packet
+grep -v "^  ok" "$work/sim.log" || true
+grep -q "^PASS" "$work/sim.log" || status_all=1
+grep -a "Packet data detected" "$work/host.log" > /dev/null && echo "m17_host: Packet data detected (it took the message for an SMS)" || echo "m17_host: no 'Packet data detected' in its log"
 exit $status_all
