@@ -2534,8 +2534,11 @@ async function getConfig()
     for (var i=0;i<tmp.length;i++)
     {
       var fields = tmp[i].split('\x1D');
-      /* mode, baud and port have their own controls; the rest are facts the bridge publishes for the modem host */
-      if (['mode', 'baud', 'port', 'modem', 'streamType', 'bridgePort', 'creditPacing', 'statusM17Index', 'calibration'].indexOf(fields[0]) >= 0)
+      /* mode, baud and port have their own controls (and calibration only decides whether the calibration tab is there).  Of the
+         other settings the ones whose display_type (the third field) is 'input' get a box; 'none' is not shown */
+      if (['mode', 'baud', 'port', 'calibration'].indexOf(fields[0]) >= 0)
+        continue;
+      if (fields[2] !== 'input')
         continue;
       modemExtras += "<label style='display:inline-block;width:200px'>"+fields[0]+"</label>&nbsp;<input id='"+fields[0]+"' type='text' value='"+fields[1]+"'><br>";
       if (modemFields != "") modemFields += ",";

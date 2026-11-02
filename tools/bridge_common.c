@@ -288,7 +288,11 @@ StreamType bridgeReadStreamType(const char* modemName)
  * bridgeDefault()
  *
  * Creates one setting of the modem with a default value, unless the setting
- * exists already; saved values are never changed.
+ * exists already; saved values are never changed.  The setting is one the
+ * user edits, so its display_type is "input" and the Modem tab of the
+ * dashboard shows it (mode, baud and port have their own controls there).
+ * Settings a bridge publishes for the modem host are written with
+ * setHostConfig() and the display_type "none", which the tab does not show.
  *
  * Parameters:
  *   modemName - Name of the modem.
@@ -299,7 +303,7 @@ StreamType bridgeReadStreamType(const char* modemName)
  */
 bool bridgeDefault(const char* modemName, const char* key, const char* value)
 {
-    return addHostConfigDefault(modemName, "config", key, "none", value);
+    return addHostConfigDefault(modemName, "config", key, "input", value);
 }
 
 /*

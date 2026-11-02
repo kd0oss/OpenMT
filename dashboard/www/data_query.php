@@ -225,11 +225,13 @@ if ($command == "getModemConfig")
     {
         $modem_name = $_GET['modem_name'];
         $params = "";
+        /* parameter, value and display_type of every setting of the modem; the dashboard shows the ones whose display_type is
+           'input' in the Modem tab ('none' is not shown) */
         $rows = db_select($mysql, "SELECT * FROM modem_host.config WHERE modem_name = ? AND module = 'config' ORDER BY id", "s", array($modem_name));
         foreach ($rows as $row)
         {
             if ($params != "") $params .= "\x1E";
-            $params .= $row[3]."\x1D".$row[5];
+            $params .= $row[3]."\x1D".$row[5]."\x1D".$row[4];
         }
         if ($params != "")
             echo htmlentities($params);
