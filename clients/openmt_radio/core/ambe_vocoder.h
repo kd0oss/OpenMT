@@ -35,6 +35,7 @@ public:
     bool encodeBatch(const int16_t* pcm, unsigned int n, uint8_t* blocks);
     bool decodeBatch(const uint8_t* blocks, unsigned int n, int16_t* pcm);
     bool setCodec(Codec codec);
+    bool ensureAlive();         /* true if the chip answers; if not it is reset, and when that does not help the port is opened again */
     bool encodeImbeBatch(const int16_t* pcm, unsigned int n, uint8_t* blocks);
     bool decodeImbeBatch(const uint8_t* blocks, unsigned int n, int16_t* pcm);
     std::string description() const;
@@ -54,10 +55,12 @@ private:
     std::unique_ptr<imbe_vocoder> imbeDec_;
     bool        open_;
     std::string device_;
+    unsigned int baud_;         /* kept to open the port again */
     std::mutex  mutex_;         /* the chip is used by the transmit and the receive side */
     unsigned int encCount_;     /* encode timing since the last report */
     double       encTotalMs_;
     double       encMaxMs_;
+    bool recoverLocked();
     void report(const char* what, unsigned int frames, double ms, unsigned int& count, double& total, double& peak);
     unsigned int decCount_;
     double       decTotalMs_;

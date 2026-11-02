@@ -161,7 +161,9 @@ try:
     check(fr == [bytes([0xE0, 4, 3, 0])], 'SET_IDLE: the modem is idle again')
     b.send(comm(2))
     fr = modem.take(0.5)
-    check(fr == [bytes([0xE0, 4, 3, 2])], 'the DMR service gets the modem')
+    # the mode command and then what clears a keyed state left by an earlier DMR service (DMR start off, abort of both slots)
+    DMRSET = [bytes([0xE0, 4, 3, 2]), bytes([0xE0, 4, 0x1D, 0]), bytes([0xE0, 4, 0x1E, 1]), bytes([0xE0, 4, 0x1E, 2])]
+    check(fr == DMRSET, 'the DMR service gets the modem (and the DMR state is cleared): %s' % [f.hex() for f in fr])
     pl = bytes([0x42]) + bytes(range(33))       # 0x42: this frame ends the transmission
     b.send(tlv(b'DMD1', pl))
     fr = modem.take(0.6)
@@ -190,7 +192,7 @@ try:
     check(bytes([0xE0, 4, 3, 0]) in fr, 'transmit timeout: the modem is put in idle: %s' % [f.hex() for f in fr])
     b.send(comm(2))
     fr = modem.take(0.5)
-    check(fr == [bytes([0xE0, 4, 3, 2])], 'the modem can be taken again afterwards')
+    check(fr == DMRSET, 'the modem can be taken again afterwards')
     b.send(comm(3))
     modem.take(0.3)
 

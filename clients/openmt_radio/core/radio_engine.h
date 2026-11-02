@@ -22,6 +22,8 @@
 namespace openmt
 {
 
+class AmbeVocoder;
+
 enum ModeId
 {
     MODE_NXDN = 0,
@@ -79,13 +81,25 @@ public:
 
     std::string vocoderDescription() const;
 
+    /* The AMBE3000R dongle.  Opening its serial port can reset it (DTR) and it needs seconds to come back, so the port is opened
+       once and stays open until closeDongle() or the end of the program, whether the mode that runs uses the dongle or not.
+       start() uses the open dongle for the modes that need it (and opens it itself if it is not open); a different device or baud
+       rate than the open one closes and reopens it. */
+    bool openDongle(const std::string& device, unsigned int baud, int chunkBytes, int gapUs, std::string& error);
+    void closeDongle();
+    bool dongleOpen() const;
+
     /* From the link's reader thread, also called by the tests */
     void onLinkClosed();
     std::function<void()> linkClosed;
 
 private:
     ModemLink                    link_;
-    std::unique_ptr<Vocoder>     vocoder_;
+    Vocoder*                     vocoder_;          /* the dongle, or nullVoc_: never owned here */
+    std::unique_ptr<Vocoder>     nullVoc_;          /* the stand in of a run that does not use the dongle */
+    std::unique_ptr<AmbeVocoder> dongle_;           /* kept open between runs */
+    std::string                  dongleDevice_;
+    unsigned int                 dongleBaud_;
     std::unique_ptr<RadioMode>   mode_;
     bool                         running_;
     FILE*                        capture_;

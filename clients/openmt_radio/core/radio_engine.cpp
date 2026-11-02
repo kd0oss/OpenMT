@@ -29,7 +29,11 @@ RadioEngine::RadioEngine() :
     events(),
     linkClosed(),
     link_(),
-    vocoder_(),
+    vocoder_(NULL),
+    nullVoc_(),
+    dongle_(),
+    dongleDevice_(),
+    dongleBaud_(0U),
     mode_(),
     running_(false),
     capture_(NULL)
@@ -39,6 +43,63 @@ RadioEngine::RadioEngine() :
 RadioEngine::~RadioEngine()
 {
     stop();
+    closeDongle();
+}
+
+bool RadioEngine::openDongle(const std::string& device, unsigned int baud, int chunkBytes, int gapUs, std::string& error)
+{
+    if (running_ && dongle_ && vocoder_ == dongle_.get() && (device != dongleDevice_ || baud != dongleBaud_))
+    {
+        error = "the dongle is in use: disconnect before changing its port";
+        return false;
+    }
+
+    AmbeVocoder::setSerialPacing(chunkBytes, gapUs);
+
+    if (dongle_ && dongle_->isOpen())
+    {
+        if (device == dongleDevice_ && baud == dongleBaud_)
+        {
+            dongle_->log = events.log;
+            if (!dongle_->ensureAlive())        /* it stopped answering while nobody used it: reset it, else open it afresh */
+            {
+                dongle_.reset();
+                dongleDevice_.clear();
+                dongleBaud_ = 0U;
+                return openDongle(device, baud, chunkBytes, gapUs, error);
+            }
+            return true;
+        }
+        closeDongle();
+    }
+
+    std::unique_ptr<AmbeVocoder> ambe(new AmbeVocoder());
+
+    ambe->log = events.log;
+    if (!ambe->open(device, baud, error))
+        return false;
+    dongle_ = std::move(ambe);
+    dongleDevice_ = device;
+    dongleBaud_ = baud;
+    if (events.log)
+        events.log("AMBE3000R: " + dongle_->description() + " on " + device + " opened; the port stays open while the program runs");
+    return true;
+}
+
+void RadioEngine::closeDongle()
+{
+    if (!dongle_)
+        return;
+    if (running_ && vocoder_ == dongle_.get())
+        return;                         /* in use */
+    dongle_.reset();
+    dongleDevice_.clear();
+    dongleBaud_ = 0U;
+}
+
+bool RadioEngine::dongleOpen() const
+{
+    return dongle_ && dongle_->isOpen();
 }
 
 bool RadioEngine::running() const
@@ -48,7 +109,7 @@ bool RadioEngine::running() const
 
 std::string RadioEngine::vocoderDescription() const
 {
-    return vocoder_ ? vocoder_->description() : std::string("none");
+    return vocoder_ != NULL ? vocoder_->description() : std::string("none");
 }
 
 bool RadioEngine::start(const EngineSettings& settings, std::string& error)
@@ -70,16 +131,19 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
 
     if (s.mode == MODE_FM)
     {
-        vocoder_.reset(new NullVocoder());              /* FM is analogue speech: no vocoder at all */
+        nullVoc_.reset(new NullVocoder());              /* FM is analogue speech: no vocoder at all */
+        vocoder_ = nullVoc_.get();
     }
     else if (s.mode == MODE_M17)
     {
-        vocoder_.reset(new NullVocoder());              /* M17 speech is Codec2, in software: no dongle is opened */
+        nullVoc_.reset(new NullVocoder());              /* M17 speech is Codec2, in software: the dongle is not used */
+        vocoder_ = nullVoc_.get();
         s.m17.standIn = s.noVocoder;
     }
     else if (s.noVocoder)
     {
-        vocoder_.reset(new NullVocoder());
+        nullVoc_.reset(new NullVocoder());
+        vocoder_ = nullVoc_.get();
         if (s.nxdn.layout < 0)
             s.nxdn.layout = (int)NXDN_CHIP_AIR;         /* the stand in passes the 72 bit block as it is */
         if (s.dmr.layout < 0)
@@ -89,14 +153,10 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
     }
     else
     {
-        std::unique_ptr<AmbeVocoder> ambe(new AmbeVocoder());
-
-        AmbeVocoder::setSerialPacing(s.ambeChunk, s.ambeGapUs);
-        ambe->log = events.log;
-
-        if (!ambe->open(s.ambeDevice, s.ambeBaud, error))
+        if (!openDongle(s.ambeDevice, s.ambeBaud, s.ambeChunk, s.ambeGapUs, error))
             return false;
-        vocoder_ = std::move(ambe);
+        vocoder_ = dongle_.get();
+        vocoder_->setCodec(Vocoder::CODEC_AMBE2);       /* the chip may have been left in D-STAR's rate by the last run */
     }
 
     switch (s.mode)
@@ -179,7 +239,8 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
             capture_ = NULL;
         }
         mode_.reset();
-        vocoder_.reset();
+        vocoder_ = NULL;
+        nullVoc_.reset();
         return false;
     }
 
@@ -207,7 +268,10 @@ void RadioEngine::stop()
         capture_ = NULL;
     }
     mode_.reset();
-    vocoder_.reset();
+    if (dongle_ && vocoder_ == dongle_.get())
+        vocoder_->setCodec(Vocoder::CODEC_AMBE2);    /* the port stays open, the chip goes back to its usual rate */
+    vocoder_ = NULL;
+    nullVoc_.reset();
 }
 
 bool RadioEngine::releaseModem()

@@ -1,6 +1,7 @@
 #include "ambe_vocoder.h"
 
 #include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +16,7 @@ AmbeVocoder::AmbeVocoder() :
     codec_(CODEC_AMBE2),
     open_(false),
     device_(),
+    baud_(0U),
     mutex_(),
     encCount_(0U),
     encTotalMs_(0.0),
@@ -49,6 +51,7 @@ bool AmbeVocoder::open(const std::string& device, unsigned int baud, std::string
     }
 
     device_ = device;
+    baud_   = baud;
     open_   = true;
     return true;
 }
@@ -116,6 +119,47 @@ bool AmbeVocoder::decode(const uint8_t* block, int16_t* pcm)
     return decodeBatch(block, 1U, pcm);
 }
 
+/* The chip did not answer: finish a packet it may be waiting for, reset it and set its rate again, without closing the port.
+   If that does not bring it back the port is closed and opened again: when the USB serial driver reports "urb stopped: -32"
+   (a stalled endpoint) it stops reading from the dongle for good, and nothing sent through the open port can help; only a
+   new open starts the reading again (and resets the dongle).  The rate in use is kept.  The caller holds the mutex. */
+bool AmbeVocoder::recoverLocked()
+{
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    bool ok = ambeRecover(&ambe_);
+    bool reopened = false;
+    char text[200];
+
+    if (!ok)
+    {
+        ambeClose(&ambe_);
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        ok       = ambeOpen(&ambe_, device_.c_str(), baud_);
+        reopened = true;
+    }
+    if (ok)
+        std::snprintf(text, sizeof(text), reopened ? "the dongle stopped answering: its port was closed and opened again, and it is answering again (%.0f ms)"
+                                                   : "the dongle stopped answering: it was reset and is answering again (%.0f ms)", elapsedMs(t0));
+    else
+        std::snprintf(text, sizeof(text), "the dongle stopped answering and did not come back after a reset%s (%.0f ms)",
+                      reopened ? " and opening the port again" : "", elapsedMs(t0));
+    if (log)
+        log(text);
+    return ok;
+}
+
+/* True when the chip answers; if it does not, it is reset (see recoverLocked) */
+bool AmbeVocoder::ensureAlive()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!open_)
+        return false;
+    if (ambeAlive(&ambe_, 500))
+        return true;
+    return recoverLocked();
+}
+
 bool AmbeVocoder::encodeBatch(const int16_t* pcm, unsigned int n, uint8_t* blocks)
 {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -123,16 +167,25 @@ bool AmbeVocoder::encodeBatch(const int16_t* pcm, unsigned int n, uint8_t* block
     if (!open_ || n == 0U)
         return false;
 
-    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    bool ok = true;
+    for (unsigned int attempt = 0U; attempt < 2U; attempt++)
+    {
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        bool ok = true;
 
-    for (unsigned int i = 0U; i < n && ok; i++)
-        ok = ambeEncodeSend(&ambe_, pcm + i * AMBE_SAMPLES);
-    for (unsigned int i = 0U; i < n && ok; i++)
-        ok = ambeEncodeRecv(&ambe_, blocks + i * AMBE_BLOCK_BYTES);
+        for (unsigned int i = 0U; i < n && ok; i++)
+            ok = ambeEncodeSend(&ambe_, pcm + i * AMBE_SAMPLES);
+        for (unsigned int i = 0U; i < n && ok; i++)
+            ok = ambeEncodeRecv(&ambe_, blocks + i * AMBE_BLOCK_BYTES);
 
-    report("encode", n, elapsedMs(t0), encCount_, encTotalMs_, encMaxMs_);
-    return ok;
+        if (ok)
+        {
+            report("encode", n, elapsedMs(t0), encCount_, encTotalMs_, encMaxMs_);
+            return true;
+        }
+        if (attempt == 0U && !recoverLocked())
+            break;
+    }
+    return false;
 }
 
 bool AmbeVocoder::decodeBatch(const uint8_t* blocks, unsigned int n, int16_t* pcm)
@@ -142,16 +195,25 @@ bool AmbeVocoder::decodeBatch(const uint8_t* blocks, unsigned int n, int16_t* pc
     if (!open_ || n == 0U)
         return false;
 
-    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    bool ok = true;
+    for (unsigned int attempt = 0U; attempt < 2U; attempt++)
+    {
+        std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+        bool ok = true;
 
-    for (unsigned int i = 0U; i < n && ok; i++)
-        ok = ambeDecodeSend(&ambe_, blocks + i * AMBE_BLOCK_BYTES);
-    for (unsigned int i = 0U; i < n && ok; i++)
-        ok = ambeDecodeRecv(&ambe_, pcm + i * AMBE_SAMPLES);
+        for (unsigned int i = 0U; i < n && ok; i++)
+            ok = ambeDecodeSend(&ambe_, blocks + i * AMBE_BLOCK_BYTES);
+        for (unsigned int i = 0U; i < n && ok; i++)
+            ok = ambeDecodeRecv(&ambe_, pcm + i * AMBE_SAMPLES);
 
-    report("decode", n, elapsedMs(t0), decCount_, decTotalMs_, decMaxMs_);
-    return ok;
+        if (ok)
+        {
+            report("decode", n, elapsedMs(t0), decCount_, decTotalMs_, decMaxMs_);
+            return true;
+        }
+        if (attempt == 0U && !recoverLocked())
+            break;
+    }
+    return false;
 }
 
 /* P25 speech: the AMBE3000R has no IMBE codec (its rates are AMBE+2 only), so the IMBE frames are made in software with

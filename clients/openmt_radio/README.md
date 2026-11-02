@@ -168,6 +168,25 @@ radio now hands the modem back whenever it connects and whenever it disconnects,
 request. Modem_Host only acts on this when the mode it holds is the radio's own, so the other protocol hosts are never
 affected; a mode held by one of them (a crashed `dmr_host`, say) can only be cleared by restarting that host.
 
+### The dongle stays open
+
+Opening the serial port of the AMBE3000R can reset it (DTR) and it then needs seconds to answer, so OpenMT Radio opens it once when the
+program starts and keeps the port open until the program ends, whatever mode runs and whether or not that mode uses the dongle
+(FM and M17 do not). Connect and Disconnect do not touch it. Pressing Connect opens it if it was not there at the start (it was
+unplugged, say) or if the device or baud rate in the window was changed; a mode that needs it and cannot open it does not start.
+At the end of a run the chip is put back to its usual AMBE+2 rate, so D-STAR (which changes it) does not leave it in the wrong one.
+
+A dongle that stops answering is reset without closing the port: if a speech frame gets no answer, the radio sends filler zeros (they
+finish a packet the chip may be waiting for), throws away what the chip sent meanwhile, resets the chip with its reset packet,
+waits for READY, sets the rate again and repeats the frame. The log says `the dongle stopped answering: it was reset and is
+answering again`. The same check, a product id request, is made each time Connect finds the port already open. A slow dongle
+If the reset does not help either (the Linux log, `dmesg`, then shows `ftdi_sio ttyUSB..: usb_serial_generic_read_bulk_callback - urb
+stopped: -32`: the USB serial driver has stopped reading from the dongle, and only a new open starts it again), the radio closes the
+port, opens it again at the same baud rate with the same rate settings, and says `its port was closed and opened again`. That takes
+a few seconds. A dongle that does this often has a USB problem: look at the cable, the power and USB autosuspend.
+(`dongle decode ... ms per 20 ms frame`, over 18 ms is too slow) is a separate problem: try the other baud rate, or a different
+`Write chunk` and `Gap between chunks`.
+
 ### The end of a transmission
 
 A modem un-keys the moment it gets the end of transmission and drops what it has not sent yet; the SX1255 bridge holds about

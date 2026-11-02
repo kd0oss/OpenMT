@@ -26,6 +26,8 @@ public:
     void ptt(bool down);
     bool releaseModem();
     bool dtmfSupported() const;
+    bool openDongle(const QString& device, unsigned int baud, int chunkBytes, int gapUs, QString& error);
+    bool dongleOpen() const;
     bool sendDtmf(char digit);
 
 public slots:

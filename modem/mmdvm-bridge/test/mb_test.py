@@ -26,6 +26,8 @@ inc = ['-I' + STUB, '-I' + ROOT + '/tools', '-I' + ROOT + '/modem', '-w']
 SRC = [HERE + '/../mmdvm_bridge.c', HERE + '/../mmdvm_frames.c', HERE + '/../mode_space.c', ROOT + '/tools/bridge_common.c', HERE + '/stubdb.c']
 run(['gcc', *inc, '-I' + HERE + '/..', *SRC, '-lutil', '-o', BUILD + '/bridge'])
 run(['gcc', *inc, '-I' + HERE + '/..', '-DTX_TIMEOUT_MS=1000U', *SRC, '-lutil', '-o', BUILD + '/bridge_to'])
+run(['gcc', *inc, '-I' + HERE + '/..', '-DDMR_FRAME_TIMEOUT_MS=1500U', *SRC, '-lutil', '-o', BUILD + '/bridge_dmr'])
+run(['gcc', *inc, '-I' + HERE + '/..', '-DSTRAY_TX_MS=1000U', *SRC, '-lutil', '-o', BUILD + '/bridge_stray'])
 run(['gcc', *inc, HERE + '/legacy_dump.c', HERE + '/legacy/mmdvm.c', ROOT + '/tools/RingBuffer.c', HERE + '/stubdb.c', '-o', BUILD + '/legacy'])
 
 def cfgfile(rows):
@@ -43,7 +45,8 @@ def rows(modem, extra=()):
             ('config', 'cwIdTxLevel', '40'), ('config', 'rxFrequency', '449900000'), ('config', 'txFrequency', '444900000'),
             ('DMR', 'txLevel', '55'), ('DSTAR', 'txLevel', '45'), ('P25', 'txLevel', '35'), ('M17', 'txLevel', '65'),
             ('FM', 'txLevel', '30'), ('YSF', 'txLevel', '52'), ('NXDN', 'txLevel', '48'), ('YSF', 'loDev', 'true')]
-    return base + list(extra)
+    keys = {(r[0], r[1]) for r in extra}
+    return [r for r in base if (r[0], r[1]) not in keys] + list(extra)
 
 def legacy(kind, flags, cfgpath):
     env = dict(os.environ, STUBCFG=cfgpath)
@@ -102,6 +105,9 @@ class Bridge:
     def stop(self):
         self.p.terminate(); self.p.wait(timeout=3)
 
+# what the bridge sends after the mode command that puts the modem in DMR: the DMR start flag off and an abort of both slots
+DMRCLR = bytes([0xE0, 4, 0x1D, 0, 0xE0, 4, 0x1E, 1, 0xE0, 4, 0x1E, 2])
+
 def split(data):
     fr = []
     while data:
@@ -148,17 +154,18 @@ print('section 4', flush=True)
 # 4. mode on: config with the mode flag, then the mode command a second later
 t0 = time.time()
 os.write(b.host, bytes([0xFE, 6, 0x02]) + b'DMR'[:3])
-got = split(b.modem_read(26 + 4, 4))
+got = split(b.modem_read(26 + 4 + 12, 4))
 exp = [with_mode(legacy('hs', 'dmr', b.cfgpath)[0], 6, 2)]
-check(len(got) == 2, 'mode on gives config + mode command, got %d' % len(got))
-if len(got) == 2:
+check(len(got) == 5, 'mode on gives config + mode command + the DMR clear, got %d' % len(got))
+if len(got) == 5:
     check(got[0] == exp[0], 'config with DMR enabled\n got %s\n exp %s' % (got[0].hex(), exp[0].hex()))
     check(got[1] == bytes([0xE0, 4, 3, 2]), 'DMR mode command')
+    check(b''.join(got[2:]) == DMRCLR, 'the DMR start flag and both slots are cleared after the DMR mode command')
     check(time.time() - t0 >= 0.9, 'mode command waits a second')
 # already enabled: only the mode command, at once
 os.write(b.host, bytes([0xFE, 6, 0x02]) + b'DMR')
-got = b.modem_read(4)
-check(got == bytes([0xE0, 4, 3, 2]), 'second enable sends the mode command only')
+got = b.modem_read(4 + 12)
+check(got == bytes([0xE0, 4, 3, 2]) + DMRCLR, 'second enable sends the mode command only (and the DMR clear)')
 
 print('section 5', flush=True)
 # 5. M17 on top, then M17 off
@@ -167,9 +174,9 @@ got = split(b.modem_read(26 + 4, 4))
 exp = legacy('hs', 'dmr,m17', b.cfgpath)
 check(len(got) == 2 and got[0] == exp[0] and got[1] == bytes([0xE0, 4, 3, 7]), 'M17 enable')
 os.write(b.host, bytes([0xFE, 6, 0x03]) + b'M17')
-got = split(b.modem_read(26 + 4, 4))
+got = split(b.modem_read(26 + 4 + 12, 4))
 exp = [with_mode(legacy('hs', 'dmr', b.cfgpath)[0], 6, 2)]
-check(len(got) == 2 and got[0] == exp[0] and got[1] == bytes([0xE0, 4, 3, 2]), 'M17 disable gives config + rests in the one mode left (DMR)')
+check(len(got) == 5 and got[0] == exp[0] and got[1] == bytes([0xE0, 4, 3, 2]) and b''.join(got[2:]) == DMRCLR, 'M17 disable gives config + rests in the one mode left (DMR)')
 
 print('section 6', flush=True)
 # 6. unknown mode name and garbage bytes are ignored, the stream recovers
@@ -295,7 +302,7 @@ check(read_frames(b.host, len(exp)) == exp, 'idle: DMR frame goes to the DMR ser
 os.write(b.master, status(d1=20, d2=0))
 time.sleep(0.1)
 os.write(b.host, relay(1, comm(2)))
-check(b.modem_read(4) == bytes([0xE0, 4, 3, 2]), 'DMR service gets the modem')
+check(b.modem_read(4 + 12) == bytes([0xE0, 4, 3, 2]) + DMRCLR, 'DMR service gets the modem')
 read_frames(b.host, 4)
 s2 = bytes([0x1A]) + bytes(range(33))
 os.write(b.host, relay(1, tlv(b'DMD2', s2)))
@@ -327,6 +334,62 @@ time.sleep(1.5)
 d = nostatus(drain(b.master))
 check(bytes([0xE0, 4, 3, 3]) in d, 'TX timeout puts the modem back to rest (YSF is the only mode, so it rests in it)')
 check(drain(b.host) == ACTIVE_NONE, 'TX timeout tells the host')
+b.stop()
+
+# a DMR transmission that stops getting frames is ended (compiled to 1.5 s here)
+b = Bridge('mmdvmhs', exe='bridge_dmr')
+split(b.modem_read(26 + 17 + 3))
+os.write(b.host, ctl(2, b'DMR') + ctl(4, bytes([1]) + b'DMR'))
+time.sleep(1.3)
+drain(b.master); drain(b.host)
+os.write(b.master, status())
+os.write(b.host, relay(1, comm(2)))
+b.modem_read(4); read_frames(b.host, 4)
+d = b''
+for i in range(6):                              # frames keep coming for 2.4 s, longer than the timeout: it stays keyed
+    os.write(b.host, relay(1, tlv(b'DMD1', bytes([0x18]) + bytes(33))))
+    time.sleep(0.4)
+    d += drain(b.master, 0.02)
+d = nostatus(d)
+check(bytes([0xE0, 4, 3, 1]) not in d and bytes([0xE0, 4, 3, 2]) not in d, 'DMR frames coming: not put back to rest')
+check(drain(b.host) == b'', 'DMR frames coming: the host is not told idle')
+time.sleep(2.2)                                 # then they stop
+d = nostatus(drain(b.master))
+check(DMRCLR in d, 'DMR frames stopped: the modem is un-keyed (DMR start off, slots aborted)')
+check(bytes([0xE0, 4, 3, 2]) not in d, 'DMR frames stopped: the mode is not sent again')
+check(drain(b.host) == b'', 'DMR frames stopped: the host is not told idle, it keeps the modem')
+# what the modem hears next still reaches the host, which still owns the modem
+os.write(b.master, bytes([0xE0, 37, 0x18, 0x01]) + bytes(33))
+check(len(read_frames(b.host, 4, 1.0)) > 0, 'DMR frames stopped: a received frame still reaches the host')
+b.stop()
+
+# a modem that reports its transmitter on while the bridge did not key it is put in its resting mode (compiled to 1 s here)
+def stat_keyed(on, rx=False):
+    return bytes([0xE0, 14, 1, 0, 2 if on else 0, (1 if on else 0) | (4 if rx else 0), 0, 0, 10, 10, 10, 10, 10, 10])
+
+b = Bridge('mmdvmhs', extra=[('config', 'mode', 'duplex')], exe='bridge_stray')
+split(b.modem_read(26 + 17 + 3))
+drain(b.master)
+for i in range(2):                              # the modem says it is keyed for a while, with nothing sent to it
+    os.write(b.master, stat_keyed(True))
+    time.sleep(0.4)
+for i in range(5):                              # keyed while a signal is being received (duplex repeating): left alone
+    os.write(b.master, stat_keyed(True, True))
+    time.sleep(0.4)
+os.write(b.master, stat_keyed(False))
+time.sleep(0.1)
+d = nostatus(drain(b.master))
+check(bytes([0xE0, 4, 3, 0]) not in d and bytes([0xE0, 4, 3, 1]) not in d, 'keyed for a short time: not touched')
+for i in range(3):
+    os.write(b.master, stat_keyed(True))
+    time.sleep(0.4)
+d = nostatus(drain(b.master))
+check(bytes([0xE0, 4, 3, 0]) in d or bytes([0xE0, 4, 3, 1]) in d or bytes([0xE0, 4, 3, 2]) in d or bytes([0xE0, 4, 3, 3]) in d,
+      'keyed with nothing sent: the modem is put in its resting mode')
+os.write(b.master, stat_keyed(False))
+time.sleep(1.5)
+d = nostatus(drain(b.master))
+check(not d, 'modem un-keyed: nothing more is sent')
 b.stop()
 
 print('FAILS:', fails)

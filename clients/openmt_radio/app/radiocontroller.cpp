@@ -60,6 +60,28 @@ void RadioController::ptt(bool down)
     engine_.ptt(down);
 }
 
+bool RadioController::openDongle(const QString& device, unsigned int baud, int chunkBytes, int gapUs, QString& error)
+{
+    engine_.events.log = [this](const std::string& text)
+    {
+        emit logLine(QString::fromStdString(text));
+    };
+
+    std::string err;
+
+    if (!engine_.openDongle(device.toStdString(), baud, chunkBytes, gapUs, err))
+    {
+        error = QString::fromStdString(err);
+        return false;
+    }
+    return true;
+}
+
+bool RadioController::dongleOpen() const
+{
+    return engine_.dongleOpen();
+}
+
 bool RadioController::dtmfSupported() const
 {
     return engine_.dtmfSupported();

@@ -61,6 +61,14 @@ bool ambeSetRate(Ambe* a, const uint16_t words[6], unsigned int bits);
 bool ambeOpen(Ambe* a, const char* device, unsigned int baud);
 void ambeClose(Ambe* a);
 
+/* A chip that stopped answering (a byte lost on the way leaves it waiting for the rest of a packet, and every packet after that
+   is read as part of it): zeros finish the packet, the answers still queued are thrown away, the chip is reset and waited for
+   until READY, and the rate in 'a' is set again.  The port stays open.  false if the chip does not come back. */
+bool ambeRecover(Ambe* a);
+
+/* A cheap question (the product id): true if the chip answers within 'timeoutMs'. */
+bool ambeAlive(Ambe* a, int timeoutMs);
+
 /* 160 samples in, 9 bytes out (11 at the 88 bit rate: the block buffers are (bits + 7) / 8 bytes) */
 bool ambeEncode(Ambe* a, const int16_t* pcm, uint8_t* block);
 /* 9 bytes in, 160 samples out */

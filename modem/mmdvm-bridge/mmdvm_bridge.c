@@ -54,6 +54,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <termios.h>
+#ifdef __linux__
+#include <linux/gpio.h>
+#include <sys/ioctl.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
@@ -87,6 +92,9 @@ typedef struct
     int      rxDCOffset, txDCOffset;
     uint8_t  cwIdLevel, dstarLevel, dmrLevel, ysfLevel, p25Level, nxdnLevel, m17Level, fmLevel;
     char     rxFreq[16], txFreq[16];
+    int      resetGpio;             /* GPIO line wired to the modem's reset, -1 = none */
+    char     resetChip[48];         /* its GPIO chip, /dev/gpiochip0 */
+    bool     dmrClear;              /* clear a stuck DMR "keyed" state whenever the modem is put in DMR mode */
 } Settings;
 
 typedef struct
@@ -131,11 +139,29 @@ static int       activeConn = -1;       /* -1: idle */
 #ifndef TX_TIMEOUT_MS
 #define TX_TIMEOUT_MS 300000U
 #endif
+/* A DMR transmission whose frames stop coming (the call ended without the end frame getting through) is ended after this
+   long, so a hotspot does not stay keyed. */
+#ifndef DMR_FRAME_TIMEOUT_MS
+#define DMR_FRAME_TIMEOUT_MS 5000U
+#endif
 static uint8_t   txq[8192];
 static size_t    txqLen = 0;
 static bool      bufReady = false;      /* enough queued to start sending */
 static bool      txOn = false;
 static uint64_t  txOnSince = 0;
+static uint64_t  lastDmrFrame = 0;      /* when the last DMR frame came from the service */
+
+/* The modem's own report of its transmitter (status frame, flag bit 0).  A modem that is keyed while the bridge has nothing to
+   send and does not think it is transmitting (txOn false) is keyed by a fault, so after STRAY_TX_MS the modem is put in its
+   idle mode; if it is still keyed STRAY_TX_MS later it is reset through the GPIO line (when there is one).  While the modem
+   reports a signal being received it is not stray, in duplex mode it is repeating it. */
+#ifndef STRAY_TX_MS
+#define STRAY_TX_MS 5000U
+#endif
+static bool      modemKeyed = false;
+static bool      modemRx    = false;    /* the modem reports a signal being received (receiving or carrier detect) */
+static uint64_t  strayStart = 0;        /* when the stray keyed state was first seen, 0 = none */
+static unsigned  strayStage = 0;        /* 0 = nothing done yet, 1 = idle mode sent, 2 = reset done */
 static uint64_t  frameClock = 0;        /* last frame sent, or first frame queued */
 static uint64_t  lastSteer = 0;
 static uint64_t  statusClock = 0;
@@ -200,7 +226,8 @@ static void createDefaults(void)
         {"useCOSAsLockout", "false"}, {"debug", "false"}, {"trace", "false"},
         {"txDelay", "100"}, {"rxLevel", "50"}, {"rxFrequency", "449900000"},
         {"txFrequency", "449900000"}, {"rxDCOffset", "0"}, {"txDCOffset", "0"},
-        {"cwIdTxLevel", "50"}, {"fmTxLevel", "50"}
+        {"cwIdTxLevel", "50"}, {"fmTxLevel", "50"},
+        {"resetGpio", "-1"}, {"resetGpioChip", "/dev/gpiochip0"}, {"dmrClear", "true"}
     };
 
     for (size_t i = 0; i < sizeof(kv) / sizeof(kv[0]); i++)
@@ -261,6 +288,14 @@ static void loadSettings(void)
     s.trace      = rdBool("config", "trace");
     s.ysfLoDev   = rdBool("YSF", "loDev");
     s.txDelay    = (unsigned)rdInt("config", "txdelay");
+
+    rd("config", "resetGpio", tmp, sizeof(tmp));
+    s.resetGpio = (tmp[0] >= '0' && tmp[0] <= '9') ? atoi(tmp) : -1;
+    rd("config", "resetGpioChip", s.resetChip, sizeof(s.resetChip));
+    if (s.resetChip[0] == '\0')
+        snprintf(s.resetChip, sizeof(s.resetChip), "/dev/gpiochip0");
+    rd("config", "dmrClear", tmp, sizeof(tmp));
+    s.dmrClear = strcasecmp(tmp, "false") != 0;
 
     if (s.hs)
     {
@@ -566,6 +601,113 @@ static bool* modeFlag(const char* name, uint8_t* code)
 }
 
 /*
+ * writeModeFrame()
+ *
+ * Sends a mode command.  When it puts the modem in DMR the keyed state a DMR service may have left behind is cleared too: the
+ * firmware keeps the "DMR started" flag the DMR host sets (MMDVM_DMR_START on) until it is told off, and only while the
+ * modem is in DMR, so a modem that was keyed when its service stopped keyed itself again the next time the mode was DMR,
+ * and kept it up.  The off command and the abort of both slots go right after the mode command, when no call can be under way.
+ *
+ * Parameters:
+ *   frame - The mode command, 4 bytes.
+ *
+ * Returns: nothing.
+ */
+static void writeModeFrame(const uint8_t* frame)
+{
+    static const uint8_t clear[12] = {MMDVM_START, 0x04, TYPE_DMR_START, 0x00,
+                                      MMDVM_START, 0x04, TYPE_DMR_ABORT, 0x01,
+                                      MMDVM_START, 0x04, TYPE_DMR_ABORT, 0x02};
+
+    writeAll(frame, 4);
+    if (frame[2] == MMDVM_MODE && frame[3] == 0x02 && cfg.dmrClear)
+    {
+        usleep(20000);
+        writeAll(clear, sizeof(clear));
+        if (debugOn)
+            fprintf(stderr, "mmdvm_bridge: DMR mode: the DMR start flag and both slots cleared\n");
+    }
+}
+
+/*
+ * unkeyDmr()
+ *
+ * Un-keys a modem that is in DMR mode without giving up the mode: the DMR start flag is turned off and both slots are
+ * aborted.  The service keeps the modem (the owner stays), so what the modem receives afterwards still goes to it.  The
+ * transmit queue is thrown away.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
+static void unkeyDmr(void)
+{
+    static const uint8_t clear[12] = {MMDVM_START, 0x04, TYPE_DMR_START, 0x00,
+                                      MMDVM_START, 0x04, TYPE_DMR_ABORT, 0x01,
+                                      MMDVM_START, 0x04, TYPE_DMR_ABORT, 0x02};
+
+    writeAll(clear, sizeof(clear));
+    txOn     = false;
+    txqLen   = 0;
+    bufReady = false;
+}
+
+/*
+ * hardwareReset()
+ *
+ * Pulses the modem's reset line low (a GPIO line, Linux GPIO character device) and gives the firmware time to start.  The
+ * MMDVM serial protocol has no reset command, so this is the one way to restart the firmware from here; it needs the reset
+ * pin of the modem wired to a GPIO line (resetGpio and resetGpioChip in the settings).
+ *
+ * Parameters: none.
+ *
+ * Returns: true if the pulse was made.
+ */
+static bool hardwareReset(void)
+{
+#if defined(__linux__) && defined(GPIO_V2_GET_LINE_IOCTL)
+    struct gpio_v2_line_request req;
+    struct gpio_v2_line_values  vals;
+    int chip = open(cfg.resetChip, O_RDWR | O_CLOEXEC);
+
+    if (chip < 0)
+    {
+        fprintf(stderr, "mmdvm_bridge: cannot open %s for the modem reset: %s\n", cfg.resetChip, strerror(errno));
+        return false;
+    }
+    memset(&req, 0, sizeof(req));
+    req.offsets[0]  = (uint32_t)cfg.resetGpio;
+    req.num_lines   = 1;
+    snprintf(req.consumer, sizeof(req.consumer), "mmdvm_bridge");
+    req.config.flags = GPIO_V2_LINE_FLAG_OUTPUT;
+    req.config.num_attrs = 1;
+    req.config.attrs[0].attr.id = GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES;
+    req.config.attrs[0].attr.values = 0;                    /* low: in reset */
+    req.config.attrs[0].mask = 1;
+    if (ioctl(chip, GPIO_V2_GET_LINE_IOCTL, &req) < 0)
+    {
+        fprintf(stderr, "mmdvm_bridge: cannot take GPIO line %d of %s for the modem reset: %s\n", cfg.resetGpio, cfg.resetChip,
+                strerror(errno));
+        close(chip);
+        return false;
+    }
+    usleep(100000);
+    vals.bits = 1;
+    vals.mask = 1;
+    ioctl(req.fd, GPIO_V2_LINE_SET_VALUES_IOCTL, &vals);    /* high: running */
+    usleep(50000);
+    close(req.fd);
+    close(chip);
+    usleep(800000);                                         /* the firmware starts */
+    fprintf(stderr, "mmdvm_bridge: modem reset through GPIO line %d of %s\n", cfg.resetGpio, cfg.resetChip);
+    return true;
+#else
+    fprintf(stderr, "mmdvm_bridge: the modem reset through a GPIO line is not available in this build\n");
+    return false;
+#endif
+}
+
+/*
  * queueModeCommand()
  *
  * Sends, now or after delayMs, the command that puts the modem into a mode.
@@ -582,7 +724,7 @@ static void queueModeCommand(uint8_t code, unsigned delayMs)
 
     if (delayMs == 0)
     {
-        writeAll(frame, 4);
+        writeModeFrame(frame);
         return;
     }
     for (size_t i = 0; i < sizeof(pending) / sizeof(pending[0]); i++)
@@ -595,7 +737,7 @@ static void queueModeCommand(uint8_t code, unsigned delayMs)
             return;
         }
     }
-    writeAll(frame, 4);     /* no free slot: send at once */
+    writeModeFrame(frame);  /* no free slot: send at once */
 }
 
 /*
@@ -659,7 +801,7 @@ static void runPending(void)
         if (pending[i].used && t >= pending[i].due)
         {
             pending[i].used = false;
-            writeAll(pending[i].frame, 4);
+            writeModeFrame(pending[i].frame);
         }
     }
 }
@@ -745,7 +887,7 @@ static void goIdle(bool modeIdle)
     txqLen     = 0;
     bufReady   = false;
     if (modeIdle)
-        writeAll(idle, 4);
+        writeModeFrame(idle);
     notifyActive(-1);
 }
 
@@ -826,6 +968,8 @@ static void handleRelay(uint8_t conn, const uint8_t* tlv, size_t tlvLen)
     if (n > 0)
     {
         writeAll(f, n);
+        if (activeConn == (int)conn && n >= 4 && f[2] == TYPE_DMR_START && f[3] == 0 && txqLen == 0)
+            txOn = false;               /* the DMR host un-keyed the modem: the transmission is over */
         return;
     }
 
@@ -864,6 +1008,8 @@ static void handleRelay(uint8_t conn, const uint8_t* tlv, size_t tlvLen)
     }
 
     queueTx(f, n);
+    if (proto == PROTO_DMR)
+        lastDmrFrame = nowMs();
     if (tx == TX_STATE_ON && !txOn)
     {
         txOn      = true;
@@ -943,7 +1089,8 @@ static void unregisterMode(const char* name)
  * millisecond at a time so that the free space stays between 10 and 12
  * frames.  After every frame the modem is asked for its status.  Also asks
  * for the status twice a second and ends a transmission that has lasted
- * longer than the transmit timeout.
+ * longer than the transmit timeout, or a DMR transmission that has had no
+ * frame from the service for DMR_FRAME_TIMEOUT_MS with nothing left to send.
  *
  * Parameters: none.
  *
@@ -965,6 +1112,66 @@ static void pace(void)
     {
         fprintf(stderr, "mmdvm_bridge: TX timeout. Setting mode to idle.\n");
         goIdle(true);
+    }
+
+    if (txOn && txqLen == 0 && activeConn >= 0 && conns[activeConn].proto == PROTO_DMR &&
+        t - lastDmrFrame >= DMR_FRAME_TIMEOUT_MS)
+    {
+        fprintf(stderr, "mmdvm_bridge: no DMR frames for %u ms. Ending the transmission, un-keying the modem.\n",
+                (unsigned)DMR_FRAME_TIMEOUT_MS);
+        unkeyDmr();                     /* the service keeps the modem, or it would not hear what is received next */
+    }
+
+    /* the modem is keyed and the bridge does not know why.  A duplex board repeats what it receives, so while a signal is being
+       received the timer is held; it runs again from the moment the reception stops (the hang time) */
+    if (modemKeyed && !txOn && txqLen == 0 && !modemRx)
+    {
+        if (strayStart == 0)
+        {
+            strayStart = t;
+        }
+        else if (t - strayStart >= STRAY_TX_MS && strayStage < 2)
+        {
+            if (strayStage == 0)
+            {
+                fprintf(stderr, "mmdvm_bridge: the modem has been transmitting for %u ms and the bridge did not key it. Setting mode to idle.\n",
+                        (unsigned)STRAY_TX_MS);
+                if (activeConn >= 0 && conns[activeConn].proto == PROTO_DMR)
+                    unkeyDmr();         /* the DMR service keeps the modem */
+                else
+                    goIdle(true);
+                strayStage = 1;
+            }
+            else if (cfg.resetGpio >= 0)
+            {
+                uint8_t code = MODE_IDLE_CODE;
+
+                fprintf(stderr, "mmdvm_bridge: the modem is still transmitting. Resetting it.\n");
+                txOn     = false;
+                txqLen   = 0;
+                bufReady = false;
+                if (hardwareReset())
+                    tcflush(modemFd, TCIOFLUSH);
+                modemLen   = 0;
+                modemKeyed = false;
+                startModem();
+                if (activeConn >= 0 && modeFlag(conns[activeConn].name, &code) != NULL)
+                    queueModeCommand(code, 1000);   /* the service still has the modem: put it back in its mode */
+                else
+                    queueModeCommand(restingMode(), 1000);
+                strayStage = 2;
+            }
+            else
+            {
+                strayStage = 2;         /* no reset line: nothing more to try */
+            }
+            strayStart = t;
+        }
+    }
+    else
+    {
+        strayStart = 0;
+        strayStage = 0;
     }
 
     if (txqLen == 0)
@@ -1064,7 +1271,11 @@ static void handleModemFrame(const uint8_t* f, size_t len)
         return;
     }
     if (type == MMDVM_ACK)
+    {
+        if (debugOn)
+            fprintf(stderr, "mmdvm_bridge: modem acknowledged command %02X\n", len > 3 ? f[3] : 0);
         return;
+    }
     if ((type & 0xf0U) == 0xf0U)
     {
         char text[256];
@@ -1091,6 +1302,25 @@ static void handleModemFrame(const uint8_t* f, size_t len)
     }
     if (type == MMDVM_STATUS)
     {
+        /* the modem's own view: which mode it is in and whether it is transmitting.  A change is logged, so a modem that is keyed
+           when it should not be shows up in the log (state 2 is DMR; flag bit 0 is the transmitter) */
+        if (len > 5)
+        {
+            static int lastState = -1, lastFlags = -1;
+
+            modemKeyed = (f[5] & 0x01U) != 0;
+            modemRx    = (f[5] & 0x0CU) != 0;
+            static const char* const NAMES[] = {"idle", "D-STAR", "DMR", "YSF", "P25", "NXDN", "POCSAG", "M17", "?", "?", "FM"};
+
+            if ((int)f[4] != lastState || (int)(f[5] & 0x0DU) != lastFlags)
+            {
+                lastState = f[4];
+                lastFlags = f[5] & 0x0D;
+                fprintf(stderr, "mmdvm_bridge: modem status: mode %s (%u), transmitter %s, receiving %s, carrier detect %s\n",
+                        f[4] < 11 ? NAMES[f[4]] : (f[4] == 0x63 ? "lockout" : (f[4] == 0x64 ? "error" : "?")), (unsigned)f[4],
+                        (f[5] & 0x01U) ? "ON" : "off", (f[5] & 0x04U) ? "yes" : "no", (f[5] & 0x08U) ? "yes" : "no");
+            }
+        }
         setSpacesFromStatus(f, len, cfg.hs ? 13 : 12);
         return;
     }
@@ -1412,6 +1642,8 @@ int main(int argc, char** argv)
     fprintf(stderr, "mmdvm_bridge: %s (%s) at %u baud, host port %s -> %s\n", devPath,
             cfg.hs ? "hotspot" : "full board", cfg.baud, link, slave);
 
+    if (cfg.resetGpio >= 0 && hardwareReset())
+        tcflush(modemFd, TCIOFLUSH);    /* what the firmware said while it started is not for the host */
     startModem();
     statusClock = nowMs();
 

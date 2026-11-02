@@ -56,6 +56,8 @@ MainWindow::MainWindow(QWidget* parent) :
     QObject::connect(radio_, SIGNAL(linkLost()), this, SLOT(onLinkLost()));
     QObject::connect(audio_, SIGNAL(micAudio(QVector<qint16>, float)), this, SLOT(onMicAudio(QVector<qint16>, float)));
     QObject::connect(audio_, SIGNAL(playLevel(float)), this, SLOT(onSpeakerLevel(float)));
+
+    openDongle();                       /* the dongle's port stays open from here until the program ends */
 }
 
 MainWindow::~MainWindow()
@@ -704,7 +706,7 @@ void MainWindow::onConnect()
     es.dmr.slot = (unsigned int)dmrSlot_->currentData().toInt();
     es.dmr.txTimingMs = dmrTiming_->value();
     es.dmr.layout = es.nxdn.layout == 0 ? -1 : es.nxdn.layout;      /* "no FEC" is an NXDN arrangement only */
-    es.ambeDevice = ambeDev_->text().toStdString();
+    es.ambeDevice = ambeDev_->text().trimmed().toStdString();
     es.ambeBaud = ambeBaud_->currentText().toUInt();
     es.noVocoder = noVocoder_->isChecked();
     {
@@ -762,6 +764,9 @@ void MainWindow::onConnect()
 
     QString error;
     log_->clear();                                      /* a new connection starts with an empty log */
+    openDongle();                                       /* normally open already; this opens it if it was not there at the start */
+    if (radio_->dongleOpen())
+        onLog("AMBE3000R: the serial port is open");
     status_->setText("Connecting...");
 
     if (!radio_->start(es, error))
@@ -852,6 +857,19 @@ void MainWindow::placeDtmfPad()
         p.setX(0);
     dtmfPad_->move(p);
     dtmfPad_->raise();
+}
+
+/* Opens the AMBE3000R if it is not open (or its port or speed has been changed).  It is never closed again before the program
+   ends, whether or not the mode in use needs it: opening the port can reset the dongle and it takes seconds to come back. */
+void MainWindow::openDongle()
+{
+    if (noVocoder_->isChecked() || ambeDev_->text().trimmed().isEmpty())
+        return;
+
+    QString error;
+
+    if (!radio_->openDongle(ambeDev_->text().trimmed(), ambeBaud_->currentText().toUInt(), ambeChunk_->value(), ambeGap_->value(), error))
+        onLog("AMBE3000R: " + error + " (it is tried again when you press Connect)");
 }
 
 void MainWindow::onDtmfToggle(bool on)

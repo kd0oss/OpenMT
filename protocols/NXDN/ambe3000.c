@@ -539,6 +539,112 @@ bool ambeOpen(Ambe* a, const char* device, unsigned int baud)
 }
 
 /*
+ * ambeAlive()
+ *
+ * Asks the chip for its product id to see that it answers.
+ *
+ * Parameters:
+ *   a         - The AMBE connection.
+ *   timeoutMs - Longest wait for the answer, in milliseconds.
+ *
+ * Returns: true if the chip answered.
+ */
+bool ambeAlive(Ambe* a, int timeoutMs)
+{
+    static const uint8_t req[1] = { FIELD_PRODID };
+    uint8_t rx[PKT_MAX];
+    size_t  rxLen = 0U;
+
+    if (a->fd < 0)
+        return false;
+    tcflush(a->fd, TCIFLUSH);
+    return control(a, req, sizeof(req), rx, &rxLen, timeoutMs);
+}
+
+/*
+ * ambeRecover()
+ *
+ * Gets a chip that has stopped answering going again without closing the port: filler to finish a packet it may be waiting
+ * for, what it has sent meanwhile thrown away, a reset until it announces READY, then the rate that was set and the
+ * initialise packet.
+ *
+ * Parameters:
+ *   a - The AMBE connection.
+ *
+ * Returns: true if the chip answered the reset and accepted the rate.
+ */
+bool ambeRecover(Ambe* a)
+{
+    static const uint8_t reset[1] = { FIELD_RESET };
+    uint8_t rx[PKT_MAX];
+    size_t  rxLen = 0U;
+    bool    ready = false;
+
+    if (a->fd < 0)
+        return false;
+
+    for (unsigned int attempt = 0U; attempt < 2U && !ready; attempt++)
+    {
+        uint8_t zeros[16];
+
+        memset(zeros, 0, sizeof(zeros));
+        for (unsigned int k = 0U; k < 24U; k++)
+        {
+            writeAll(a->fd, zeros, sizeof(zeros));
+            tcdrain(a->fd);
+            usleep(2000);
+        }
+        usleep(50000);
+        tcflush(a->fd, TCIOFLUSH);
+
+        sendPacket(a->fd, TYPE_CONTROL, reset, sizeof(reset));
+        for (unsigned int tries = 0U; tries < 6U && !ready; tries++)
+        {
+            int type = readPacket(a->fd, rx, &rxLen, 1500);
+
+            if (type < 0)
+                break;
+            if (type == (int)TYPE_CONTROL && rxLen >= 1U && rx[0] == FIELD_READY)
+                ready = true;
+        }
+    }
+    if (!ready)
+        return false;
+
+    {
+        uint8_t req[13];
+        size_t  reqLen;
+
+        if (a->rateIndex >= 0)
+        {
+            req[0] = FIELD_RATET;
+            req[1] = (uint8_t)a->rateIndex;
+            reqLen = 2U;
+        }
+        else
+        {
+            req[0] = FIELD_RATEP;
+            for (unsigned int i = 0U; i < 6U; i++)
+            {
+                req[1U + i * 2U] = (uint8_t)(a->rate[i] >> 8);
+                req[2U + i * 2U] = (uint8_t)a->rate[i];
+            }
+            reqLen = 13U;
+        }
+        if (!control(a, req, reqLen, rx, &rxLen, 1000) || (rxLen >= 2U && rx[1] != 0x00U))
+            return false;
+    }
+
+    if (ambeInit != 0)
+    {
+        uint8_t req[2] = { FIELD_INIT, (uint8_t)ambeInit };
+
+        control(a, req, sizeof(req), rx, &rxLen, 2000);
+    }
+    return true;
+}
+
+/*
  * ambeSetRate()
  *
  * Sets the rate of a chip that is open: the six rate control words are sent (PKT_RATEP) and the vocoder is started

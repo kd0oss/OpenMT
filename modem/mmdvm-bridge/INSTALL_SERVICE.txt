@@ -23,3 +23,24 @@ The bridge writes two settings of its own so the modem host can find it: streamT
 
 Tests: python3 modem/mmdvm-bridge/test/mb_test.py (compares the frames with the ones the
 modem host built before the bridge existed).
+
+Clearing a modem that stays keyed in DMR
+----------------------------------------
+The MMDVM firmware keeps the "DMR started" state the DMR host sets (it keys the transmitter) until it is told off, and only
+accepts the off command while the modem is in DMR mode.  A modem that was keyed when its DMR service stopped therefore keys itself
+again the next time the mode is DMR.  Whenever the bridge puts the modem in DMR mode it now sends, right after the mode command,
+DMR start off and an abort of both slots.  The setting "dmrClear" (config, default true) turns this off.
+
+The MMDVM serial protocol has no reset command.  If the reset pin of the modem is wired to a GPIO line of the computer, the bridge
+can reset the firmware when it starts: set "resetGpio" (config) to the line number (default -1: none) and, if it is not the first,
+"resetGpioChip" (default /dev/gpiochip0).  The line is pulled low for 100 ms, then high, and the bridge waits for the firmware
+to start before it sends its configuration.  Check which line your board uses; a wrong line can reset or drive something else.
+
+A modem that keys itself
+------------------------
+The bridge asks the modem for its status twice a second and reads the transmitter flag.  If the modem reports its transmitter on
+for 5 seconds while the bridge has nothing to send and did not key it (a stuck modem, which the DMR frame timeout cannot see
+because the bridge never thought it was transmitting), the bridge puts the modem in its resting mode.  If it is still keyed 5
+seconds later and "resetGpio" is set, the modem is reset through that line and configured again.  This applies in simplex and
+duplex mode alike.  While the modem reports a signal being received it is not counted (a duplex board repeats it); the 5 seconds
+run again from the moment the reception stops, so the hang time must be shorter than that.  Both actions are written to the log.

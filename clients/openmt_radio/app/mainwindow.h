@@ -41,6 +41,7 @@ private slots:
     void onDtmfToggle(bool on);
     void onDtmfKey();
     void placeDtmfPad();
+    void openDongle();
     void onPttPressed();
     void onPttReleased();
     void onCallEvent(int event, unsigned int src, unsigned int dst, bool group, float ber, const QString& text);

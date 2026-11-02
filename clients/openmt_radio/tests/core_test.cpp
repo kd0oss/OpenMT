@@ -9,6 +9,8 @@
 #include <cstring>
 #include <mutex>
 #include <netinet/in.h>
+#include <poll.h>
+#include <pty.h>
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
@@ -16,6 +18,7 @@
 
 #include "radio_engine.h"
 #include "resampler.h"
+#include "ambe_vocoder.h"
 
 extern "C"
 {
@@ -1494,6 +1497,268 @@ static void testFmDtmf()
     engine.stop();
 }
 
+/* the dongle is opened by the program, not by a run; a port that is not there is an error, and a run without the dongle works */
+static void testDongle()
+{
+    RadioEngine engine;
+    std::string error;
+
+    CHECK(!engine.dongleOpen(), "the dongle is open before anything opened it");
+    CHECK(!engine.openDongle("/dev/this_port_is_not_there", 460800U, 64, 500, error), "a port that is not there was opened");
+    CHECK(error.find("cannot open") != std::string::npos, "error text: %s", error.c_str());
+    CHECK(!engine.dongleOpen(), "open after a failed open");
+    engine.closeDongle();                       /* nothing to close: no harm */
+}
+
+/* ------------------------------------------------------------------------------------------------ fake AMBE3000R */
+
+/* A chip on a pty: READY, product id, rate and initialise answers, speech to a channel packet and back.  stuck() makes it lose
+   the sync like a chip that was left waiting for the rest of a packet: it swallows everything until 200 zero bytes in a row
+   (or a reset after those) get it going again. */
+struct FakeChip
+{
+    int                master = -1, slave = -1;
+    std::string        name;
+    std::atomic<bool>  run, stuckNow, deaf;
+    std::thread        th;
+    std::atomic<unsigned int> resets, answers, opens;
+    bool               watchClose;      /* the chip sees the port being closed and opened (a USB stall that only a new open clears) */
+
+    explicit FakeChip(bool watch = false) : run(true), stuckNow(false), deaf(false), resets(0U), answers(0U), opens(0U),
+                                            watchClose(watch)
+    {
+        openpty(&master, &slave, NULL, NULL, NULL);
+        name = ttyname(slave);
+        if (watchClose)
+        {
+            close(slave);               /* master polls POLLHUP while nobody has the port open */
+            slave = -1;
+        }
+        th = std::thread(&FakeChip::loop, this);
+    }
+    ~FakeChip()
+    {
+        run = false;
+        th.join();
+        close(master);
+        if (slave >= 0)
+            close(slave);
+    }
+    void send(uint8_t type, const std::vector<uint8_t>& payload)
+    {
+        std::vector<uint8_t> p;
+
+        p.push_back(0x61);
+        p.push_back((uint8_t)(payload.size() >> 8));
+        p.push_back((uint8_t)payload.size());
+        p.push_back(type);
+        p.insert(p.end(), payload.begin(), payload.end());
+        (void)!write(master, p.data(), p.size());
+    }
+    void loop()
+    {
+        std::vector<uint8_t> in;
+        unsigned int zeros = 0U;
+        bool announced = false;
+        bool closed = watchClose;
+        uint64_t began = nowMsTest();
+
+        while (run)
+        {
+            if (!closed && !announced && nowMsTest() - began > 150U)
+            {
+                send(0x00, {0x39});                         /* READY */
+                announced = true;
+            }
+            struct pollfd pf = { master, POLLIN, 0 };
+
+            if (poll(&pf, 1, watchClose ? 2 : 20) < 0)
+                continue;
+            if (watchClose)
+            {
+                if (pf.revents & POLLHUP)
+                {
+                    closed = true;
+                    usleep(1000);
+                    continue;
+                }
+                if (closed)                                 /* opened again: the chip starts afresh, as a dongle does */
+                {
+                    closed    = false;
+                    deaf      = false;
+                    stuckNow  = false;
+                    announced = false;
+                    began     = nowMsTest();
+                    in.clear();
+                    opens++;
+                }
+            }
+            if (!(pf.revents & POLLIN))
+                continue;
+            uint8_t b[512];
+            ssize_t n = read(master, b, sizeof(b));
+
+            for (ssize_t i = 0; i < n; i++)
+            {
+                if (deaf)
+                    continue;                               /* nothing gets through any more */
+                if (stuckNow)
+                {
+                    zeros = b[i] == 0U ? zeros + 1U : 0U;
+                    if (zeros >= 200U)
+                    {
+                        stuckNow = false;
+                        in.clear();
+                    }
+                    continue;
+                }
+                in.push_back(b[i]);
+                while (!in.empty() && in[0] != 0x61)
+                    in.erase(in.begin());
+                if (in.size() >= 4U)
+                {
+                    size_t len = ((size_t)in[1] << 8) | in[2];
+
+                    if (in.size() >= 4U + len)
+                    {
+                        uint8_t type = in[3];
+                        std::vector<uint8_t> pl(in.begin() + 4, in.begin() + 4 + (long)len);
+
+                        in.erase(in.begin(), in.begin() + 4 + (long)len);
+                        answer(type, pl);
+                    }
+                }
+            }
+        }
+    }
+    void answer(uint8_t type, const std::vector<uint8_t>& pl)
+    {
+        answers++;
+        if (type == 0x00 && !pl.empty())
+        {
+            if (pl[0] == 0x33)
+            {
+                resets++;
+                send(0x00, {0x39});
+            }
+            else if (pl[0] == 0x30)
+                send(0x00, {0x30, 'F', 'A', 'K', 'E'});
+            else
+                send(0x00, {pl[0], 0x00});
+        }
+        else if (type == 0x02 && pl.size() >= 322U)         /* speech in, channel out */
+        {
+            std::vector<uint8_t> ch = {0x01, 72};
+
+            for (unsigned int i = 0U; i < 9U; i++)
+                ch.push_back(pl[2U + i * 2U + 1U]);
+            send(0x01, ch);
+        }
+        else if (type == 0x01 && pl.size() >= 11U)           /* channel in, speech out */
+        {
+            std::vector<uint8_t> sp = {0x00, 160};
+
+            for (unsigned int i = 0U; i < 160U; i++)
+            {
+                sp.push_back(pl[2U + (i % 9U)]);
+                sp.push_back(0x00);
+            }
+            send(0x02, sp);
+        }
+    }
+};
+
+static void testDongleRecovery()
+{
+    FakeChip chip;
+    AmbeVocoder voc;
+    std::string error;
+    std::vector<std::string> logs;
+
+    voc.log = [&logs](const std::string& t) { logs.push_back(t); };
+    AmbeVocoder::setSerialPacing(0, 0);
+    CHECK(voc.open(chip.name, 460800U, error), "the fake chip did not open: %s", error.c_str());
+    if (!voc.isOpen())
+        return;
+
+    int16_t pcm[160 * 3];
+    uint8_t blocks[9 * 3];
+    int16_t back[160 * 3];
+
+    for (size_t i = 0U; i < 160U * 3U; i++)
+        pcm[i] = (int16_t)(1000 + (int)(i % 97U) * 7);
+
+    CHECK(voc.encodeBatch(pcm, 3U, blocks), "encode with a working chip");
+    CHECK(voc.decodeBatch(blocks, 3U, back), "decode with a working chip");
+    CHECK(voc.ensureAlive(), "ensureAlive on a working chip");
+    CHECK(chip.resets == 0U, "%u resets before any trouble", chip.resets.load());
+
+    /* the chip loses the sync: the decode must come back by itself after a reset */
+    chip.stuckNow = true;
+    uint64_t t0 = nowMsTest();
+    bool ok = voc.decodeBatch(blocks, 3U, back);
+
+    CHECK(ok, "the decode did not recover from a chip that lost the sync");
+    CHECK(chip.resets >= 1U, "no reset was sent to a chip that stopped answering");
+    bool said = false;
+
+    for (size_t i = 0U; i < logs.size(); i++)
+        if (logs[i].find("was reset and is answering again") != std::string::npos)
+            said = true;
+    CHECK(said, "the recovery was not logged");
+    std::printf("dongle recovery: took %llu ms\n", (unsigned long long)(nowMsTest() - t0));
+    CHECK(voc.decodeBatch(blocks, 3U, back), "decode after the recovery");
+
+    /* it also stops answering while nobody uses it */
+    chip.stuckNow = true;
+    CHECK(voc.ensureAlive(), "ensureAlive did not recover a stuck chip");
+    CHECK(voc.encodeBatch(pcm, 3U, blocks), "encode after ensureAlive recovered");
+
+    voc.close();
+}
+
+/* the read side of the port dies (kernel: "urb stopped: -32"): zeros and resets do nothing, only closing and opening the port helps */
+static void testDongleReopen()
+{
+    FakeChip chip(true);
+    AmbeVocoder voc;
+    std::string error;
+    std::vector<std::string> logs;
+
+    voc.log = [&logs](const std::string& t) { logs.push_back(t); };
+    AmbeVocoder::setSerialPacing(0, 0);
+    CHECK(voc.open(chip.name, 460800U, error), "the fake chip (watching the port) did not open: %s", error.c_str());
+    if (!voc.isOpen())
+        return;
+
+    int16_t pcm[160 * 3];
+    uint8_t blocks[9 * 3];
+    int16_t back[160 * 3];
+
+    for (size_t i = 0U; i < 160U * 3U; i++)
+        pcm[i] = (int16_t)(1000 + (int)(i % 97U) * 7);
+    CHECK(voc.encodeBatch(pcm, 3U, blocks), "encode before the stall");
+    CHECK(chip.opens == 1U, "%u opens before the stall", chip.opens.load());
+
+    chip.deaf = true;
+    uint64_t t0 = nowMsTest();
+
+    CHECK(voc.encodeBatch(pcm, 3U, blocks), "the encode did not recover from a dead read side");
+    std::printf("dongle reopen: took %llu ms\n", (unsigned long long)(nowMsTest() - t0));
+    CHECK(chip.opens >= 2U, "the port was not opened again (%u opens)", chip.opens.load());
+    bool said = false;
+
+    for (size_t i = 0U; i < logs.size(); i++)
+        if (logs[i].find("closed and opened again") != std::string::npos)
+            said = true;
+    CHECK(said, "the reopening was not logged");
+    CHECK(voc.decodeBatch(blocks, 3U, back), "decode after the port was opened again");
+
+    chip.deaf = true;
+    CHECK(voc.ensureAlive(), "ensureAlive did not recover a dead read side");
+    voc.close();
+}
+
 int main()
 {
     testResampler();
@@ -1505,6 +1770,9 @@ int main()
     testM17Loopback();
     testFmLoopback();
     testFmDtmf();
+    testDongle();
+    testDongleRecovery();
+    testDongleReopen();
 
     if (failures)
     {
