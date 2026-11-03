@@ -2539,6 +2539,9 @@ static void fatalSignalHandler(int sig)
                        (sig == SIGTERM) ? "SIGTERM (killed)" :
                        (sig == SIGHUP)  ? "SIGHUP (terminal closed)" : "signal";
     char msg[96];
+    /* the backtrace can hang (a lock held by the thread that crashed): the default action of SIGALRM ends the process anyway */
+    signal(SIGALRM, SIG_DFL);
+    alarm(3);
     int n = snprintf(msg, sizeof msg, "\nModem_Host: FATAL %s [%d]\n", name, sig);
 
     if (n > 0)
@@ -2810,7 +2813,10 @@ int main(int argc, char** argv)
     RingBuffer_Init(&modemCommandBuffer, 16384);
     RingBuffer_Init(&modemTxBuffer, 8192);
     RingBuffer_Init(&rxModeBuffer, 64000);  /* TX_AHEAD (400 ms = 19200 B) + jitter */
-    RingBuffer_Init(&txModeBuffer, 10000);
+    /* From the modem to the services: 48 KB of samples a second.  While idle one thread passes them on, and that thread also reads
+     * the dashboard commands from the database, so a slow query (or a service slow to read its socket) holds it up; 10000 bytes
+     * lasted 0.2 s and overflowed now and then, which throws away the samples a service needs to detect a call.  This holds 1.3 s. */
+    RingBuffer_Init(&txModeBuffer, 64000);
 
     for (uint8_t i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
     {
@@ -2987,16 +2993,11 @@ int main(int argc, char** argv)
     logError(modemName, "main", "Modem host terminated.");
     pthread_mutex_unlock(&shutDownMutex);
 
-    /* Cleanup RingBuffers */
-    RingBuffer_Destroy(&modemCommandBuffer);
-    RingBuffer_Destroy(&modemTxBuffer);
-    RingBuffer_Destroy(&rxModeBuffer);
-    RingBuffer_Destroy(&txModeBuffer);
-    for (uint8_t i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
-    {
-        RingBuffer_Destroy(&hostClient[i].command);
-        pthread_mutex_destroy(&hostClient[i].commandMutex);
-    }
-
+    /* The other threads (modem writer, mode writer, TCP server, timers) are still running and use the ring buffers, so the
+     * buffers are NOT destroyed here: freeing them under those threads crashed the host (SIGSEGV) and left it half dead instead
+     * of ended.  The process ends now with a failure status, and the service manager starts it again (Restart=always); at
+     * start it waits for the bridge, which creates its port again.  _exit() does not wait for the threads. */
+    fflush(stderr);
+    _exit(atomic_load(&running) ? 1 : 0);
     return 0;
 }
