@@ -1,0 +1,19 @@
+# /etc/systemd/system/openmt-flasher.service
+# Runs as root: it flashes the firmware files of the dashboard's Firmware tab to the modem when asked.
+[Unit]
+Description=OpenMT Firmware Flasher
+After=network.target mariadb.service
+Wants=mariadb.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/OpenMT/tools/firmware_flasher
+ExecStart=/usr/bin/php /home/pi/OpenMT/tools/firmware_flasher/flasher.php
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
