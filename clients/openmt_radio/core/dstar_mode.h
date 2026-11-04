@@ -115,6 +115,9 @@ private:
     uint64_t         eotReg_;
     unsigned int     frameIndex_;
     unsigned int     syncMisses_;
+    uint64_t         hdrReg_;               /* the last 32 bits decided while a header is collected (a better sync match restarts it) */
+    unsigned int     lockErr_;              /* bit errors of the sync match the header started at */
+    unsigned int     candErr_;              /* ... of the match waiting for its phase to be chosen */
     uint64_t         pendingC_;             /* sample of a sync match waiting for the best phase to be chosen, 0 = none */
     unsigned int     diagBad_;              /* badHeaders_ at the last report */
     unsigned int     badHeaders_;           /* headers whose CRC was wrong */

@@ -245,8 +245,26 @@ span.psw
 {
   margin-top: 1px;
   margin-left: 0px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   background-color: #000000;
+  display: flex;
+}
+
+/* The tab names stay on one line.  The tabs share the width of the row by the length of their text (the widths
+   written on the buttons are only the old fixed shares); a row that is still too narrow scrolls sideways. */
+.stabs .stablink
+{
+  width: auto !important;
+  flex: 1 0 auto;
+  float: none;
+  white-space: nowrap;
+  padding: 0 14px;
+}
+
+.tablink
+{
+  white-space: nowrap;
 }
 
 #settingtab
@@ -397,6 +415,127 @@ span.psw
 #servicestab
 {
   background-color: #b9e3f5;
+}
+
+#firmwaretab
+{
+  background-color: #ffd9a8;
+}
+
+/* Firmware tab: choose the options, build, download the files */
+#fwNote
+{
+  white-space: pre-wrap;
+}
+
+.fw_bar
+{
+  flex: 0 0 auto;
+  margin-bottom: 4px;
+}
+
+.fw_bar select, .fw_bar button
+{
+  font-size: 15px;
+  margin: 0 8px 0 2px;
+}
+
+.fw_bar button
+{
+  height: 28px;
+  background-color: lightyellow;
+}
+
+.fw_bar button:disabled
+{
+  opacity: 0.4;
+  cursor: default;
+}
+
+.fw_about
+{
+  font-size: 14px;
+  margin-bottom: 4px;
+}
+
+.fw_options
+{
+  display: flex;
+  flex-wrap: wrap;
+  border: 2px solid #555;
+  background-color: #fff3e0;
+  padding: 4px 6px;
+  margin-bottom: 6px;
+}
+
+.fw_opt
+{
+  width: 33%;
+  min-width: 300px;
+  box-sizing: border-box;
+  padding: 2px 8px 4px 0;
+  font-size: 14px;
+}
+
+.fw_opt label
+{
+  display: block;
+  font-weight: bold;
+}
+
+.fw_opt select, .fw_opt input[type=number]
+{
+  font-size: 14px;
+  max-width: 100%;
+}
+
+.fw_opt input[type=number]
+{
+  width: 11ch;                  /* 7 digits and the arrows of the box */
+}
+
+.fw_help
+{
+  display: block;
+  font-size: 12px;
+  color: #555;
+}
+
+.fw_files
+{
+  font-size: 15px;
+  margin: 2px 0;
+}
+
+.fw_files a
+{
+  margin-right: 16px;
+}
+
+.fw_flash
+{
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px solid #888;
+}
+
+.fw_flash_title
+{
+  font-weight: bold;
+  margin-bottom: 4px;
+}
+
+.fw_log
+{
+  margin: 4px 0 0 0;
+  padding: 3px 6px;
+  height: 180px;
+  min-height: 80px;
+  overflow: auto;
+  background-color: white;
+  border: 1px solid #888;
+  font-size: 12px;
+  white-space: pre-wrap;
 }
 
 /* Services tab: one row per service listed in the database */
@@ -1248,6 +1387,8 @@ function openPage(tabln,tab,pageName,elmnt,color)
     manageInit();
   if (pageName == "servicestab")
     servicesInit();
+  if (pageName == "firmwaretab")
+    fwInit();
 }
 
 /* Fetch with timeout - aborts after ms milliseconds */
@@ -1355,7 +1496,7 @@ function initDashBd()
 /* Fit the Modes tab to the window so that it scrolls when the sections do not fit */
 function resizeModeTab()
 {
-  var ids = ['modetab', 'misctab', 'caltab', 'managetab', 'servicestab'];
+  var ids = ['modetab', 'misctab', 'caltab', 'managetab', 'servicestab', 'firmwaretab'];
   for (var i=0;i<ids.length;i++)
   {
     var div = document.getElementById(ids[i]);
@@ -2084,6 +2225,578 @@ async function hostUpdStart(all)
   hostUpdLoad(true);
   if (hostUpdTimer == null)
     hostUpdTimer = setInterval(function () { hostUpdLoad(true); }, 2000);
+}
+
+/* ---- Firmware tab ----
+   The options of each firmware, and what the Pi has to build them, come from firmwareBuild.php through
+   data_query.php (command getFirmware); the page knows no option by name.  A build runs on the Pi
+   (firmwareBuildRun.php); the page follows its log and offers the result files for download. */
+var fwInfo = null;              /* the answer of getFirmware with the options */
+var fwTimer = null;
+var fwValues = {};              /* firmware id -> option id -> value the person chose */
+
+/* Open the tab: read the options and the latest build */
+async function fwInit()
+{
+  fwStop();
+  var res = await manageFetch("data_query.php?command=getFirmware&optionsToo=1");
+  if (res == null)
+    return;
+  fwInfo = res;
+  /* start from the options of the latest build of each firmware (the page keeps no settings of its own) */
+  if (res.last)
+  {
+    Object.keys(res.last).forEach(function (id)
+    {
+      if (!fwValues[id])
+        fwValues[id] = Object.assign({}, res.last[id]);
+    });
+  }
+  var sel = document.getElementById('fwSelect');
+  var keep = sel.value;
+  sel.replaceChildren();
+  if (res.catalog)
+  {
+    Object.keys(res.catalog).forEach(function (id)
+    {
+      var o = document.createElement('option');
+      o.value = id;
+      o.textContent = res.catalog[id].label;
+      sel.appendChild(o);
+    });
+  }
+  if (keep && res.catalog && res.catalog[keep])
+    sel.value = keep;
+  fwPick();
+  fwDraw(res);
+  fwFollow(res);
+}
+
+function fwStop()
+{
+  if (fwTimer != null)
+    clearInterval(fwTimer);
+  fwTimer = null;
+}
+
+/* Poll while a build runs; stop when it ends or another tab shows */
+function fwFollow(res)
+{
+  var running = (res.run && (res.run.state == 'running' || res.run.state == 'queued')) ||
+                (res.flash && (res.flash.state == 'running' || res.flash.state == 'queued'));
+  if (running && fwTimer == null)
+    fwTimer = setInterval(fwPoll, 2000);
+  if (!running)
+    fwStop();
+}
+
+async function fwPoll()
+{
+  if (document.getElementById('firmwaretab').offsetParent === null)
+  {
+    fwStop();
+    return;
+  }
+  var res;
+  try
+  {
+    var resp = await fetch("data_query.php?command=getFirmware");
+    var txt = await resp.text();
+    if (txt == "unauthorized")
+    {
+      fwStop();
+      return;
+    }
+    res = JSON.parse(txt);
+  }
+  catch (err)
+  {
+    return;
+  }
+  fwInfo.run = res.run;
+  fwInfo.files = res.files;
+  fwInfo.flash = res.flash;
+  fwInfo.flasher = res.flasher;
+  fwDraw(res);
+  fwFollow(res);
+}
+
+/* The firmware that is chosen */
+function fwCurrent()
+{
+  if (!fwInfo || !fwInfo.catalog)
+    return null;
+  var id = document.getElementById('fwSelect').value;
+  return fwInfo.catalog[id] ? { id: id, fw: fwInfo.catalog[id] } : null;
+}
+
+/* Value of an option now: what the person chose, else the default */
+function fwOptionValue(cur, opt)
+{
+  var mine = fwValues[cur.id];
+  if (mine && mine[opt.id] !== undefined)
+    return mine[opt.id];
+  return opt.value;
+}
+
+/* Draw the builds and options of the chosen firmware. Every text is set with textContent. */
+function fwPick()
+{
+  var cur = fwCurrent();
+  var box = document.getElementById('fwOptions');
+  var target = document.getElementById('fwTarget');
+  box.replaceChildren();
+  target.replaceChildren();
+  if (cur == null)
+  {
+    document.getElementById('fwAbout').textContent = "";
+    return;
+  }
+  document.getElementById('fwAbout').textContent = cur.fw.about;
+  var targets = Object.keys(cur.fw.targets);
+  targets.forEach(function (t)
+  {
+    var o = document.createElement('option');
+    o.value = t;
+    o.textContent = cur.fw.targets[t].label;
+    target.appendChild(o);
+  });
+  var multi = targets.length > 1;
+  target.style.display = multi ? '' : 'none';
+  document.getElementById('fwTargetLabel').style.display = multi ? '' : 'none';
+
+  cur.fw.options.forEach(function (opt)
+  {
+    var row = document.createElement('div');
+    row.className = 'fw_opt';
+    row.dataset.opt = opt.id;
+    var label = document.createElement('label');
+    label.textContent = opt.label;
+    var value = fwOptionValue(cur, opt);
+    var ctl;
+    if (opt.type == 'bool')
+    {
+      ctl = document.createElement('input');
+      ctl.type = 'checkbox';
+      ctl.checked = (value == '1');
+      label.textContent = '';
+      label.appendChild(ctl);
+      label.appendChild(document.createTextNode(' ' + opt.label));
+      row.appendChild(label);
+    }
+    else
+    {
+      row.appendChild(label);
+      if (opt.type == 'num')
+      {
+        ctl = document.createElement('input');
+        ctl.type = 'number';
+        ctl.min = opt.min;
+        ctl.max = opt.max;
+        ctl.placeholder = 'default';
+        ctl.value = value;
+      }
+      else
+      {
+        ctl = document.createElement('select');
+        Object.keys(opt.choices).forEach(function (v)
+        {
+          var o = document.createElement('option');
+          o.value = v;
+          o.textContent = opt.choices[v];
+          ctl.appendChild(o);
+        });
+        ctl.value = value;
+      }
+      row.appendChild(ctl);
+    }
+    ctl.id = 'fwopt_' + opt.id;
+    ctl.onchange = function () { fwRemember(cur, opt, ctl); fwVisible(); };
+    if (opt.help)
+    {
+      var help = document.createElement('span');
+      help.className = 'fw_help';
+      help.textContent = opt.help;
+      row.appendChild(help);
+    }
+    if (opt.cfg !== undefined || opt.cfgmcu)
+    {
+      var cfgText = document.createElement('span');
+      cfgText.className = 'fw_help fw_cfg';
+      row.appendChild(cfgText);
+    }
+    box.appendChild(row);
+  });
+  fwVisible();
+  fwPresetDraw();
+  if (fwInfo && fwInfo.catalog)
+    fwDraw({ run: fwInfo.run || null, files: fwInfo.files || [], flash: fwInfo.flash || null, flasher: fwInfo.flasher, flashError: fwInfo.flashError, port: fwInfo.port });
+}
+
+/* What config.h or the Makefile uses for an option left at its default */
+function fwCfgHints(cur, mcu)
+{
+  cur.fw.options.forEach(function (opt)
+  {
+    var span = document.querySelector('#fwOptions [data-opt="' + opt.id + '"] .fw_cfg');
+    if (!span)
+      return;
+    var text = '';
+    if (fwControlValue(opt) !== '')
+      text = '';
+    else if (opt.cfgmcu && opt.cfgmcu[mcu] !== undefined)
+      text = 'Left empty, the Makefile builds for ' + opt.cfgmcu[mcu] + ' KB (chip ' + mcu + ').';
+    else if (opt.cfg !== undefined)
+      text = 'Left at Default, config.h has ' + opt.cfg + '.';
+    span.textContent = text;
+  });
+}
+
+/* Saved sets of the chosen firmware */
+function fwPresetDraw()
+{
+  var cur = fwCurrent();
+  var sel = document.getElementById('fwPresetSel');
+  var note = document.getElementById('fwPresetNote');
+  sel.replaceChildren();
+  var list = (fwInfo && fwInfo.presets && cur) ? fwInfo.presets.filter(function (p) { return p.firmware == cur.id; }) : [];
+  list.forEach(function (p)
+  {
+    var o = document.createElement('option');
+    o.value = p.id;
+    o.textContent = p.name;
+    sel.appendChild(o);
+  });
+  note.textContent = (fwInfo && fwInfo.presetError) ? fwInfo.presetError : "";
+  var broken = !!(fwInfo && fwInfo.presetError);
+  document.getElementById('fwPresetLoad').disabled = broken || list.length == 0;
+  document.getElementById('fwPresetDelete').disabled = broken || list.length == 0;
+  document.getElementById('fwPresetSave').disabled = broken;
+}
+
+function fwPresetLoad()
+{
+  var cur = fwCurrent();
+  var id = document.getElementById('fwPresetSel').value;
+  if (cur == null || !id || !fwInfo.presets)
+    return;
+  var p = fwInfo.presets.filter(function (x) { return x.id == id; })[0];
+  if (!p)
+    return;
+  fwValues[cur.id] = Object.assign({}, p.options);
+  fwPick();
+  document.getElementById('fwPresetSel').value = id;
+}
+
+async function fwPresetSave()
+{
+  var cur = fwCurrent();
+  var name = document.getElementById('fwPresetName').value.trim();
+  if (cur == null)
+    return;
+  if (name == '')
+  {
+    alert("Type a name for the set first.");
+    return;
+  }
+  var form = new FormData();
+  form.append('firmware', cur.id);
+  form.append('target', document.getElementById('fwTarget').value);
+  form.append('name', name);
+  form.append('options', JSON.stringify(fwGather(cur)));
+  var res = await manageFetch("data_query.php?command=saveFirmwarePreset", { method: 'POST', body: form, headers: { 'X-OpenMT': '1' } });
+  if (res == null)
+    return;
+  if (res.error)
+  {
+    alert(res.error);
+    return;
+  }
+  await fwInit();
+  var again = fwInfo.presets.filter(function (p) { return p.firmware == cur.id && p.name == name; })[0];
+  if (again)
+    document.getElementById('fwPresetSel').value = again.id;
+}
+
+async function fwPresetDelete()
+{
+  var id = document.getElementById('fwPresetSel').value;
+  if (!id || !confirm("Delete this saved set?"))
+    return;
+  var form = new FormData();
+  form.append('id', id);
+  var res = await manageFetch("data_query.php?command=deleteFirmwarePreset", { method: 'POST', body: form, headers: { 'X-OpenMT': '1' } });
+  if (res != null && res.error)
+    alert(res.error);
+  await fwInit();
+}
+
+/* The values of the options that are shown, for a build or a saved set */
+function fwGather(cur)
+{
+  var values = {};
+  cur.fw.options.forEach(function (opt)
+  {
+    var row = document.querySelector('#fwOptions [data-opt="' + opt.id + '"]');
+    if (row && row.style.display != 'none')
+      values[opt.id] = fwControlValue(opt);
+  });
+  return values;
+}
+
+/* Keep what was chosen, so changing the firmware and back does not lose it */
+function fwRemember(cur, opt, ctl)
+{
+  if (!fwValues[cur.id])
+    fwValues[cur.id] = {};
+  fwValues[cur.id][opt.id] = (opt.type == 'bool') ? (ctl.checked ? '1' : '0') : ctl.value;
+}
+
+/* Value of one control as the request needs it */
+function fwControlValue(opt)
+{
+  var ctl = document.getElementById('fwopt_' + opt.id);
+  if (!ctl)
+    return '';
+  return (opt.type == 'bool') ? (ctl.checked ? '1' : '0') : ctl.value;
+}
+
+/* Show the options that apply: some belong to one chip, some to a switch that is on */
+function fwVisible()
+{
+  var cur = fwCurrent();
+  if (cur == null)
+    return;
+  var mcu = '';
+  cur.fw.options.forEach(function (opt) { if (opt.id == 'mcu') mcu = fwControlValue(opt); });
+  cur.fw.options.forEach(function (opt)
+  {
+    var row = document.querySelector('#fwOptions [data-opt="' + opt.id + '"]');
+    if (!row)
+      return;
+    var show = true;
+    if (opt.onlymcu && mcu != opt.onlymcu)
+      show = false;
+    if (opt.needs)
+    {
+      var need = cur.fw.options.filter(function (o) { return o.id == opt.needs; })[0];
+      if (need && fwControlValue(need) != '1')
+        show = false;
+    }
+    row.style.display = show ? '' : 'none';
+  });
+  fwCfgHints(cur, mcu);
+}
+
+/* Back to the defaults of the firmware */
+function fwReset()
+{
+  var cur = fwCurrent();
+  if (cur == null)
+    return;
+  delete fwValues[cur.id];
+  fwPick();
+}
+
+/* Notes, state, log and files of the latest build */
+function fwDraw(res)
+{
+  var note = document.getElementById('fwNote');
+  var status = document.getElementById('fwStatus');
+  var log = document.getElementById('fwLog');
+  var files = document.getElementById('fwFiles');
+  var running = res.run && (res.run.state == 'running' || res.run.state == 'queued');
+
+  var info = fwInfo || {};
+  if (info.catalog && info.source === '')
+    note.textContent = "The source files of the project were not found on the Pi:\n" + (info.report || []).join("\n") +
+                       "\nOr add  [firmware]  and  source=/path/to/OpenMT  to /etc/openmt.ini.";
+  else if (info.catalog && !info.make)
+    note.textContent = "make is not installed on the Pi:  sudo apt install build-essential";
+  else if (info.catalog && !info.toolchain)
+    note.textContent = "The Arm toolchain is not installed on the Pi:  sudo apt install gcc-arm-none-eabi";
+  else
+    note.textContent = "";
+
+  var cur = fwCurrent();
+  var ready = info.catalog && info.source !== '' && info.make && info.toolchain && cur && cur.fw.present;
+  if (info.catalog && info.source !== '' && cur && !cur.fw.present)
+    note.textContent = "The folder of this firmware was not found in " + info.source + "/modem.";
+  document.getElementById('fwBuild').disabled = !!running || !ready;
+  document.getElementById('fwDefaults').disabled = !!running;
+
+  if (res.run)
+  {
+    var text = {queued: "Starting", running: "Building", done: "Build finished", failed: "Build failed"}[res.run.state] || res.run.state;
+    var name = (info.catalog && info.catalog[res.run.firmware]) ? info.catalog[res.run.firmware].label : res.run.firmware;
+    status.textContent = text + ": " + name + (res.run.finished ? " (" + res.run.finished + ")" : "");
+    status.style.color = (res.run.state == 'failed') ? '#c00000' : 'black';
+    log.style.display = 'block';
+    var atEnd = (log.scrollTop + log.clientHeight >= log.scrollHeight - 4);
+    log.textContent = res.run.log || "";
+    if (atEnd)
+      log.scrollTop = log.scrollHeight;
+  }
+  else
+  {
+    status.textContent = "";
+    log.style.display = 'none';
+  }
+
+  files.replaceChildren();
+  if (res.run && res.run.state == 'done' && res.files)
+  {
+    res.files.forEach(function (f)
+    {
+      var a = document.createElement('a');
+      a.href = "data_query.php?command=downloadFirmware&id=" + encodeURIComponent(f.id);
+      a.textContent = f.name + " (" + f.size + " bytes)";
+      files.appendChild(a);
+    });
+  }
+  fwFlashDraw(res);
+}
+
+/* Flash section: shown when the latest build is finished and has a .bin file */
+function fwFlashDraw(res)
+{
+  var box = document.getElementById('fwFlash');
+  var sel = document.getElementById('fwFlashFile');
+  var note = document.getElementById('fwFlashNote');
+  var status = document.getElementById('fwFlashStatus');
+  var log = document.getElementById('fwFlashLog');
+  var btn = document.getElementById('fwFlashBtn');
+  var bins = [];
+  if (res.run && res.run.state == 'done' && res.files)
+    bins = res.files.filter(function (f) { return /\.bin$/i.test(f.name); });
+  var fl = res.flash;
+  var busy = fl && (fl.state == 'running' || fl.state == 'queued');
+  box.style.display = 'block';
+
+  if (!busy)
+  {
+    var keep = sel.value;
+    sel.replaceChildren();
+    bins.forEach(function (f)
+    {
+      var o = document.createElement('option');
+      o.value = f.id;
+      o.textContent = f.name;
+      sel.appendChild(o);
+    });
+    if (keep)
+      sel.value = keep;
+  }
+  var port = document.getElementById('fwFlashPort');
+  if (port.value === '' && res.port)
+    port.value = res.port;
+
+  var text = "";
+  if (res.flashError)
+    text = res.flashError;
+  else if (res.flasher === false)
+    text = "The firmware flasher is not running on the Pi:  sudo systemctl enable --now openmt-flasher";
+  else if (bins.length == 0)
+    text = "Build a firmware first; the files of the latest finished build can be flashed here.";
+  else
+    text = "Flashing stops the modem and the services for about a minute.";
+  note.textContent = text;
+  btn.disabled = !!busy || bins.length == 0 || res.flasher === false || !!res.flashError;
+  document.getElementById('fwBuild').disabled = document.getElementById('fwBuild').disabled || !!busy;
+
+  if (fl)
+  {
+    var names = {queued: "Waiting for the flasher", running: "Flashing", done: "Flash finished", failed: "Flash failed", expired: "Flash request expired"};
+    status.textContent = (names[fl.state] || fl.state) + (fl.finished ? " (" + fl.finished + ")" : "");
+    status.style.color = (fl.state == 'failed' || fl.state == 'expired') ? '#c00000' : 'black';
+    log.style.display = 'block';
+    var atEnd = (log.scrollTop + log.clientHeight >= log.scrollHeight - 4);
+    log.textContent = fl.log || "";
+    if (atEnd)
+      log.scrollTop = log.scrollHeight;
+  }
+  else
+  {
+    status.textContent = "";
+    log.style.display = 'none';
+  }
+  fwFlashModeChanged();
+}
+
+/* The pin numbers matter only for the methods that use the pins */
+function fwFlashModeChanged()
+{
+  document.getElementById('fwFlashPins').style.display = (document.getElementById('fwFlashMode').value == 'soft') ? 'none' : '';
+}
+
+/* Ask the flasher on the Pi to flash the chosen file */
+async function fwFlashStart()
+{
+  var sel = document.getElementById('fwFlashFile');
+  if (!sel.value)
+    return;
+  var mode = document.getElementById('fwFlashMode').value;
+  var name = sel.options[sel.selectedIndex].textContent;
+  if (!confirm("Flash " + name + " to the modem?\n\nThe modem and the OpenMT services stop for about a minute, then start again. " +
+               "Do not remove power while it flashes. A wrong file or wrong pins can leave the modem unusable until it is flashed again with a programmer."))
+    return;
+  var form = new FormData();
+  form.append('file', sel.value);
+  form.append('mode', mode);
+  form.append('port', document.getElementById('fwFlashPort').value.trim());
+  form.append('boot0', document.getElementById('fwFlashBoot0').value);
+  form.append('nrst', document.getElementById('fwFlashNrst').value);
+  document.getElementById('fwFlashBtn').disabled = true;
+  var res = await manageFetch("data_query.php?command=startFirmwareFlash",
+                              { method: 'POST', body: form, headers: { 'X-OpenMT': '1' } });
+  if (res == null || res.error)
+  {
+    if (res != null)
+      alert(res.error);
+    document.getElementById('fwFlashBtn').disabled = false;
+    return;
+  }
+  var again = await manageFetch("data_query.php?command=getFirmware");
+  if (again != null)
+  {
+    fwInfo.run = again.run;
+    fwInfo.files = again.files;
+    fwInfo.flash = again.flash;
+    fwInfo.flasher = again.flasher;
+    fwDraw(again);
+    fwFollow(again);
+  }
+}
+
+/* Start a build of the chosen firmware with the options on the page */
+async function fwStart()
+{
+  var cur = fwCurrent();
+  if (cur == null)
+    return;
+  var values = fwGather(cur);
+  var form = new FormData();
+  form.append('firmware', cur.id);
+  form.append('target', document.getElementById('fwTarget').value);
+  form.append('options', JSON.stringify(values));
+  document.getElementById('fwBuild').disabled = true;
+  var res = await manageFetch("data_query.php?command=startFirmwareBuild",
+                              { method: 'POST', body: form, headers: { 'X-OpenMT': '1' } });
+  if (res == null || res.error)
+  {
+    if (res != null)
+      alert(res.error);
+    document.getElementById('fwBuild').disabled = false;
+    return;
+  }
+  var again = await manageFetch("data_query.php?command=getFirmware");
+  if (again != null)
+  {
+    fwInfo.run = again.run;
+    fwInfo.files = again.files;
+    fwDraw(again);
+    fwFollow(again);
+  }
 }
 
 /* Text and colour for a state reported by systemd */
@@ -3814,13 +4527,14 @@ class="lg-wave lg-wa" stroke-width="1.4" stroke-dasharray="2 3"/>
 
 <div id='settingstab' class='tabcontent'>
 <div class='stabs'>
-<button id='General' class="stablink" style='width:11%' onclick="openPage('stablink', 'genset', 'generaltab', this, 'orange')">General</button>
-<button class='stablink' style='width:10%' onclick="openPage('stablink', 'genset', 'modemtab', this, 'yellow')">Modem</button>
-<button class='stablink' style='width:10%' onclick="openPage('stablink', 'genset', 'modetab', this, 'lightblue')">Modes</button>
-<button class='stablink' style='width:18%' onclick="openPage('stablink', 'genset', 'misctab', this, '#d9b3ff')">Miscellaneous</button>
-<button id='calTabBtn' class='stablink' style='width:14%;display:none' onclick="openPage('stablink', 'genset', 'caltab', this, '#c7e9c0')">Calibration</button>
-<button class='stablink' style='width:17%' onclick="openPage('stablink', 'genset', 'managetab', this, '#f4b6b6')">Manage Data</button>
-<button class='stablink' style='width:14%' onclick="openPage('stablink', 'genset', 'servicestab', this, '#b9e3f5')">Services</button>
+<button id='General' class="stablink" style='width:9%' onclick="openPage('stablink', 'genset', 'generaltab', this, 'orange')">General</button>
+<button class='stablink' style='width:8%' onclick="openPage('stablink', 'genset', 'modemtab', this, 'yellow')">Modem</button>
+<button class='stablink' style='width:8%' onclick="openPage('stablink', 'genset', 'modetab', this, 'lightblue')">Modes</button>
+<button class='stablink' style='width:14%' onclick="openPage('stablink', 'genset', 'misctab', this, '#d9b3ff')">Miscellaneous</button>
+<button id='calTabBtn' class='stablink' style='width:12%;display:none' onclick="openPage('stablink', 'genset', 'caltab', this, '#c7e9c0')">Calibration</button>
+<button class='stablink' style='width:13%' onclick="openPage('stablink', 'genset', 'managetab', this, '#f4b6b6')">Manage Data</button>
+<button class='stablink' style='width:11%' onclick="openPage('stablink', 'genset', 'servicestab', this, '#b9e3f5')">Services</button>
+<button class='stablink' style='width:11%' onclick="openPage('stablink', 'genset', 'firmwaretab', this, '#ffd9a8')">Firmware</button>
 </div>
 <div id='generaltab' class='genset'>
 <span class='genSettings'>
@@ -3933,6 +4647,61 @@ press Save first.</div>
 <pre class='hu_log' id='hostUpdLog' style='display:none'></pre>
 </div>
 <div class='svc_grid' id='servicesGrid'></div>
+</div>
+</div>
+<div id='firmwaretab' class='genset'>
+<div class='svc_wrap'>
+<div class='svc_note' id='fwNote'></div>
+<div class='fw_bar'>
+<label for='fwSelect'>Firmware:</label>
+<select id='fwSelect' onchange='fwPick()'></select>
+<label for='fwTarget' id='fwTargetLabel'>Build:</label>
+<select id='fwTarget'></select>
+<button id='fwBuild' onclick='fwStart()'>Build</button>
+<button id='fwDefaults' onclick='fwReset()'>Reset options</button>
+</div>
+<div class='fw_about' id='fwAbout'></div>
+<div class='fw_bar' id='fwPresetBar'>
+<label for='fwPresetSel'>Saved sets:</label>
+<select id='fwPresetSel'></select>
+<button id='fwPresetLoad' onclick='fwPresetLoad()'>Load</button>
+<button id='fwPresetDelete' onclick='fwPresetDelete()'>Delete</button>
+<label for='fwPresetName'>Save these options as:</label>
+<input type='text' id='fwPresetName' size='18' maxlength='40' placeholder='for example F105R8 loader'>
+<button id='fwPresetSave' onclick='fwPresetSave()'>Save</button>
+</div>
+<div class='svc_note' id='fwPresetNote'></div>
+<div class='fw_options' id='fwOptions'></div>
+<div class='hu_status' id='fwStatus'></div>
+<div class='fw_files' id='fwFiles'></div>
+<pre class='fw_log' id='fwLog' style='display:none'></pre>
+<div class='fw_flash' id='fwFlash' style='display:none'>
+<div class='fw_flash_title'>Flash to the modem</div>
+<div class='svc_note' id='fwFlashNote'></div>
+<div class='fw_bar'>
+<label for='fwFlashFile'>File:</label>
+<select id='fwFlashFile'></select>
+<label for='fwFlashMode'>Method:</label>
+<select id='fwFlashMode' onchange='fwFlashModeChanged()'>
+<option value='seq'>Pins and serial (like Pi-Star)</option>
+<option value='gpio'>Pins only</option>
+<option value='soft'>Serial loader, no wires (F105 built with the loader)</option>
+</select>
+<label for='fwFlashPort'>Port:</label>
+<input type='text' id='fwFlashPort' size='16' maxlength='30'>
+</div>
+<div class='fw_bar' id='fwFlashPins'>
+<label for='fwFlashBoot0'>BOOT0 GPIO:</label>
+<input type='number' id='fwFlashBoot0' min='0' max='27' value='20'>
+<label for='fwFlashNrst'>NRST GPIO:</label>
+<input type='number' id='fwFlashNrst' min='0' max='27' value='21'>
+</div>
+<div class='fw_bar'>
+<button id='fwFlashBtn' onclick='fwFlashStart()'>Flash</button>
+</div>
+<div class='hu_status' id='fwFlashStatus'></div>
+<pre class='fw_log' id='fwFlashLog' style='display:none'></pre>
+</div>
 </div>
 </div>
 <div id='managetab' class='genset'>

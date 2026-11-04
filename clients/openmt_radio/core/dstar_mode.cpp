@@ -28,6 +28,7 @@ static const double   QUIET_RATIO    = 0.2;             /* a call is over when t
 static const uint64_t QUIET_SAMPLES  = 2400U;           /* 100 ms of nothing ends a call */
 static const unsigned HEADER_SKIP    = 4U;              /* the host's sync match takes these first four (always zero) header bits */
 static const unsigned HEADER_BITS    = 664U;            /* 4 skipped + 660 coded bits */
+static const unsigned END_ERRORS     = 3U;              /* bit errors allowed in the 48 bit end pattern (a chance match is about one in 10^9 per bit) */
 static const unsigned FRAME_BITS     = 96U;             /* 72 bits of voice, 24 of slow data */
 
 /* dstar_host's GMSK pulse: its TX_GAUSSIAN_0_35_FILTER, applied as arm_fir_interpolate_q15 does (the coefficients are in
@@ -107,6 +108,9 @@ DstarMode::DstarMode(ModemLink& link, Vocoder& vocoder, const DstarConfig& cfg, 
     eotReg_(0U),
     frameIndex_(0U),
     syncMisses_(0U),
+    hdrReg_(0U),
+    lockErr_(0U),
+    candErr_(0U),
     pendingC_(0U),
     diagBad_(0U),
     badHeaders_(0U),
@@ -236,7 +240,9 @@ void DstarMode::rxSample(int16_t s)
     n_++;
 
     level_ += (std::fabs((double)s) - level_) / 64.0;
-    dc_ += ((double)s - dc_) / 4096.0;
+    /* The offset of a receiver differs from burst to burst, and the alternating bits that start a call are balanced: while no call is
+       being received the offset is followed quickly, during a call slowly (voice bits are not balanced) */
+    dc_ += ((double)s - dc_) / (state_ == RX_SEARCH ? 256.0 : 4096.0);
 
     if (state_ == RX_SEARCH)
     {
@@ -308,6 +314,8 @@ void DstarMode::rxSearch(uint64_t c)
         pos_ = (double)at + 5.0;
         prevBit_ = ((SYNC & 1U) != 0U) ? 1 : 0;
         bitCount_ = 0U;
+        hdrReg_ = SYNC;
+        lockErr_ = candErr_;
         std::memset(hdr_, 0x00, sizeof(hdr_));
         quietFrom_ = 0U;
         pendingC_ = 0U;
@@ -345,10 +353,17 @@ void DstarMode::rxSearch(uint64_t c)
         diagLevel_ = 0.0;
     }
 
-    if (straight > 2U && upside > 2U)
+    /* The alternating bits before the sync match the first half of it, and the second half (the frame sync proper) with three
+       errors; noise that corrects one of them makes the whole of it match within two errors.  So the second half has to be
+       right within one error too. */
+    unsigned int straightTail = popcount64((sr_[ph] ^ SYNC) & 0xFFFFU), upsideTail = popcount64((sr_[ph] ^ ~SYNC) & 0xFFFFU);
+    bool straightOk = straight <= 2U && straightTail <= 1U, upsideOk = upside <= 2U && upsideTail <= 1U;
+
+    if (!straightOk && !upsideOk)
         return;
 
-    inv_ = upside < straight;
+    inv_ = !straightOk || (upsideOk && upside < straight);
+    candErr_ = inv_ ? upside : straight;
     lockLevel_ = level_;
     pendingC_ = c;
 }
@@ -403,6 +418,29 @@ void DstarMode::rxBit(bool bit)
 {
     if (state_ == RX_HEADER)
     {
+        /* The long run of alternating bits before the sync matches it within two or three bit errors, so noise can start a header
+           too early, and that header would swallow the real sync.  A sync that matches better than the one the header started at
+           starts it again; the bit clock stays as it is (it has been following the transitions of the preamble). */
+        static const uint32_t SYNC = syncPattern();
+
+        hdrReg_ = ((hdrReg_ << 1) | (bit ? 1U : 0U)) & 0xFFFFFFFFULL;
+
+        unsigned int straight = popcount64(hdrReg_ ^ SYNC), upside = popcount64(hdrReg_ ^ (~SYNC & 0xFFFFFFFFU));
+        unsigned int errs = upside < straight ? upside : straight;
+
+        if (errs < lockErr_)
+        {
+            /* the polarity found with the first match was a guess from noise: the register holds the bits as that polarity decided
+               them, so it is the other one when the upside down pattern is what matched */
+            if (upside < straight)
+                inv_ = !inv_;
+            lockErr_ = errs;
+            bitCount_ = 0U;
+            std::memset(hdr_, 0x00, sizeof(hdr_));
+            hdrReg_ = SYNC;
+            return;
+        }
+
         if (bit && bitCount_ >= HEADER_SKIP)
         {
             unsigned int k = bitCount_ - HEADER_SKIP;       /* dstarRxHeader's buffer starts after them */
@@ -415,9 +453,33 @@ void DstarMode::rxBit(bool bit)
         return;
     }
 
-    /* the voice frames: the end pattern is looked for at every bit */
+    /* the voice frames: the end pattern is looked for at every bit, and the bit sync and frame sync of a new call: when the end of a
+       call was lost in noise the next call would be taken for more speech */
+    static const uint32_t SYNC = syncPattern();
+
+    hdrReg_ = ((hdrReg_ << 1) | (bit ? 1U : 0U)) & 0xFFFFFFFFULL;
     eotReg_ = ((eotReg_ << 1) | (bit ? 1U : 0U)) & 0xFFFFFFFFFFFFULL;
-    if (frameIndex_ > 0U && popcount64(eotReg_ ^ END_PATTERN) <= 1U)
+
+    unsigned int straight = popcount64(hdrReg_ ^ SYNC), upside = popcount64(hdrReg_ ^ (~SYNC & 0xFFFFFFFFU));
+
+    if (frameIndex_ > 0U && (straight <= 1U || upside <= 1U))
+    {
+        if (upside < straight)
+            inv_ = !inv_;
+        rxFlushAudio();
+        rxEnd(CALL_RX_END);
+        state_ = RX_HEADER;
+        lockErr_ = upside < straight ? upside : straight;
+        hdrReg_ = SYNC;
+        bitCount_ = 0U;
+        frameIndex_ = 0U;
+        eotReg_ = 0U;
+        quietFrom_ = 0U;
+        std::memset(hdr_, 0x00, sizeof(hdr_));
+        std::memset(frame_, 0x00, sizeof(frame_));
+        return;
+    }
+    if (frameIndex_ > 0U && popcount64(eotReg_ ^ END_PATTERN) <= END_ERRORS)
     {
         rxFlushAudio();
         rxEnd(CALL_RX_END);

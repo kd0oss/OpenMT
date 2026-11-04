@@ -3472,7 +3472,14 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
                 {
                     slotActive[0] = true;
                     if (simplexRF)
+                    {
                         dmrSimplexRf = true;
+                        /* The modem host is told the modem is in use by DMR (the dashboard shows it, and no other
+                           protocol can take the modem).  A duplex call does it with the wake-up CSBK and FRAME mode
+                           does it for the slot 2 frame it renames; in SAMPLE and BIT mode a simplex call had
+                           nothing that did, and the dashboard stayed idle. */
+                        sendCommToModem((uint8_t*)SETMODE, 5);
+                    }
                     else
                         txOn = true;
                     if (activeSlots == 0)
@@ -3583,7 +3590,11 @@ void decodeDMR(uint8_t* buffer, uint8_t length, bool isNet)
             else if (audioSync || txOn || dmrSimplexRf)
             {
                 if (simplexRF)
+                {
+                    if (!dmrSimplexRf)
+                        sendCommToModem((uint8_t*)SETMODE, 5);  /* a call joined without its header */
                     dmrSimplexRf = true;
+                }
                 else
                     txOn = true;
                 dmrRfVoice(0U, buffer, length, isNet);

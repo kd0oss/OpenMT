@@ -76,9 +76,51 @@ mysql -u openmt -p modem_host < db/openmt.sql
 mysql -u openmt -p < db/services.sql
 mysql -u openmt -p < db/host_updates.sql
 
+# Table for the Firmware tab (builds of the OPENMT_HS and OPENMT_SAMPLE_STM32FXXX firmware from the dashboard).
+# The tab needs the Arm toolchain on the Pi, which is only used for these builds:
+#     sudo apt install gcc-arm-none-eabi
+# and the project's source files where the web server's PHP can read them. The tab expects the firmware
+# folders in /home/pi/OpenMT/modem (it then tries other usual places for a clone). If your clone is elsewhere
+# (or its folder is not readable by www-data,
+# for example /home/pi when the home folder is private), add this to /etc/openmt.ini:
+#     [firmware]
+#     source=/path/to/OpenMT      (or /path/to/OpenMT/modem)
+#     toolchain=/path/to/arm-none-eabi/bin      (only if the compiler is not in the usual places)
+# A build is made in a copy in the temporary folder and the .hex and .bin files are kept in the database.
+
+mysql -u openmt -p < db/firmware_builds.sql
+
+# Saved option sets of the Firmware tab (a name for the options of a build, such as "F105R8 loader"):
+
+mysql -u openmt -p < db/firmware_presets.sql
+
+# Flashing a build to the modem from the Firmware tab. The web server cannot touch the serial port, the GPIO
+# pins or systemd, so a small program that runs as root does it (tools/firmware_flasher, a PHP script like the
+# service manager). It stops the OpenMT services, runs modem/OPENMT_SAMPLE_SMT32FXXX/tools/openmt_flash.sh,
+# and starts the services again. It needs stm32flash:
+#     sudo apt install stm32flash
+# Run the table file, then install and start the unit:
+
+mysql -u openmt -p < db/firmware_flash.sql
+sudo cp tools/firmware_flasher/openmt-flasher.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now openmt-flasher
+
+# (The unit expects the project in /home/pi/OpenMT; edit its paths if yours is elsewhere. Only the files of a
+# finished build can be flashed, and the OPENMT_HS "bl" build (made for behind the MMDVM_HS boot loader) is
+# refused. See tools/firmware_flasher/README.txt.)
+
+# The Modem tab of the dashboard shows a setting of the modem as a box only when its display_type in
+# modem_host.config is 'input' ('none' is not shown; port, baud, mode and calibration have their own handling).
+# A new database from db/openmt.sql has that already. On an EXISTING database run this once, so the tab shows
+# what it showed before:
+
+mysql -u openmt -p < db/modem_display_type.sql
+
 # Install web based dashboard.
-# NOTE: dashboard/www also holds updateHosts.php and updateHostsRun.php. They only run from
-# the command line (a web request gets "403"), so having them in the web folder is safe.
+# NOTE: dashboard/www also holds updateHosts.php, updateHostsRun.php, firmwareBuild.php and
+# firmwareBuildRun.php. They only run from the command line (a web request gets "403"), so having
+# them in the web folder is safe.
 # Copy the whole folder again after every update of the project.
 
 sudo rm -R /var/www/html

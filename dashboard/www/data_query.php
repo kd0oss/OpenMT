@@ -1112,6 +1112,251 @@ if ($command == "startHostUpdate")
         }
     }
 }
+else
+if ($command == "getFirmware")
+{
+    /* What the Firmware tab needs: the options of each firmware (from firmwareBuild.php), whether the tools and
+       the source files are there, the latest build with its log and its result files.  A build whose heartbeat
+       stopped for 90 seconds is marked failed. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+    require_once __DIR__ . '/firmwareBuild.php';
+
+    /* a request the runner never took up (20 seconds), and a build whose heartbeat stopped (90 seconds) */
+    mysqli_query($mysql, "UPDATE modem_host.firmware_runs SET state = 'failed', finished = NOW(), log = CONCAT(IFNULL(log, ''), 'The build did not start: the web server could not run firmwareBuildRun.php. Run it by hand to see why:  sudo -u www-data php " . __DIR__ . "/firmwareBuildRun.php ', id, '\\n') " .
+                         "WHERE state = 'queued' AND TIMESTAMPDIFF(SECOND, started, NOW()) > 20");
+    mysqli_query($mysql, "UPDATE modem_host.firmware_runs SET state = 'failed', finished = NOW(), log = CONCAT(IFNULL(log, ''), '\\nThe build stopped without finishing: nothing was heard from it for 90 seconds. The last lines above show how far it got.\\n') " .
+                         "WHERE state = 'running' AND TIMESTAMPDIFF(SECOND, updated, NOW()) > 90");
+    $info = array();
+    if (($_GET['optionsToo'] ?? '') === '1')
+        $info = fwDescribe();
+    $run = null;
+    $files = array();
+    $res = mysqli_query($mysql, "SELECT id, firmware, target, state, started, finished, log FROM modem_host.firmware_runs ORDER BY id DESC LIMIT 1");
+    if ($res)
+        $run = mysqli_fetch_assoc($res);
+    if ($run)
+    {
+        $res = mysqli_query($mysql, "SELECT id, name, size FROM modem_host.firmware_files WHERE run_id = " . (int)$run['id'] . " ORDER BY name");
+        if ($res)
+        {
+            while ($r = mysqli_fetch_assoc($res))
+                $files[] = $r;
+        }
+    }
+    $info['run'] = $run ? $run : null;
+    $info['files'] = $files;
+
+    /* flashing: the flasher (tools/firmware_flasher) runs as root and writes a heartbeat; a request it never took
+       up (2 minutes), or one whose heartbeat stopped (60 seconds), is marked failed here too */
+    $flash = null;
+    $alive = false;
+    $port = '';
+    $flashError = '';
+    try
+    {
+        @mysqli_query($mysql, "UPDATE modem_host.firmware_flash_runs SET state = 'expired', finished = NOW(), log = 'The flasher did not take this request up in time.' WHERE state = 'queued' AND TIMESTAMPDIFF(SECOND, started, NOW()) > 120");
+        @mysqli_query($mysql, "UPDATE modem_host.firmware_flash_runs SET state = 'failed', finished = NOW(), log = CONCAT(IFNULL(log, ''), '\\nNothing was heard from the flasher for 60 seconds.\\n') WHERE state = 'running' AND TIMESTAMPDIFF(SECOND, updated, NOW()) > 60");
+        $res = @mysqli_query($mysql, "SELECT id, file_id, mode, port, state, started, finished, log FROM modem_host.firmware_flash_runs ORDER BY id DESC LIMIT 1");
+        if ($res)
+            $flash = mysqli_fetch_assoc($res);
+        $res = @mysqli_query($mysql, "SELECT TIMESTAMPDIFF(SECOND, updated, NOW()) FROM modem_host.firmware_flasher WHERE id = 1");
+        $row = $res ? mysqli_fetch_row($res) : null;
+        if ($row && $row[0] !== null && (int)$row[0] <= 15)
+            $alive = true;
+        $res = @mysqli_query($mysql, "SELECT value FROM modem_host.config WHERE module = 'config' AND parameter = 'port' ORDER BY id LIMIT 1");
+        $row = $res ? mysqli_fetch_row($res) : null;
+        if ($row && preg_match('/^[A-Za-z0-9_.-]+$/', trim($row[0])))
+            $port = '/dev/' . ltrim(trim($row[0]), '/');
+    }
+    catch (Throwable $e)
+    {
+        $flashError = 'The flash tables are missing: run  mysql -u openmt -p < db/firmware_flash.sql';
+    }
+    $info['flash'] = $flash ? $flash : null;
+    $info['flasher'] = $alive;
+    $info['flashError'] = $flashError;
+    $info['port'] = $port;
+    echo json_encode($info, JSON_INVALID_UTF8_SUBSTITUTE);
+}
+else
+if ($command == "startFirmwareBuild")
+{
+    /* Stores a request in modem_host.firmware_runs and starts firmwareBuildRun.php in the background.  The
+       request is checked with fwPlan() first, so only listed options with allowed values are stored, and one
+       build runs at a time.  A custom header is required so that another web site cannot send this request
+       for a logged in person. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+    require_once __DIR__ . '/firmwareBuild.php';
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || ($_SERVER['HTTP_X_OPENMT'] ?? '') !== '1')
+        echo json_encode(array('error' => 'Invalid request'));
+    else
+    {
+        $fwId   = (string)($_POST['firmware'] ?? '');
+        $target = (string)($_POST['target'] ?? '');
+        $values = json_decode((string)($_POST['options'] ?? '{}'), true);
+        $plan   = fwPlan($fwId, $target, is_array($values) ? $values : array());
+        $php = '';
+        foreach (array(PHP_BINDIR . '/php', '/usr/bin/php', '/usr/local/bin/php') as $candidate)
+        {
+            if (@is_executable($candidate))
+            {
+                $php = $candidate;
+                break;
+            }
+        }
+        $disabled = array_map('trim', explode(',', (string)ini_get('disable_functions')));
+
+        if (!$plan['ok'])
+            echo json_encode(array('error' => $plan['error']));
+        else
+        if (fwFindSource() === '')
+            echo json_encode(array('error' => 'The source files of the project were not found:' . "\n" . implode("\n", fwSourceReport()) . "\n" . 'Add  [firmware]  and  source=/path/to/OpenMT  to /etc/openmt.ini.'));
+        else
+        if (fwFindTool('make') === '' || fwFindTool('arm-none-eabi-gcc') === '')
+            echo json_encode(array('error' => 'The build tools are not installed on the Pi:  sudo apt install build-essential gcc-arm-none-eabi'));
+        else
+        if ($php === '' || in_array('exec', $disabled, true) || !function_exists('exec'))
+            echo json_encode(array('error' => 'The web server cannot start the build (php command line or exec() is not available)'));
+        else
+        {
+            $lock = mysqli_query($mysql, "SELECT GET_LOCK('openmt_firmware_build', 5)");
+            $got = $lock ? mysqli_fetch_row($lock) : null;
+            if (!$got || (int)$got[0] != 1)
+                echo json_encode(array('error' => 'The database is busy, try again'));
+            else
+            {
+                $busy = mysqli_query($mysql, "SELECT COUNT(*) FROM modem_host.firmware_runs WHERE state IN ('queued', 'running') AND TIMESTAMPDIFF(SECOND, IFNULL(updated, started), NOW()) <= 90");
+                $count = $busy ? mysqli_fetch_row($busy) : array(0);
+                if ((int)$count[0] > 0)
+                    echo json_encode(array('error' => 'A build is already running'));
+                else
+                {
+                    /* old builds and their files go after 30 days, and only the last 10 builds keep their files */
+                    mysqli_query($mysql, "DELETE FROM modem_host.firmware_files WHERE run_id IN (SELECT id FROM (SELECT id FROM modem_host.firmware_runs WHERE started < DATE_SUB(NOW(), INTERVAL 30 DAY)) AS old)");
+                    mysqli_query($mysql, "DELETE FROM modem_host.firmware_runs WHERE started < DATE_SUB(NOW(), INTERVAL 30 DAY)");
+                    mysqli_query($mysql, "DELETE FROM modem_host.firmware_files WHERE run_id <= (SELECT m FROM (SELECT MAX(id) - 10 AS m FROM modem_host.firmware_runs) AS t)");
+                    $json = json_encode($values);
+                    $stmt = mysqli_prepare($mysql, "INSERT INTO modem_host.firmware_runs (firmware, target, options, state, started, updated) VALUES (?, ?, ?, 'queued', NOW(), NOW())");
+                    mysqli_stmt_bind_param($stmt, "sss", $fwId, $target, $json);
+                    if (!mysqli_stmt_execute($stmt))
+                        echo json_encode(array('error' => 'Could not store the request'));
+                    else
+                    {
+                        $id = (int)mysqli_insert_id($mysql);
+                        $cmd = 'nohup ' . escapeshellarg($php) . ' ' . escapeshellarg(__DIR__ . '/firmwareBuildRun.php') . ' ' . $id .
+                               ' > /dev/null 2>&1 &';
+                        exec($cmd);
+                        echo json_encode(array('id' => $id));
+                    }
+                    mysqli_stmt_close($stmt);
+                }
+                mysqli_query($mysql, "SELECT RELEASE_LOCK('openmt_firmware_build')");
+            }
+        }
+    }
+}
+else
+if ($command == "startFirmwareFlash")
+{
+    /* Stores a flash request in modem_host.firmware_flash_runs for the flasher (tools/firmware_flasher, root).
+       The file must be a result file of a build; the request is checked with fwFlashPlan() here and again by the
+       flasher.  One flash at a time, and only while the flasher's heartbeat is fresh. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+    require_once __DIR__ . '/firmwareBuild.php';
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || ($_SERVER['HTTP_X_OPENMT'] ?? '') !== '1')
+        echo json_encode(array('error' => 'Invalid request'));
+    else
+    {
+        $fileId = (int)($_POST['file'] ?? 0);
+        $mode   = (string)($_POST['mode'] ?? '');
+        $port   = (string)($_POST['port'] ?? '');
+        $boot0  = (int)($_POST['boot0'] ?? 20);
+        $nrst   = (int)($_POST['nrst'] ?? 21);
+        $stmt = mysqli_prepare($mysql, "SELECT f.name, r.firmware, r.target, r.options FROM modem_host.firmware_files f JOIN modem_host.firmware_runs r ON r.id = f.run_id WHERE f.id = ? AND r.state = 'done'");
+        mysqli_stmt_bind_param($stmt, "i", $fileId);
+        mysqli_stmt_execute($stmt);
+        mysqli_stmt_bind_result($stmt, $name, $fwId, $target, $options);
+        $got = mysqli_stmt_fetch($stmt);
+        mysqli_stmt_close($stmt);
+        $res = @mysqli_query($mysql, "SELECT TIMESTAMPDIFF(SECOND, updated, NOW()) FROM modem_host.firmware_flasher WHERE id = 1");
+        $beat = $res ? mysqli_fetch_row($res) : null;
+
+        if (!$got)
+            echo json_encode(array('error' => 'That file is not a result of a finished build'));
+        else
+        {
+            $plan = fwFlashPlan($fwId, $target, $options, $name, $mode, $port, $boot0, $nrst);
+            if (!$plan['ok'])
+                echo json_encode(array('error' => $plan['error']));
+            else
+            if (!$beat || $beat[0] === null || (int)$beat[0] > 15)
+                echo json_encode(array('error' => 'The firmware flasher is not running on the Pi:  sudo systemctl enable --now openmt-flasher'));
+            else
+            {
+                $lock = mysqli_query($mysql, "SELECT GET_LOCK('openmt_firmware_flash', 5)");
+                $lk = $lock ? mysqli_fetch_row($lock) : null;
+                if (!$lk || (int)$lk[0] != 1)
+                    echo json_encode(array('error' => 'The database is busy, try again'));
+                else
+                {
+                    $busy = mysqli_query($mysql, "SELECT COUNT(*) FROM modem_host.firmware_flash_runs WHERE state IN ('queued', 'running') AND TIMESTAMPDIFF(SECOND, IFNULL(updated, started), NOW()) <= 120");
+                    $count = $busy ? mysqli_fetch_row($busy) : array(0);
+                    if ((int)$count[0] > 0)
+                        echo json_encode(array('error' => 'A flash is already running'));
+                    else
+                    {
+                        mysqli_query($mysql, "DELETE FROM modem_host.firmware_flash_runs WHERE started < DATE_SUB(NOW(), INTERVAL 30 DAY)");
+                        $stmt = mysqli_prepare($mysql, "INSERT INTO modem_host.firmware_flash_runs (file_id, mode, port, boot0, nrst, state, started, updated) VALUES (?, ?, ?, ?, ?, 'queued', NOW(), NOW())");
+                        mysqli_stmt_bind_param($stmt, "issii", $fileId, $mode, $port, $boot0, $nrst);
+                        if (!mysqli_stmt_execute($stmt))
+                            echo json_encode(array('error' => 'Could not store the request'));
+                        else
+                            echo json_encode(array('id' => (int)mysqli_insert_id($mysql)));
+                        mysqli_stmt_close($stmt);
+                    }
+                    mysqli_query($mysql, "SELECT RELEASE_LOCK('openmt_firmware_flash')");
+                }
+            }
+        }
+    }
+}
+else
+if ($command == "downloadFirmware")
+{
+    /* Sends one result file of a build. */
+    global $mysql;
+    manage_require_auth();
+
+    $id = (int)($_GET['id'] ?? 0);
+    $stmt = mysqli_prepare($mysql, "SELECT f.name, f.data, r.id, r.firmware FROM modem_host.firmware_files f JOIN modem_host.firmware_runs r ON r.id = f.run_id WHERE f.id = ?");
+    mysqli_stmt_bind_param($stmt, "i", $id);
+    mysqli_stmt_execute($stmt);
+    mysqli_stmt_bind_result($stmt, $name, $data, $runId, $fwName);
+    $got = mysqli_stmt_fetch($stmt);
+    mysqli_stmt_close($stmt);
+    if (!$got)
+    {
+        http_response_code(404);
+        echo "not found";
+    }
+    else
+    {
+        $safe = preg_replace('/[^A-Za-z0-9._-]/', '_', (string)$name);
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . $safe . '"');
+        header('Content-Length: ' . strlen($data));
+        header('X-Content-Type-Options: nosniff');
+        echo $data;
+    }
+}
 
 mysqli_close($mysql);
 ?>

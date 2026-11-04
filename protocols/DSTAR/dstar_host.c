@@ -544,6 +544,9 @@ unsigned int pathMemory2[42U];
 unsigned int pathMemory3[42U];
 uint8_t fecOutput[42U];
 uint32_t rssiAccum;
+static uint32_t dbgHdrTries = 0U;          /* header sync found since the last end of reception */
+static uint32_t dbgHdrFails = 0U;          /* of those, headers that failed their check */
+static int      dbgHdrMetric = 0;          /* Viterbi path metric of the last failed header (smaller = fewer bit errors) */
 uint16_t rssiCount;
 
 arm_biquad_casd_df1_inst_q31 dcFilter;
@@ -1402,6 +1405,7 @@ void processNone(q15_t sample)
     if (ret)
     {
         countdown = 5U;
+        dbgHdrTries++;
 
         headerBuffer[headerPtr] = sample;
         headerPtr++;
@@ -1418,6 +1422,64 @@ void processNone(q15_t sample)
     {
         rxState = DSRXS_DATA;
     }
+}
+
+/*
+ * rescueHeader()
+ *
+ * Second attempt at a header that failed its check at the fixed 5 sample spacing.  When the modem's sample clock
+ * is a few hundred ppm off, the sampling point slides across the 660 symbols of the header and the bits are garbage
+ * (a Viterbi metric of about 90 whatever the sampling offset).  This takes the symbol spacing as 5 samples plus a
+ * small slope and a start offset, tries a grid of both, and returns the first that passes the checksum.  The slope that
+ * worked is the error of the sample clock: slope / 5 of the sample rate (1 per mille of a sample per symbol = 200 ppm).
+ *
+ * Parameters:
+ *   hb         - The header samples as collected by decodeHeader().
+ *   header     - Receives the decoded header when one is found.
+ *   bestMetric - Receives the smallest Viterbi metric of all tries.
+ *   phase      - Receives the start offset (samples) that worked.
+ *   slope      - Receives the slope that worked, in 1/1000 sample per symbol.
+ *
+ * Returns: true if a header was decoded.
+ */
+static bool rescueHeader(const q15_t* hb, uint8_t* header, int* bestMetric, int* phase, int* slope)
+{
+    static const int8_t slopes[] = { 0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -8, 8, -10, 10 };
+    static const int8_t phases[] = { 0, -1, 1, -2, 2 };
+    const int last = (int)(DSTAR_FEC_SECTION_LENGTH_SAMPLES + DSTAR_RADIO_SYMBOL_LENGTH) - 1;
+
+    *bestMetric = 9999;
+    for (uint8_t a = 0U; a < sizeof(slopes); a++)
+    {
+        for (uint8_t b = 0U; b < sizeof(phases); b++)
+        {
+            if (slopes[a] == 0 && phases[b] == 0)
+                continue;
+
+            uint8_t bits[DSTAR_FEC_SECTION_LENGTH_BYTES];
+            memset(bits, 0x00, sizeof(bits));
+            for (uint16_t k = 0U; k < DSTAR_FEC_SECTION_LENGTH_SYMBOLS; k++)
+            {
+                double pos = (double)(DSTAR_RADIO_SYMBOL_LENGTH + phases[b]) + (double)k * ((double)DSTAR_RADIO_SYMBOL_LENGTH + (double)slopes[a] / 1000.0);
+                int idx = (int)(pos + 0.5);
+                if (idx < 0) idx = 0;
+                if (idx > last) idx = last;
+                WRITE_BIT2(bits, k, hb[idx] < 0);
+            }
+            if (rxHeader(bits, header))
+            {
+                *phase = phases[b];
+                *slope = slopes[a];
+                return true;
+            }
+            int m = pathMetric[0];
+            for (int k = 1; k < 4; k++)
+                if (pathMetric[k] < m) m = pathMetric[k];
+            if (m < *bestMetric)
+                *bestMetric = m;
+        }
+    }
+    return false;
 }
 
 /*
@@ -1452,6 +1514,67 @@ void decodeHeader(q15_t sample)
 
         uint8_t header[DSTAR_HEADER_LENGTH_BYTES];
         bool ok = rxHeader(buffer, header);
+        if (!ok)
+        {
+            int best = pathMetric[0];
+            for (int k = 1; k < 4; k++)
+                if (pathMetric[k] < best) best = pathMetric[k];
+            dbgHdrMetric = best;
+
+            /* A header that fails at the sampling point the sync gave is tried again one and two samples earlier
+               and later, and with the bits inverted.  Whatever decodes is used; the log says which it was, and, if
+               none did, how many bit errors each try had, so the cause (timing or polarity) can be seen. */
+            char tries[96];
+            int  len = 0;
+            tries[0] = '\0';
+            bool rescued = false;
+            static const int8_t retryOffset[5] = { -1, 1, -2, 2, 0 };
+            for (uint8_t r = 0U; r < 5U && !rescued; r++)
+            {
+                uint8_t again[DSTAR_FEC_SECTION_LENGTH_BYTES];
+                samplesToBits(headerBuffer, (uint16_t)(DSTAR_RADIO_SYMBOL_LENGTH + retryOffset[r]), DSTAR_FEC_SECTION_LENGTH_SYMBOLS,
+                              again, DSTAR_FEC_SECTION_LENGTH_SAMPLES + 2U * DSTAR_RADIO_SYMBOL_LENGTH);
+                bool inverted = (r == 4U);
+                if (inverted)
+                {
+                    for (uint16_t k = 0U; k < DSTAR_FEC_SECTION_LENGTH_BYTES; k++)
+                        again[k] = (uint8_t)~again[k];
+                }
+                if (rxHeader(again, header))
+                {
+                    fprintf(stderr, "DSTAR header recovered with sample offset %d%s (first try had Viterbi metric %d)\n",
+                            retryOffset[r], inverted ? ", bits inverted" : "", best);
+                    rescued = true;
+                    ok = true;
+                    break;
+                }
+                int m = pathMetric[0];
+                for (int k = 1; k < 4; k++)
+                    if (pathMetric[k] < m) m = pathMetric[k];
+                if (len < (int)sizeof(tries) - 16)
+                    len += snprintf(tries + len, sizeof(tries) - len, " %+d%s:%d", retryOffset[r], inverted ? "inv" : "", m);
+            }
+            if (!ok)
+            {
+                int gridMetric = 0, gridPhase = 0, gridSlope = 0;
+                if (rescueHeader(headerBuffer, header, &gridMetric, &gridPhase, &gridSlope))
+                {
+                    fprintf(stderr, "DSTAR header recovered with a drifting sampling point (offset %d, %+d per mille of a sample per symbol, "
+                                    "the sample clock is about %+d ppm off; first try had Viterbi metric %d)\n",
+                            gridPhase, gridSlope, gridSlope * 200, best);
+                    ok = true;
+                }
+                else
+                    snprintf(tries + len, sizeof(tries) - len, " drift grid:%d", gridMetric);
+            }
+            if (!ok)
+            {
+                dbgHdrFails++;
+                fprintf(stderr, "DSTAR header sync found but the header failed its check (sync correlation %d, Viterbi metric %d; other sample offsets:%s)\n",
+                        (int)maxFrameCorr, best, tries);
+            }
+        }
+
         if (!ok)
         {
             rxState      = DSRXS_NONE;
@@ -1882,6 +2005,53 @@ bool checksum(const uint8_t* header)
 }
 
 /*
+ * setHeaderChecksum()
+ *
+ * Writes the CRC into the last two bytes of a 41 byte header (the reverse
+ * of checksum()).
+ *
+ * Parameters:
+ *   header - The 41 byte header; the first 39 bytes are used and the last two are set.
+ *
+ * Returns: nothing.
+ */
+static void setHeaderChecksum(uint8_t* header)
+{
+    union
+    {
+        uint16_t crc16;
+        uint8_t crc8[2U];
+    } crc;
+
+    crc.crc16 = 0xFFFFU;
+    for (uint8_t i = 0U; i < (DSTAR_HEADER_LENGTH_BYTES - 2U); i++)
+        crc.crc16 = ((uint16_t)(crc.crc8[1U])) ^ CCITT16_TABLE[crc.crc8[0U] ^ header[i]];
+
+    crc.crc16 = ~crc.crc16;
+
+    header[DSTAR_HEADER_LENGTH_BYTES - 2U] = crc.crc8[0U];
+    header[DSTAR_HEADER_LENGTH_BYTES - 1U] = crc.crc8[1U];
+}
+
+/*
+ * padCall()
+ *
+ * Copies a callsign into an 8 byte header field, padded with spaces.
+ *
+ * Parameters:
+ *   field - The 8 byte field.
+ *   call  - The callsign text.
+ *
+ * Returns: nothing.
+ */
+static void padCall(uint8_t* field, const char* call)
+{
+    memset(field, ' ', 8U);
+    for (uint8_t i = 0U; i < 8U && call[i] != '\0'; i++)
+        field[i] = (uint8_t)call[i];
+}
+
+/*
  * rxHeader()
  *
  * Decodes a received D-Star header: descrambles and deinterleaves the input,
@@ -2282,6 +2452,24 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet)
         length = DSTAR_HEADER_LENGTH_BYTES;
     }
 
+    /* A radio in simplex mode talks to a hotspot directly and sends RPT1 and RPT2 as DIRECT.  A simplex
+       modem is that hotspot, so the call is for this station: the two fields are replaced by the
+       station's own RPT1 and RPT2 (and the header CRC is made again) so that it is handled, and goes
+       to the gateway, like any other call.  A duplex modem is a repeater and leaves DIRECT calls alone. */
+    uint8_t direct[DSTAR_HEADER_LENGTH_BYTES];
+    if (!isNet && !modem_duplex && length == DSTAR_HEADER_LENGTH_BYTES &&
+        station_rpt1Call[0] != '\0' && station_rpt2Call[0] != '\0' &&
+        (memcmp(data + 3, "DIRECT  ", 8) == 0 || memcmp(data + 11, "DIRECT  ", 8) == 0))
+    {
+        memcpy(direct, data, length);
+        padCall(direct + 3, station_rpt2Call);
+        padCall(direct + 11, station_rpt1Call);
+        setHeaderChecksum(direct);
+        data = direct;
+        fprintf(stderr, "DSTAR simplex: DIRECT header taken as addressed to this station (RPT1 %s, RPT2 %s)\n",
+                station_rpt1Call, station_rpt2Call);
+    }
+
     buf[0] = 0x61;
     buf[1] = 0x00;
     buf[2] = 0x31;
@@ -2554,8 +2742,11 @@ void processEOT(bool isNet)
 
     if (!validFrame && !isNet)
     {
-        fprintf(stderr, "DSTAR EOT to gateway: not sent (no valid header for this transmission)\n");
+        fprintf(stderr, "DSTAR EOT to gateway: not sent (no valid header for this transmission; header sync found %u time(s), %u failed the check)\n",
+                (unsigned)dbgHdrTries, (unsigned)dbgHdrFails);
     }
+    dbgHdrTries = 0U;
+    dbgHdrFails = 0U;
 
     if (isNet && netHeaderRepeats > 0)
     {
