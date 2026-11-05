@@ -16,14 +16,34 @@
 /*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
 /*M!100616 SET @OLD_NOTE_VERBOSITY=@@NOTE_VERBOSITY, NOTE_VERBOSITY=0 */;
 
+-- ---------------------------------------------------------------------------------------------------------------------
+-- OpenMT database: every table of the project in this one file.
+-- Created by Rick KD0OSS
+--
+-- Install or update:   mysql -u openmt -p modem_host < db/openmt.sql
+-- The file can be run again on an existing database: a table is only created when it is missing, the starting rows
+-- are only added when they are missing, and nothing that is saved (settings, the dashboard password, the lists)
+-- is changed or removed.  So when a new release adds a table, run this file again.
+--
+--   dashboard and modem host:  auth, config, dashb_commands, dmr_ids, errors, gps, history, host_status, last_call,
+--                              reflectors, sms_messages
+--   service control:           services, service_commands, system_actions
+--   host list updates:         host_update_sections, host_update_runs
+--   firmware tab:              firmware_runs, firmware_files, firmware_presets, firmware_flash_runs, firmware_flasher
+--
+-- The only other file is db/modem_display_type.sql, a one-time change for a database made before the Modem tab
+-- used display_type; a new database does not need it.
+-- ---------------------------------------------------------------------------------------------------------------------
+
+USE modem_host;
+
 --
 -- Table structure for table `auth`
 --
 
-DROP TABLE IF EXISTS `auth`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `auth` (
+CREATE TABLE IF NOT EXISTS `auth` (
   `username` varchar(10) NOT NULL,
   `password` varchar(50) NOT NULL
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Dashboard authorization';
@@ -32,12 +52,13 @@ CREATE TABLE `auth` (
 --
 -- Table structure for table `config`
 --
-INSERT INTO `auth` SET `username` = 'admin', `password` = PASSWORD('admin');
+-- The first user, only when there is none yet (a saved password is never replaced).
+INSERT INTO `auth` (`username`, `password`) SELECT 'admin', PASSWORD('admin') FROM DUAL
+ WHERE NOT EXISTS (SELECT 1 FROM `auth` WHERE `username` = 'admin');
 
-DROP TABLE IF EXISTS `config`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `config` (
+CREATE TABLE IF NOT EXISTS `config` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `modem_name` varchar(10) DEFAULT 'modem1',
   `module` varchar(30) NOT NULL DEFAULT 'main',
@@ -46,7 +67,7 @@ CREATE TABLE `config` (
   `value` varchar(255) NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `module_params` (`module`,`parameter`) USING BTREE
-) ENGINE=MyISAM AUTO_INCREMENT=55 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Modem host configuration';
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Modem host configuration';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
@@ -56,7 +77,7 @@ CREATE TABLE `config` (
 SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, @@AUTOCOMMIT=0;
 LOCK TABLES `config` WRITE;
 /*!40000 ALTER TABLE `config` DISABLE KEYS */;
-INSERT INTO `config` VALUES
+INSERT IGNORE INTO `config` VALUES
 (1,'modem1','main','gateways','none',''),
 (2,'modem1','main','activeModes','none',''),
 (3,'modem1','main','username','none','admin'),
@@ -94,61 +115,57 @@ SET AUTOCOMMIT=@OLD_AUTOCOMMIT;
 -- Table structure for table `dashb_commands`
 --
 
-DROP TABLE IF EXISTS `dashb_commands`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `dashb_commands` (
+CREATE TABLE IF NOT EXISTS `dashb_commands` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `modem_name` varchar(10) DEFAULT 'modem1',
   `command` varchar(20) NOT NULL,
   `parameter` varchar(40) NOT NULL,
   `result` varchar(80) DEFAULT NULL,
   PRIMARY KEY (`id`)
-) ENGINE=MyISAM AUTO_INCREMENT=46 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Dashboard commands for host program';
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Dashboard commands for host program';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
 -- Table structure for table `dmr_ids`
 --
 
-DROP TABLE IF EXISTS `dmr_ids`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `dmr_ids` (
+CREATE TABLE IF NOT EXISTS `dmr_ids` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `DMR_Id` int(11) DEFAULT NULL,
   `Callsign` varchar(10) DEFAULT NULL,
   `Name` varchar(40) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_dmr_id` (`DMR_Id`)
-) ENGINE=InnoDB AUTO_INCREMENT=302009 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
 -- Table structure for table `errors`
 --
 
-DROP TABLE IF EXISTS `errors`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `errors` (
+CREATE TABLE IF NOT EXISTS `errors` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `modem_name` varchar(10) DEFAULT 'modem1',
   `module` varchar(30) NOT NULL,
   `message` varchar(255) NOT NULL,
   `datetime` datetime NOT NULL,
   PRIMARY KEY (`id`)
-) ENGINE=MyISAM AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Error messages';
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Error messages';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
 -- Table structure for table `gps`
 --
 
-DROP TABLE IF EXISTS `gps`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `gps` (
+CREATE TABLE IF NOT EXISTS `gps` (
   `id` int(11) NOT NULL,
   `latitude` double NOT NULL,
   `longitude` double NOT NULL,
@@ -163,10 +180,9 @@ CREATE TABLE `gps` (
 -- Table structure for table `history`
 --
 
-DROP TABLE IF EXISTS `history`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `history` (
+CREATE TABLE IF NOT EXISTS `history` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `modem_name` varchar(10) DEFAULT 'modem1',
   `type` enum('RF','NET') NOT NULL DEFAULT 'RF',
@@ -186,27 +202,25 @@ CREATE TABLE `history` (
 -- Table structure for table `host_status`
 --
 
-DROP TABLE IF EXISTS `host_status`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `host_status` (
+CREATE TABLE IF NOT EXISTS `host_status` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `modem_name` varchar(10) DEFAULT 'modem1',
   `module` varchar(30) NOT NULL,
   `property` varchar(20) NOT NULL,
   `value` varchar(50) NOT NULL,
   PRIMARY KEY (`id`)
-) ENGINE=MyISAM AUTO_INCREMENT=30 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Host program status';
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Host program status';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
 -- Table structure for table `last_call`
 --
 
-DROP TABLE IF EXISTS `last_call`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `last_call` (
+CREATE TABLE IF NOT EXISTS `last_call` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `pos` tinyint(4) NOT NULL,
   `modem_name` varchar(10) DEFAULT 'modem1',
@@ -218,17 +232,16 @@ CREATE TABLE `last_call` (
   `ss_message` varchar(80) NOT NULL,
   `isTx` tinyint(1) NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`)
-) ENGINE=MyISAM AUTO_INCREMENT=55302 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Last call info';
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Last call info';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
 -- Table structure for table `reflectors`
 --
 
-DROP TABLE IF EXISTS `reflectors`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `reflectors` (
+CREATE TABLE IF NOT EXISTS `reflectors` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `refl_type` varchar(10) NOT NULL,
   `Nick` varchar(7) NOT NULL,
@@ -242,23 +255,186 @@ CREATE TABLE `reflectors` (
   `has_modules` enum('yes','no') DEFAULT 'no',
   PRIMARY KEY (`id`),
   UNIQUE KEY `refl_type` (`refl_type`,`Nick`)
-) ENGINE=MyISAM AUTO_INCREMENT=10781 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='DV Reflectors';
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='DV Reflectors';
 /*!40101 SET character_set_client = @saved_cs_client */;
 
 --
 -- Table structure for table `sms_messages`
 --
 
-DROP TABLE IF EXISTS `sms_messages`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
-CREATE TABLE `sms_messages` (
+CREATE TABLE IF NOT EXISTS `sms_messages` (
   `id` int(11) NOT NULL,
   `source` varchar(10) NOT NULL,
   `message` text NOT NULL,
   `datetime` datetime NOT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='SMS message';
+--
+-- service control (Settings, Services tab)
+--
+
+CREATE TABLE IF NOT EXISTS services (
+  unit        varchar(60)  NOT NULL,
+  label       varchar(40)  NOT NULL,
+  description varchar(120) NOT NULL DEFAULT '',
+  sort_order  int(11)      NOT NULL DEFAULT 100,
+  active      varchar(20)  NOT NULL DEFAULT 'unknown' COMMENT 'Written by the service manager',
+  enabled     varchar(20)  NOT NULL DEFAULT 'unknown' COMMENT 'Written by the service manager',
+  updated     datetime     DEFAULT NULL,
+  PRIMARY KEY (unit)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Services the dashboard can manage';
+
+CREATE TABLE IF NOT EXISTS service_commands (
+  id        int(11)     NOT NULL AUTO_INCREMENT,
+  unit      varchar(60) NOT NULL,
+  action    varchar(10) NOT NULL,
+  requested datetime    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  result    varchar(80) DEFAULT NULL,
+  PRIMARY KEY (id)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Requests from the dashboard for the service manager';
+
+INSERT IGNORE INTO services (unit, label, description, sort_order) VALUES
+  ('mmdvm-bridge.service','MMDVM bridge',    'MMDVM / MMDVM_HS modem bridge (only when this bridge is used)', 4),
+  ('openmths-bridge.service','OpenMT_HS bridge','OpenMT_HS modem bridge (only when this bridge is used)', 4),
+  ('openmt-bridge.service','OpenMT bridge','OpenMT sample modem bridge (only when this bridge is used)', 4),
+  ('sx1255-bridge.service','SX1255 bridge',   'SX1255 radio bridge (only with the SX1255 modem)', 5),
+  ('modem-host.service',   'Modem host',       'Talks to the modem. Every host needs it.',        10),
+  ('dstar-host.service',   'D-STAR host',      'D-STAR protocol host',                            20),
+  ('dstar-gateway.service','D-STAR gateway',   'D-STAR reflector gateway',                        21),
+  ('dmr-host.service',     'DMR host',         'DMR protocol host',                               30),
+  ('dmr-gateway.service',  'DMR gateway',      'DMR network gateway',                             31),
+  ('p25-host.service',     'P25 host',         'P25 protocol host',                               40),
+  ('p25-gateway.service',  'P25 gateway',      'P25 reflector gateway',                           41),
+  ('nxdn-host.service',    'NXDN host',        'NXDN protocol host',                              50),
+  ('nxdn-gateway.service', 'NXDN gateway',     'NXDN reflector gateway',                          51),
+  ('ysf-host.service',     'YSF host',         'System Fusion protocol host',                     60),
+  ('ysf-gateway.service',  'YSF gateway',      'System Fusion reflector gateway',                 61),
+  ('m17-host.service',     'M17 host',         'M17 protocol host',                               70),
+  ('m17-gateway.service',  'M17 gateway',      'M17 reflector gateway',                           71),
+  ('fm-host.service',      'FM host',          'FM repeater host',                                80),
+  ('fm-gateway.service',   'FM gateway',       'FM gateway (EchoLink)',                           81);
+
+-- Power actions for the Pi itself. The dashboard builds its Restart / Shut down buttons from these rows.
+-- The commands they run are fixed in the service manager (systemctl reboot / poweroff); a row only
+-- switches an action on and sets its text, so removing a row removes the button and the permission.
+CREATE TABLE IF NOT EXISTS system_actions (
+  action      varchar(10)  NOT NULL,
+  label       varchar(30)  NOT NULL,
+  description varchar(120) NOT NULL DEFAULT '',
+  confirm     varchar(200) NOT NULL DEFAULT '',
+  sort_order  int(11)      NOT NULL DEFAULT 100,
+  PRIMARY KEY (action)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Power actions the dashboard can ask for';
+
+INSERT IGNORE INTO system_actions (action, label, description, confirm, sort_order) VALUES
+  ('reboot',   'Restart the Pi',   'Restarts the Pi. The dashboard is back in about a minute.',
+   'Restart the Pi now?\n\nAll services stop and start again, and you will need to log in again.', 10),
+  ('poweroff', 'Shut down the Pi', 'Shuts the Pi down. It must be switched on by hand again.',
+   'Shut the Pi down now?\n\nIt will stay off until the power is switched off and on again.', 20);
+
+--
+-- host list updates (Settings, Services tab)
+--
+
+CREATE TABLE IF NOT EXISTS host_update_sections (
+  section     varchar(10)  NOT NULL,
+  label       varchar(40)  NOT NULL,
+  description varchar(120) NOT NULL DEFAULT '',
+  refl_type   varchar(10)  DEFAULT NULL,
+  sort_order  int(11)      NOT NULL DEFAULT 100,
+  last_run    datetime     DEFAULT NULL COMMENT 'Written by updateHostsRun.php',
+  last_result varchar(120) DEFAULT NULL COMMENT 'Written by updateHostsRun.php',
+  PRIMARY KEY (section)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Host lists the dashboard can update';
+
+CREATE TABLE IF NOT EXISTS host_update_runs (
+  id       int(11)     NOT NULL AUTO_INCREMENT,
+  sections varchar(120) NOT NULL,
+  state    varchar(10) NOT NULL DEFAULT 'queued' COMMENT 'queued, running, done or failed',
+  started  datetime    DEFAULT NULL,
+  updated  datetime    DEFAULT NULL COMMENT 'Heartbeat of the running update',
+  finished datetime    DEFAULT NULL,
+  log      mediumtext  DEFAULT NULL,
+  PRIMARY KEY (id)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Updates started from the dashboard';
+
+INSERT IGNORE INTO host_update_sections (section, label, description, refl_type, sort_order) VALUES
+  ('p25',   'P25 reflectors',    'Talk groups and addresses of the P25 reflectors', 'P25',   10),
+  ('nxdn',  'NXDN reflectors',   'Talk groups and addresses of the NXDN reflectors','NXDN',  20),
+  ('ysf',   'YSF reflectors',    'Yaesu System Fusion reflectors',                  'YSF',   30),
+  ('m17',   'M17 reflectors',    'M17 reflectors and their modules',                'M17',   40),
+  ('dstar', 'D-Star reflectors', 'REF, XRF, DCS and XLX reflectors',                'DSTAR', 50),
+  ('ids',   'DMR and NXDN IDs',  'Call sign look-up for the DMR and NXDN user ids', NULL,    60);
+
+--
+-- firmware builds (Settings, Firmware tab): the request, state and log of a build, and the result files (.hex and .bin) so the page can offer them for download
+--
+
+CREATE TABLE IF NOT EXISTS firmware_runs (
+  id       int(11)      NOT NULL AUTO_INCREMENT,
+  firmware varchar(20)  NOT NULL COMMENT 'hs or sample',
+  target   varchar(10)  NOT NULL DEFAULT '',
+  options  text         DEFAULT NULL COMMENT 'The option values of the request, as JSON',
+  state    varchar(10)  NOT NULL DEFAULT 'queued' COMMENT 'queued, running, done or failed',
+  started  datetime     DEFAULT NULL,
+  updated  datetime     DEFAULT NULL COMMENT 'Heartbeat of the running build',
+  finished datetime     DEFAULT NULL,
+  log      mediumtext   DEFAULT NULL,
+  PRIMARY KEY (id)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Firmware builds started from the dashboard';
+
+CREATE TABLE IF NOT EXISTS firmware_files (
+  id      int(11)      NOT NULL AUTO_INCREMENT,
+  run_id  int(11)      NOT NULL,
+  name    varchar(80)  NOT NULL,
+  size    int(11)      NOT NULL DEFAULT 0,
+  data    mediumblob   DEFAULT NULL,
+  PRIMARY KEY (id),
+  KEY run_id (run_id)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Result files of the firmware builds';
+
+--
+-- saved option sets of the Firmware tab
+--
+
+CREATE TABLE IF NOT EXISTS firmware_presets (
+  id       int(11)      NOT NULL AUTO_INCREMENT,
+  firmware varchar(20)  NOT NULL COMMENT 'hs or sample',
+  name     varchar(40)  NOT NULL,
+  options  text         NOT NULL COMMENT 'Option values as JSON',
+  updated  datetime     DEFAULT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY firmware_name (firmware, name)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Named option sets for firmware builds';
+
+--
+-- flashing a build to the modem from the dashboard: the dashboard writes a request into firmware_flash_runs, the firmware flasher (tools/firmware_flasher, runs as root) does it and writes the log back; firmware_flasher holds the heartbeat the page uses to tell whether the flasher is running
+--
+
+CREATE TABLE IF NOT EXISTS firmware_flash_runs (
+  id       int(11)      NOT NULL AUTO_INCREMENT,
+  file_id  int(11)      NOT NULL COMMENT 'Row of firmware_files',
+  mode     varchar(10)  NOT NULL COMMENT 'soft, gpio or seq',
+  port     varchar(30)  NOT NULL,
+  boot0    int(11)      NOT NULL DEFAULT 20,
+  nrst     int(11)      NOT NULL DEFAULT 21,
+  state    varchar(10)  NOT NULL DEFAULT 'queued' COMMENT 'queued, running, done, failed or expired',
+  started  datetime     DEFAULT NULL,
+  updated  datetime     DEFAULT NULL COMMENT 'Heartbeat of the flasher',
+  finished datetime     DEFAULT NULL,
+  units    text         DEFAULT NULL COMMENT 'Services stopped for the flash (started again afterwards)',
+  log      mediumtext   DEFAULT NULL,
+  PRIMARY KEY (id)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Flash requests from the dashboard';
+
+CREATE TABLE IF NOT EXISTS firmware_flasher (
+  id      int(11)     NOT NULL,
+  updated datetime    DEFAULT NULL COMMENT 'Written by the firmware flasher every few seconds',
+  PRIMARY KEY (id)
+) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci COMMENT='Heartbeat of the firmware flasher';
+
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 

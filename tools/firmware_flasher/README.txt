@@ -31,4 +31,4 @@ The first flash of the F105 loader image (-L option of the build) needs an SWD p
 Test without hardware
   php flasher.php --once --systemctl /path/to/fake_systemctl --script /path/to/fake_flash.sh --source /path/to/OpenMT
 
-Requires: php-cli with mysqli, stm32flash, the database tables of db/firmware_builds.sql and db/firmware_flash.sql.
+Requires: php-cli with mysqli, stm32flash, the database tables of db/openmt.sql (firmware_runs, firmware_files, firmware_flash_runs, firmware_flasher).

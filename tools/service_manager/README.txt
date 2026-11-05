@@ -30,7 +30,7 @@ X-OpenMT: 1 (so another web site cannot send the request for you).
 
 Install
 -------
-  mysql -u root -p < db/services.sql            (creates the tables, lists the OpenMT services)
+  mysql -u root -p modem_host < db/openmt.sql (creates the tables, lists the OpenMT services)
   cd tools/service_manager && mkdir build && cd build && cmake .. && make
   sudo cp ../openmt-service-manager.service /etc/systemd/system/
   (edit the paths in it if OpenMT is not in /home/pi/OpenMT)
@@ -47,7 +47,7 @@ dashboard enables at boot must have an [Install] section (the OpenMT ones do).
 Restart and shut down the Pi
 ----------------------------
 The Services tab also shows buttons for the power actions listed in
-modem_host.system_actions (db/services.sql adds "reboot" and "poweroff"). The
+modem_host.system_actions (db/openmt.sql adds "reboot" and "poweroff"). The
 commands are fixed in the service manager (systemctl reboot / poweroff); a row
 only switches the action on and sets its label and confirmation text. Delete a
 row to remove the button and the permission.

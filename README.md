@@ -154,7 +154,7 @@ with regards to adding new radio protocols and services.
 	A root service manager (`tools/service_manager`) carries out the requests; see its README.
 - **Host list updates from the dashboard**:
 	The "Update host lists" box in Settings -> Services runs `updateHosts.php` for the lists 
-	kept in `modem_host.host_update_sections` (import `db/host_updates.sql`), either the ticked ones or all,
+	kept in `modem_host.host_update_sections` (created by `db/openmt.sql`), either the ticked ones or all,
 	and shows the log while it runs. `updateHosts.php` and `updateHostsRun.php` only run from the command line;
 	the web server starts the runner in the background.
 - **Hosts and gateways on other machines**:

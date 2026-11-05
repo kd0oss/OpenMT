@@ -7,7 +7,7 @@ Created by Rick KD0OSS
   sudo cp ../modem-host.service.d/sx1255.conf /etc/systemd/system/modem-host.service.d/
   sudo systemctl daemon-reload
   sudo systemctl enable --now sx1255-bridge
-  mysql -u root -p < db/services.sql          (adds the bridge to the dashboard Services tab)
+  mysql -u root -p modem_host < db/openmt.sql (adds the bridge to the dashboard Services tab)
 
 Settings: the bridge keeps the radio settings (rxFrequency, txFrequency, rxLnaGain, rxPgaGain,
 txMixerGain, txDacGain, rxPllBw, txPllBw, rxInvert, txInvert, mode) in the config database. It

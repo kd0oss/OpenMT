@@ -1148,6 +1148,35 @@ if ($command == "getFirmware")
     $info['run'] = $run ? $run : null;
     $info['files'] = $files;
 
+    /* the options of the latest build of each firmware (the page starts from them), and the saved sets */
+    $last = array();
+    foreach (array('hs', 'sample') as $f)
+    {
+        $res = mysqli_query($mysql, "SELECT options FROM modem_host.firmware_runs WHERE firmware = '" . $f . "' ORDER BY id DESC LIMIT 1");
+        $row = $res ? mysqli_fetch_row($res) : null;
+        $o = $row ? json_decode((string)$row[0], true) : null;
+        if (is_array($o))
+            $last[$f] = $o;
+    }
+    $info['last'] = (object)$last;
+    $presets = array();
+    $presetError = '';
+    try
+    {
+        $res = mysqli_query($mysql, "SELECT id, firmware, name, options FROM modem_host.firmware_presets ORDER BY firmware, name");
+        while ($res && ($r = mysqli_fetch_assoc($res)))
+        {
+            $o = json_decode((string)$r['options'], true);
+            $presets[] = array('id' => (int)$r['id'], 'firmware' => $r['firmware'], 'name' => $r['name'], 'options' => is_array($o) ? (object)$o : (object)array());
+        }
+    }
+    catch (Throwable $e)
+    {
+        $presetError = 'The table for saved sets is missing: run  mysql -u openmt -p modem_host < db/openmt.sql';
+    }
+    $info['presets'] = $presets;
+    $info['presetError'] = $presetError;
+
     /* flashing: the flasher (tools/firmware_flasher) runs as root and writes a heartbeat; a request it never took
        up (2 minutes), or one whose heartbeat stopped (60 seconds), is marked failed here too */
     $flash = null;
@@ -1172,7 +1201,7 @@ if ($command == "getFirmware")
     }
     catch (Throwable $e)
     {
-        $flashError = 'The flash tables are missing: run  mysql -u openmt -p < db/firmware_flash.sql';
+        $flashError = 'The flash tables are missing: run  mysql -u openmt -p modem_host < db/openmt.sql';
     }
     $info['flash'] = $flash ? $flash : null;
     $info['flasher'] = $alive;
@@ -1256,6 +1285,55 @@ if ($command == "startFirmwareBuild")
                     mysqli_stmt_close($stmt);
                 }
                 mysqli_query($mysql, "SELECT RELEASE_LOCK('openmt_firmware_build')");
+            }
+        }
+    }
+}
+else
+if ($command == "saveFirmwarePreset" || $command == "deleteFirmwarePreset")
+{
+    /* Saved option sets of the Firmware tab.  A set is checked with fwPlan() like a build, so only listed
+       options with allowed values are stored. */
+    global $mysql;
+    manage_require_auth();
+    header('Content-Type: application/json');
+    require_once __DIR__ . '/firmwareBuild.php';
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || ($_SERVER['HTTP_X_OPENMT'] ?? '') !== '1')
+        echo json_encode(array('error' => 'Invalid request'));
+    else if ($command == "deleteFirmwarePreset")
+    {
+        $id = (int)($_POST['id'] ?? 0);
+        $stmt = mysqli_prepare($mysql, "DELETE FROM modem_host.firmware_presets WHERE id = ?");
+        mysqli_stmt_bind_param($stmt, "i", $id);
+        echo mysqli_stmt_execute($stmt) ? json_encode(array('ok' => true)) : json_encode(array('error' => 'Could not delete'));
+        mysqli_stmt_close($stmt);
+    }
+    else
+    {
+        $fwId   = (string)($_POST['firmware'] ?? '');
+        $name   = trim((string)($_POST['name'] ?? ''));
+        $values = json_decode((string)($_POST['options'] ?? '{}'), true);
+        $target = (string)($_POST['target'] ?? '');
+        $cat    = fwCatalog();
+        if (!isset($cat[$fwId]))
+            echo json_encode(array('error' => 'Unknown firmware'));
+        else if (!preg_match('/^[A-Za-z0-9 ._()+-]{1,40}$/', $name))
+            echo json_encode(array('error' => 'The name must be 1 to 40 letters, digits, spaces or . _ ( ) + -'));
+        else
+        {
+            if ($target === '' || !isset($cat[$fwId]['targets'][$target]))
+                $target = (string)array_key_first($cat[$fwId]['targets']);
+            $plan = fwPlan($fwId, $target, is_array($values) ? $values : array());
+            if (!$plan['ok'])
+                echo json_encode(array('error' => $plan['error']));
+            else
+            {
+                $json = json_encode($values);
+                $stmt = mysqli_prepare($mysql, "INSERT INTO modem_host.firmware_presets (firmware, name, options, updated) VALUES (?, ?, ?, NOW()) ON DUPLICATE KEY UPDATE options = VALUES(options), updated = NOW()");
+                mysqli_stmt_bind_param($stmt, "sss", $fwId, $name, $json);
+                echo mysqli_stmt_execute($stmt) ? json_encode(array('ok' => true)) : json_encode(array('error' => 'Could not store the set'));
+                mysqli_stmt_close($stmt);
             }
         }
     }

@@ -10,7 +10,7 @@ talks to the bridge through a virtual port, so the host knows nothing about the 
   sudo systemctl daemon-reload
   sudo systemctl enable --now mmdvm-bridge
   sudo systemctl restart modem-host
-  mysql -u root -p < db/services.sql          (adds the bridge to the dashboard Services tab)
+  mysql -u root -p modem_host < db/openmt.sql (adds the bridge to the dashboard Services tab)
 
 In the dashboard "port" and "baud" are now the real modem port, and "board" says hotspot
 or full. (An older install that has "modem" = mmdvmhs or mmdvm gets the matching "board"

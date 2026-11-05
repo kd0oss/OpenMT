@@ -11,7 +11,7 @@ the modem host talks to the bridge through a virtual port and knows nothing abou
   sudo systemctl daemon-reload
   sudo systemctl enable --now openmt-bridge
   sudo systemctl restart modem-host
-  mysql -u root -p < db/services.sql          (adds the bridge to the dashboard Services tab)
+  mysql -u root -p modem_host < db/openmt.sql (adds the bridge to the dashboard Services tab)
 
 Do not run it together with another bridge on the same modem name.
 
