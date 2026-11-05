@@ -1802,7 +1802,7 @@ int main(int argc, char** argv)
 
     /* DSTAR/jitterMs: how long reflector audio is held to put it back in order, 0 = pass it on at once */
     memset(tmp, 0x00, sizeof(tmp));
-    readHostConfig(modemName, "DSTAR", "jitterMs", tmp);
+    readHostConfigDefault(modemName, "DSTAR", "jitterMs", "input", "300", tmp, sizeof(tmp));
     if (strlen(tmp) > 0)
         jitterMs = (uint32_t)atol(tmp) > 1000U ? 1000U : (uint32_t)atol(tmp);
     fprintf(stderr, "Reflector jitter buffer: %u ms%s\n", jitterMs, jitterMs == 0 ? " (off)" : "");

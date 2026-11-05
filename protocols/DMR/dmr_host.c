@@ -4189,13 +4189,15 @@ void* startClient(void* arg)
             postDemBW = 80U;
             ifFilter  = 2U;
         }
+        /* rxWide is a preset.  postDemBW and ifFilter exist as settings now (6 and 0, the narrow values), so that
+           one is only taken over the preset when it was changed from those. */
         memset(v, 0, sizeof(v));
         readHostConfig(modemName, "DMR", "postDemBW", v);
-        if (atoi(v) >= 1 && atoi(v) <= 1023)
+        if (atoi(v) >= 1 && atoi(v) <= 1023 && (postDemBW == 6U || atoi(v) != 6))
             postDemBW = (uint32_t)atoi(v);
         memset(v, 0, sizeof(v));
         readHostConfig(modemName, "DMR", "ifFilter", v);
-        if (v[0] >= '0' && v[0] <= '2' && v[1] == 0)
+        if (v[0] >= '0' && v[0] <= '2' && v[1] == 0 && (ifFilter == 0U || v[0] != '0'))
             ifFilter = (uint32_t)(v[0] - '0');
         fprintf(stderr, "DMR: RX post-demod BW %u, IF filter %u (0=12.5k 1=18.75k 2=25k)\n", postDemBW, ifFilter);
     }
@@ -4925,23 +4927,49 @@ int main(int argc, char** argv)
     else
         packetType = PACKET_TYPE_FRAME;
 
-    readHostConfig(modemName, "DMR", "ID", tmp);
-    if (strlen(tmp) == 0)
+    /* Every setting of this service is created here when it is missing (also the ones a later release added to an
+       installation that has the older ones), without changing a value that is saved.  The values of the tuning
+       settings are what the host used when the setting did not exist. */
+    static const HostConfigDefault dmrDefaults[] =
     {
-        setHostConfig(modemName, "DMR", "txLevel", "input", "75");
-        setHostConfig(modemName, "DMR", "rfPower", "input", "128");
-        setHostConfig(modemName, "DMR", "ID", "input", "1");
-        setHostConfig(modemName, "DMR", "BM_Port", "input", "62031");
-        setHostConfig(modemName, "DMR", "BM_Address", "input", "74.91.114.19");
-        setHostConfig(modemName, "DMR", "BM_Pass", "input", "pass123");
-        setHostConfig(modemName, "DMR", "BM_Name", "input", "3102");
-        setHostConfig(modemName, "DMR", "ColorCode", "input", "1");
-        setHostConfig(modemName, "DMR", "slots", "input", "3");
+        {"txLevel",     "input", "75"},
+        {"rfPower",     "input", "128"},
+        {"ID",          "input", "1"},
+        {"BM_Port",     "input", "62031"},
+        {"BM_Address",  "input", "74.91.114.19"},
+        {"BM_Pass",     "input", "pass123"},
+        {"BM_Name",     "input", "3102"},
+        {"ColorCode",   "input", "1"},
+        {"slots",       "input", "3"},
+        {"SlotDelay",   "input", "0"},      /* samples */
+        {"DmoPreamble", "input", "360"},    /* ms, simplex */
+        {"TxHang",      "input", "3"}       /* seconds the downlink stays up after a call */
+    };
+    addHostConfigDefaults(modemName, "DMR", dmrDefaults, sizeof(dmrDefaults) / sizeof(dmrDefaults[0]));
+
+    /* SlotPhase (ms, SAMPLE and FRAME mode) and slotPhase (a position in the bit stream, BIT mode) are the same row to
+       the database, which does not tell capitals apart, so only the one that belongs to the stream type is created
+       and read. */
+    if (packetType != PACKET_TYPE_BIT)
+        addHostConfigDefault(modemName, "DMR", "SlotPhase", "input", "54.5");   /* where TS1 bursts land relative to our TX slot 1 */
+
+    if (packetType == PACKET_TYPE_BIT)
+    {
+        /* only the BIT mode (openmths) modem uses these */
+        static const HostConfigDefault dmrBitDefaults[] =
+        {
+            {"rxWide",     "input", "0"},     /* 1 = the wide filters of the MMDVM_HS */
+            {"postDemBW",  "input", "6"},
+            {"ifFilter",   "input", "0"},     /* 0 = 12.5k, 1 = 18.75k, 2 = 25k */
+            {"scanMult",   "input", "2"},
+            {"slotPhase",  "input", "197"}
+        };
+        addHostConfigDefaults(modemName, "DMR", dmrBitDefaults, sizeof(dmrBitDefaults) / sizeof(dmrBitDefaults[0]));
     }
 
-    readHostConfig(modemName, "main", "callsign", stationCall);
-    readHostConfig(modemName, "config", "rxFrequency", modem_rxFrequency);
-    readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
+    readHostConfigDefault(modemName, "main", "callsign", "none", "N0CALL", stationCall, sizeof(stationCall));
+    readHostConfigDefault(modemName, "config", "rxFrequency", "input", "449900000", modem_rxFrequency, sizeof(modem_rxFrequency));
+    readHostConfigDefault(modemName, "config", "txFrequency", "input", "444900000", modem_txFrequency, sizeof(modem_txFrequency));
 
     readHostConfig(modemName, "DMR", "txLevel", tmp);
     txLevel = atoi(tmp);
@@ -4955,7 +4983,8 @@ int main(int argc, char** argv)
     // Where TS1 bursts land relative to our TX slot-1 timing, in ms (see
     // dmrRxSlotFromPhase()). Per-installation; re-measure with debug on.
     tmp[0] = '\0';
-    readHostConfig(modemName, "DMR", "SlotPhase", tmp);
+    if (packetType != PACKET_TYPE_BIT)
+        readHostConfig(modemName, "DMR", "SlotPhase", tmp);
     if (strlen(tmp) > 0)
         dmrRxTs1PhaseNs = (int64_t)(atof(tmp) * 1000000.0);
 

@@ -1297,6 +1297,22 @@ int main(int argc, char** argv)
         umask(0);
     }
 
+    /* Every setting this gateway reads is created when it is missing, with the value it acts on when the
+       setting is absent; a saved value is never changed. */
+    {
+        char port[8];
+        snprintf(port, sizeof(port), "%d", 14050 + modemId - 1);
+
+        const HostConfigDefault nxdnGatewayDefaults[] =
+        {
+            {"hostsFile",   "input", ""},
+            {"networkPort", "input", port},
+            {"staticTG",    "input", "0"},
+            {"hangTime",    "input", "120"}
+        };
+        addHostConfigDefaults(modemName, "NXDN", nxdnGatewayDefaults, sizeof(nxdnGatewayDefaults) / sizeof(nxdnGatewayDefaults[0]));
+    }
+
     loadCallsign(NULL);
 
     if (pthread_create(&clientid, NULL, &startClient, NULL) != 0)

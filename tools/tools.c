@@ -1172,6 +1172,64 @@ bool addHostConfigDefault(const char* modem_name, const char* module_name, const
 }
 
 /*
+ * readHostConfigDefault()
+ *
+ * Reads one setting of the modem from the modem_host.config table.  When the
+ * setting does not exist it is created first, with the default value, so it
+ * is there for the dashboard and for the next start.  A value already saved
+ * is never changed, not even when it is empty.
+ *
+ * Parameters:
+ *   modem_name   - Name of the modem the setting belongs to.
+ *   module_name  - Module the setting belongs to.
+ *   key          - Setting name (the parameter column).
+ *   display_type - How the dashboard shows the setting when it is created
+ *                  ("input" for a setting the user edits, "none" for one it
+ *                  does not show).
+ *   def          - Default value, stored when the setting does not exist.
+ *   value        - Output buffer that receives the value.
+ *   size         - Size of the value buffer in bytes.
+ *
+ * Returns: true if the setting was read, false if the database could not be
+ *   reached; value holds the default then.
+ */
+bool readHostConfigDefault(const char* modem_name, const char* module_name, const char* key, const char* display_type,
+                           const char* def, char* value, size_t size)
+{
+    addHostConfigDefault(modem_name, module_name, key, display_type, def);
+
+    if (!readHostConfigN(modem_name, module_name, key, value, size))
+    {
+        snprintf(value, size, "%s", def);
+        return false;
+    }
+
+    return true;
+}
+
+/*
+ * addHostConfigDefaults()
+ *
+ * Creates every setting of a list that does not exist yet (see
+ * addHostConfigDefault()), so a service can make sure at start-up that all of
+ * its settings are there, including those added in a later release.  Saved
+ * values are never changed.
+ *
+ * Parameters:
+ *   modem_name  - Name of the modem the settings belong to.
+ *   module_name - Module the settings belong to.
+ *   list        - The settings: key, display type and default value each.
+ *   count       - Number of settings in the list.
+ *
+ * Returns: nothing.
+ */
+void addHostConfigDefaults(const char* modem_name, const char* module_name, const HostConfigDefault* list, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        addHostConfigDefault(modem_name, module_name, list[i].key, list[i].displayType, list[i].value);
+}
+
+/*
  * readDashbCommand()
  *
  * Fetches the parameter of a dashboard command from the

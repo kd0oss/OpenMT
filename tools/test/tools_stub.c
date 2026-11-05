@@ -56,6 +56,14 @@
 #include <strings.h>
 #include <unistd.h>
 
+/* the same as in tools.h, which this file does not include */
+typedef struct
+{
+    const char* key;
+    const char* displayType;
+    const char* value;
+} HostConfigDefault;
+
 /*
  * saveHistory()
  *
@@ -323,6 +331,51 @@ bool addHostConfigDefault(const char* modem_name, const char* module_name, const
     if (readHostConfig(modem_name, module_name, key, tmp) && strlen(tmp) > 0)
         return true;
     return setHostConfig(modem_name, module_name, key, display_type, value);
+}
+
+/*
+ * readHostConfigDefault()
+ *
+ * Stub of the function that reads a setting and creates it with a default
+ * when it does not exist: the default is remembered like addHostConfigDefault()
+ * does and then read back.
+ *
+ * Parameters:
+ *   modem_name   - Unused in this stub.
+ *   module_name  - Module name.
+ *   key          - Setting name.
+ *   display_type - Unused in this stub.
+ *   def          - Default value.
+ *   value        - Output buffer for the value.
+ *   size         - Size of the value buffer in bytes.
+ *
+ * Returns: Always true.
+ */
+bool readHostConfigDefault(const char* modem_name, const char* module_name, const char* key, const char* display_type,
+                           const char* def, char* value, size_t size)
+{
+    addHostConfigDefault(modem_name, module_name, key, display_type, def);
+    readHostConfigN(modem_name, module_name, key, value, size);
+    return true;
+}
+
+/*
+ * addHostConfigDefaults()
+ *
+ * Stub that remembers every setting of a list that is not known yet.
+ *
+ * Parameters:
+ *   modem_name  - Unused in this stub.
+ *   module_name - Module name.
+ *   list        - The settings.
+ *   count       - Number of settings.
+ *
+ * Returns: nothing.
+ */
+void addHostConfigDefaults(const char* modem_name, const char* module_name, const HostConfigDefault* list, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        addHostConfigDefault(modem_name, module_name, list[i].key, list[i].displayType, list[i].value);
 }
 
 /*

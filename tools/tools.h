@@ -68,6 +68,18 @@ bool readHostConfig(const char* modem_name, const char* module_name, const char*
 bool readHostConfigN(const char* modem_name, const char* module_name, const char* key, char* value, size_t size);
 bool setHostConfig(const char* modem_name, const char* module_name, const char* key, const char* display_type, const char* value);
 bool addHostConfigDefault(const char* modem_name, const char* module_name, const char* key, const char* display_type, const char* value);
+bool readHostConfigDefault(const char* modem_name, const char* module_name, const char* key, const char* display_type,
+                           const char* def, char* value, size_t size);
+
+/* One setting with its default, for addHostConfigDefaults() */
+typedef struct
+{
+    const char* key;
+    const char* displayType;
+    const char* value;
+} HostConfigDefault;
+
+void addHostConfigDefaults(const char* modem_name, const char* module_name, const HostConfigDefault* list, size_t count);
 bool hostConfigDigest(const char* modem_name, const char* module_name, uint64_t* digest);
 
 /* Database functions - Mode management */

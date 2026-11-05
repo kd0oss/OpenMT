@@ -439,7 +439,7 @@ static void loadConfig(void)
     if (cfg.rxMinAmp < 1.0F)
         cfg.rxMinAmp = 1.0F;
 
-    readHostConfigN(modemName, "main", "callsign", station_call, sizeof(station_call));
+    readHostConfigDefault(modemName, "main", "callsign", "none", "N0CALL", station_call, sizeof(station_call));
 
     fprintf(stderr, "NXDN config: RAN %u id %u selfOnly %d remoteGateway %d rx %u tx %u txDelay %u ms "
             "modeHang %u s timeout %u s jitterMs %u\n", cfg.ran, cfg.id, cfg.selfOnly, cfg.remoteGateway,
@@ -2103,8 +2103,8 @@ int main(int argc, char** argv)
 
     loadConfig();
 
-    readHostConfigN(modemName, "config", "rxFrequency", rxFrequency, sizeof(rxFrequency));
-    readHostConfigN(modemName, "config", "txFrequency", txFrequency, sizeof(txFrequency));
+    readHostConfigDefault(modemName, "config", "rxFrequency", "input", "449900000", rxFrequency, sizeof(rxFrequency));
+    readHostConfigDefault(modemName, "config", "txFrequency", "input", "444900000", txFrequency, sizeof(txFrequency));
 
     nxdnCtrlInit(&ctrl);
     ctrl.ran           = cfg.ran;

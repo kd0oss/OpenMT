@@ -2776,13 +2776,15 @@ int main(int argc, char** argv)
     else
         packetType = PACKET_TYPE_FRAME;
 
-    readHostConfig(modemName, "P25", "txLevel", tmp);
-    if (strlen(tmp) == 0)
+    /* Every setting of this service is created here when it is missing, without changing a value that is saved. */
+    static const HostConfigDefault p25Defaults[] =
     {
-        setHostConfig(modemName, "P25", "NAC",     "input", "0x293");
-        setHostConfig(modemName, "P25", "txLevel", "input", "50");
-        setHostConfig(modemName, "P25", "rfPower", "input", "128");
-    }
+        {"NAC",     "input", "0x293"},
+        {"rxLevel", "input", "50"},
+        {"txLevel", "input", "50"},
+        {"rfPower", "input", "128"}
+    };
+    addHostConfigDefaults(modemName, "P25", p25Defaults, sizeof(p25Defaults) / sizeof(p25Defaults[0]));
 
     readHostConfig(modemName, "P25", "rxLevel", tmp);
     rxLevel = atoi(tmp);
@@ -2794,10 +2796,10 @@ int main(int argc, char** argv)
     nac = strtol(tmp, NULL, 16);
     resetNID(nac);
 
-    readHostConfig(modemName, "config", "rxFrequency", modem_rxFrequency);
-    readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
+    readHostConfigDefault(modemName, "config", "rxFrequency", "input", "449900000", modem_rxFrequency, sizeof(modem_rxFrequency));
+    readHostConfigDefault(modemName, "config", "txFrequency", "input", "444900000", modem_txFrequency, sizeof(modem_txFrequency));
 
-    readHostConfig(modemName, "main", "callsign", station_call);
+    readHostConfigDefault(modemName, "main", "callsign", "none", "N0CALL", station_call, sizeof(station_call));
 
     clearReflLinkStatus(modemName, "P25");
 

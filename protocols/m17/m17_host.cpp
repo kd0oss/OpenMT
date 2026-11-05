@@ -3065,16 +3065,17 @@ int main(int argc, char **argv)
     else
         packetType = PACKET_TYPE_FRAME;
 
-    readHostConfig(modemName, "M17", "txLevel", tmp);
-    if (strlen(tmp) == 0)
+    /* Every setting of this service is created here when it is missing, without changing a value that is saved. */
+    static const HostConfigDefault m17Defaults[] =
     {
-        setHostConfig(modemName, "M17", "rxLevel", "input", "50");
-        setHostConfig(modemName, "M17", "txLevel", "input", "50");
-        setHostConfig(modemName, "M17", "rfPower", "input", "128");
-    }
+        {"rxLevel", "input", "50"},
+        {"txLevel", "input", "50"},
+        {"rfPower", "input", "128"}
+    };
+    addHostConfigDefaults(modemName, "M17", m17Defaults, sizeof(m17Defaults) / sizeof(m17Defaults[0]));
 
-    readHostConfig(modemName, "config", "rxFrequency", modem_rxFrequency);
-    readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
+    readHostConfigDefault(modemName, "config", "rxFrequency", "input", "449900000", modem_rxFrequency, sizeof(modem_rxFrequency));
+    readHostConfigDefault(modemName, "config", "txFrequency", "input", "444900000", modem_txFrequency, sizeof(modem_txFrequency));
 
     readHostConfig(modemName, "M17", "rxLevel", tmp);
     rxLevel = atoi(tmp);

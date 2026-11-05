@@ -592,7 +592,7 @@ FM_STATIC void fmLoadConfig(void)
         n.fwCosInvert    = fmConfigFloat("fwCosInvert", "0") != 0.0f;
     }
 
-    readHostConfig(modemName, "main", "callsign", station_call);
+    readHostConfigDefault(modemName, "main", "callsign", "none", "N0CALL", station_call, sizeof(station_call));
 
     pthread_mutex_lock(&fmMutex);
 

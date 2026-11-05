@@ -447,7 +447,7 @@ static void loadConfig(void)
     if (cfg.rxMinAmp < 1.0F)
         cfg.rxMinAmp = 1.0F;
 
-    readHostConfig(modemName, "main", "callsign", station_call);
+    readHostConfigDefault(modemName, "main", "callsign", "none", "N0CALL", station_call, sizeof(station_call));
 
     fprintf(stderr, "YSF config: callsign %s selfOnly %d remoteGateway %d loDev %d rx %u tx %u txDelay %u ms "
             "modeHang %u s timeout %u s jitterMs %u\n", station_call, cfg.selfOnly, cfg.remoteGateway, cfg.loDev,
@@ -2162,8 +2162,8 @@ int main(int argc, char** argv)
 
     loadConfig();
 
-    readHostConfig(modemName, "config", "rxFrequency", rxFrequency);
-    readHostConfig(modemName, "config", "txFrequency", txFrequency);
+    readHostConfigDefault(modemName, "config", "rxFrequency", "input", "449900000", rxFrequency, sizeof(rxFrequency));
+    readHostConfigDefault(modemName, "config", "txFrequency", "input", "444900000", txFrequency, sizeof(txFrequency));
 
     ysfCtrlInit(&ctrl);
     ysfCtrlSetCallsign(&ctrl, station_call);

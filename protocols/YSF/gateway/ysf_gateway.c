@@ -1968,6 +1968,28 @@ int main(int argc, char** argv)
         umask(0);
     }
 
+    /* Every setting this gateway reads is created when it is missing, with the value it acts on when the
+       setting is absent; a saved value is never changed. */
+    {
+        static const HostConfigDefault ysfGatewayDefaults[] =
+        {
+            {"suffix",         "input", ""},
+            {"enableFCS",      "input", "0"},
+            {"options",        "input", ""},
+            {"fcsPort",        "input", "0"},
+            {"fcsServer",      "input", ""},
+            {"id",             "input", ""},          /* empty: the DMR ID is used */
+            {"fcsRoomsFile",   "input", ""},
+            {"hostsFile",      "input", ""},
+            {"networkPort",    "input", "0"},
+            {"staticReflector","input", ""},
+            {"inactivityTime", "input", "0"},
+            {"wiresX",         "input", "1"},
+            {"name",           "input", "OpenMT"}
+        };
+        addHostConfigDefaults(modemName, "YSF", ysfGatewayDefaults, sizeof(ysfGatewayDefaults) / sizeof(ysfGatewayDefaults[0]));
+    }
+
     loadCallsign(NULL);
     loadFcsConfig();
     loadReflectorList();

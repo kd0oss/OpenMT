@@ -3974,30 +3974,33 @@ int main(int argc, char** argv)
     else
         packetType = PACKET_TYPE_FRAME;
 
-    readHostConfig(modemName, "DSTAR", "rpt1Call", rpt1Call);
-    if (strlen(rpt1Call) == 0)
+    /* Every setting of this service is created here when it is missing (also the ones a later release added to an
+       installation that has the older ones), without changing a value that is saved. */
+    static const HostConfigDefault dstarDefaults[] =
     {
-        setHostConfig(modemName, "DSTAR", "rpt1Call", "input", "DIRECT");
-        setHostConfig(modemName, "DSTAR", "rpt2Call", "input", "DIRECT");
-        setHostConfig(modemName, "DSTAR", "callsign", "input", "N0CALL");
-        setHostConfig(modemName, "DSTAR", "rxLevel", "input", "50");
-        setHostConfig(modemName, "DSTAR", "txLevel", "input", "50");
-        setHostConfig(modemName, "DSTAR", "rfPower", "input", "128");
-        setHostConfig(modemName, "DSTAR", "useAgc", "input", "true");
-        setHostConfig(modemName, "DSTAR", "agcTarget", "input", "24000");
-        setHostConfig(modemName, "DSTAR", "agcMinGain", "input", "16");
-        setHostConfig(modemName, "DSTAR", "agcMaxGain", "input", "4096");
-        setHostConfig(modemName, "DSTAR", "frameSyncMinPct", "input", "40");
-        setHostConfig(modemName, "DSTAR", "dataSyncMinPct", "input", "40");
-        setHostConfig(modemName, "DSTAR", "gwPortOut", "input", "20010");
-        setHostConfig(modemName, "DSTAR", "gwPortIn", "input", "20011");
-        setHostConfig(modemName, "DSTAR", "gwAddress", "input", "127.0.0.1");
-    }
+        {"rpt1Call",        "input", "DIRECT"},
+        {"rpt2Call",        "input", "DIRECT"},
+        {"callsign",        "input", "N0CALL"},
+        {"rxLevel",         "input", "50"},
+        {"txLevel",         "input", "50"},
+        {"rfPower",         "input", "128"},
+        {"useAgc",          "input", "true"},
+        {"agcTarget",       "input", "24000"},
+        {"agcMinGain",      "input", "16"},
+        {"agcMaxGain",      "input", "4096"},
+        {"frameSyncMinPct", "input", "40"},
+        {"dataSyncMinPct",  "input", "40"},
+        {"gwPortOut",       "input", "20010"},
+        {"gwPortIn",        "input", "20011"},
+        {"gwAddress",       "input", "127.0.0.1"}
+    };
+    addHostConfigDefaults(modemName, "DSTAR", dstarDefaults, sizeof(dstarDefaults) / sizeof(dstarDefaults[0]));
 
-    readHostConfig(modemName, "config", "rxFrequency", modem_rxFrequency);
-    readHostConfig(modemName, "config", "txFrequency", modem_txFrequency);
+    readHostConfigDefault(modemName, "config", "rxFrequency", "input", "449900000", modem_rxFrequency, sizeof(modem_rxFrequency));
+    readHostConfigDefault(modemName, "config", "txFrequency", "input", "444900000", modem_txFrequency, sizeof(modem_txFrequency));
 
-    readHostConfig(modemName, "main", "callsign", station_myCall);
+    readHostConfigDefault(modemName, "main", "callsign", "none", "N0CALL", station_myCall, sizeof(station_myCall));
+    readHostConfig(modemName, "DSTAR", "rpt1Call", rpt1Call);
     readHostConfig(modemName, "DSTAR", "rpt1Call", station_rpt1Call);
     readHostConfig(modemName, "DSTAR", "rpt2Call", station_rpt2Call);
 
