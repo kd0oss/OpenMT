@@ -104,7 +104,7 @@ INSERT IGNORE INTO `config` VALUES
 (24,'modem1','main','latitude','none','0.000000'),
 (25,'modem1','main','longitude','none','0.000000'),
 (26,'modem1','main','description','none',''),
-(27,'modem1','main','location','none',''),
+(27,'modem1','main','location','none','');
 
 /*!40000 ALTER TABLE `config` ENABLE KEYS */;
 UNLOCK TABLES;
@@ -300,6 +300,7 @@ INSERT IGNORE INTO services (unit, label, description, sort_order) VALUES
   ('openmths-bridge.service','OpenMT_HS bridge','OpenMT_HS modem bridge (only when this bridge is used)', 4),
   ('openmt-bridge.service','OpenMT bridge','OpenMT sample modem bridge (only when this bridge is used)', 4),
   ('sx1255-bridge.service','SX1255 bridge',   'SX1255 radio bridge (only with the SX1255 modem)', 5),
+  ('hackrf-bridge.service','HackRF bridge',   'HackRF radio bridge (only with a HackRF)', 5),
   ('modem-host.service',   'Modem host',       'Talks to the modem. Every host needs it.',        10),
   ('dstar-host.service',   'D-STAR host',      'D-STAR protocol host',                            20),
   ('dstar-gateway.service','D-STAR gateway',   'D-STAR reflector gateway',                        21),

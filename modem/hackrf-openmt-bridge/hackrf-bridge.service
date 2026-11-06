@@ -1,0 +1,25 @@
+# /etc/systemd/system/hackrf-bridge.service
+# Runs the HackRF bridge. It makes the PTY that the modem host opens as its serial port.
+# Runs as root because it creates the symlink /dev/hackrf-modem and opens the HackRF over USB; if you want
+# the pi user instead, install the HackRF udev rules, add the user to plugdev, and point --pty-symlink at a path
+# in /run (the modem host finds it through the bridgePort setting the bridge writes).
+# The frequencies, gains, rxLevel and the ppm correction are kept in the OpenMT config database (Modem tab);
+# the options below are only the defaults of settings that are not saved yet. See: build/bridge --help
+# and the README of this directory.
+[Unit]
+Description=HackRF OpenMT Bridge
+After=network.target mariadb.service
+Wants=mariadb.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/pi/OpenMT/modem/hackrf-openmt-bridge
+ExecStart=/home/pi/OpenMT/modem/hackrf-openmt-bridge/build/bridge --pty-symlink /dev/hackrf-modem
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

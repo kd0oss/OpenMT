@@ -1755,6 +1755,78 @@ var manageDateCol = "";
 /* Ask the server and return parsed JSON, or null (an alert is shown).
    When the admin session has timed out the login dialog is opened over the
    page, and the request is repeated once the person has logged in again. */
+/* ---------------- Configuration backup / restore ---------------- */
+var cfgText = null;
+
+async function cfgDownload()
+{
+  var data = await manageFetch("data_query.php?command=downloadConfig", {});
+  if (!data)
+    return;
+  var d = new Date(), p = function (n) { return String(n).padStart(2, '0'); };
+  var name = "openmt-config-" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + ".json";
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2) + "\n"], { type: 'application/json' }));
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+}
+
+async function cfgChosen()
+{
+  var f = document.getElementById('cfgFile').files[0];
+  var res = document.getElementById('cfgResult');
+  cfgText = null;
+  res.style.display = 'none';
+  document.getElementById('cfgApply').disabled = true;
+  document.getElementById('cfgPreview').disabled = true;
+  if (!f)
+    return;
+  if (f.size > 2097152)
+  {
+    alert("That file is too large for a configuration backup.");
+    return;
+  }
+  cfgText = await f.text();
+  document.getElementById('cfgPreview').disabled = false;
+  cfgRestore(false);
+}
+
+async function cfgRestore(apply)
+{
+  if (cfgText === null)
+    return;
+  if (apply && !confirm("Restore the settings from this file? Differing settings are overwritten (nothing is deleted). Restart the services afterwards."))
+    return;
+  var fd = new FormData();
+  fd.append('data', cfgText);
+  fd.append('apply', apply ? '1' : '0');
+  var r = await manageFetch("data_query.php?command=restoreConfig", { method: 'POST', headers: { 'X-OpenMT': '1' }, body: fd });
+  var res = document.getElementById('cfgResult');
+  if (!r)
+    return;
+  if (r.error)
+  {
+    res.textContent = "Error: " + r.error;
+    res.style.display = 'block';
+    document.getElementById('cfgApply').disabled = true;
+    return;
+  }
+  var t = (r.applied ? "Restored" : "Preview of") + " the backup made " + r.created + " on " + r.host + "\n";
+  t += "Settings: " + r.config.add + " added, " + r.config.change + " changed, " + r.config.same + " the same\n";
+  t += "Saved firmware sets: " + r.presets.add + " added, " + r.presets.change + " changed, " + r.presets.same + " the same\n";
+  r.changes.forEach(function (c) { t += "  " + c.name + ": " + (c.old === null ? "(new)" : c.old) + " -> " + c.new + "\n"; });
+  if (r.presetError)
+    t += r.presetError + "\n";
+  if (r.applied)
+    t += "Restart the services so they read the settings.\n";
+  res.textContent = t;
+  res.style.display = 'block';
+  document.getElementById('cfgApply').disabled = r.applied || (r.config.add + r.config.change + r.presets.add + r.presets.change) == 0;
+}
+
 async function manageFetch(url, options, retried)
 {
   try
@@ -4719,6 +4791,16 @@ press Save first.</div>
 <label for='manageDate'>Delete records older than:</label>
 <input id='manageDate' type='date'>
 <button id='manageDelete' class='danger' onclick='manageDelete()'>Delete</button>
+</div>
+<div class='manage_bar' id='cfgBar'>
+<b>Configuration backup:</b>
+<button onclick='cfgDownload()'>Download</button>
+&nbsp;&nbsp;<label for='cfgFile'>Restore from file:</label>
+<input id='cfgFile' type='file' accept='.json,application/json' onchange='cfgChosen()'>
+<button id='cfgPreview' onclick='cfgRestore(false)' disabled>Preview</button>
+<button id='cfgApply' class='danger' onclick='cfgRestore(true)' disabled>Restore</button>
+<div class='manage_note' id='cfgNote'>The file holds all settings including passwords (BrandMeister, etc.) &mdash; keep it private. A restore adds missing settings and changes differing ones, never deletes; restart the services afterwards.</div>
+<pre id='cfgResult' style='display:none;max-height:14em;overflow:auto;margin:4px 0 0 0'></pre>
 </div>
 <div class='manage_note' id='manageNote'></div>
 <div class='manage_grid' id='manageGrid'></div>

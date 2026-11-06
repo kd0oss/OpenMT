@@ -1698,6 +1698,29 @@ void* modeRelayTxThread(void* arg)
 }
 
 /*
+ * modeInUse()
+ *
+ * Tells whether a protocol service on another connection has registered the same mode.  Two services for one
+ * mode on one modem (a second DMR service, or OpenMT Radio next to the DMR service) both get the modem's
+ * frames and both transmit, and neither works.
+ *
+ * Parameters:
+ *   conn_id - Connection that is registering; it is not compared with itself.
+ *   name    - Mode name of the MODE frame (up to 10 characters).
+ *
+ * Returns: the connection index of the service that has the mode, or -1 if it is free.
+ */
+static int modeInUse(uint8_t conn_id, const char* name)
+{
+    for (int i = 0; i < MAX_CLIENT_CONNECTIONS; i++)
+    {
+        if (i != conn_id && hostClient[i].active && mode[i].name[0] != '\0' && strncmp(mode[i].name, name, 10) == 0)
+            return i;
+    }
+    return -1;
+}
+
+/*
  * processClientSocket()
  *
  * Serves one protocol service connected to the host's TCP port.  It reads frames of the form 0x61,
@@ -1800,6 +1823,22 @@ void* processClientSocket(void* arg)
 
         if (memcmp(buffer + 4, "MODE", typeLen) == 0)
         {
+            {
+                char wanted[11];
+                int  owner;
+
+                memcpy(wanted, buffer + 8, 10);
+                wanted[10] = '\0';
+                owner = modeInUse(conn_id, wanted);
+                if (owner >= 0)
+                {
+                    /* mode[conn_id].name is still empty, so the clean-up below leaves the registration of the
+                     * service that owns the mode alone. */
+                    reportError(modemName, "Modem", "Mode %s is already in use by another service (connection %d); "
+                                "refusing this connection. Stop the other service (or OpenMT Radio) first.", wanted, owner);
+                    break;
+                }
+            }
             memcpy(mode[conn_id].name, buffer + 8, 11);
             memcpy(mode[conn_id].modem_type, buffer + 19, 6);
             //            mode[conn_id].use_rx_dc_filter = buffer[25];
@@ -1987,12 +2026,17 @@ void* processClientSocket(void* arg)
         connections--;
 
     hostClient[conn_id].active = false;
-    setProtocol(mode[conn_id].name, false);
+    if (mode[conn_id].name[0] != '\0')
+        setProtocol(mode[conn_id].name, false);
 
     pthread_mutex_lock(&shutDownMutex);
-    delGateway(modemName, "main", mode[conn_id].name);
-    delMode(modemName, "main", mode[conn_id].name);
-    if (streamType != STREAM_FRAME)
+    if (mode[conn_id].name[0] != '\0')
+    {
+        /* a connection that never registered a mode (or was refused) has nothing to remove */
+        delGateway(modemName, "main", mode[conn_id].name);
+        delMode(modemName, "main", mode[conn_id].name);
+    }
+    if (streamType != STREAM_FRAME && mode[conn_id].name[0] != '\0')
     {
         uint8_t buf[3] = {0x61, 0x03, (uint8_t)(OPENMT_DEL_MODE | (conn_id & 0x0f))};
         pthread_mutex_lock(&modemComBufMutex);

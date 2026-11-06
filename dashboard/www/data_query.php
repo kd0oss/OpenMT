@@ -1407,6 +1407,43 @@ if ($command == "startFirmwareFlash")
     }
 }
 else
+if ($command == "downloadConfig")
+{
+    /* The configuration backup (see configBackup.php).  It holds the settings that are passwords. */
+    global $mysql;
+    manage_require_auth();
+    require_once __DIR__ . '/configBackup.php';
+    header('Content-Type: application/json');
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: no-store');
+    echo cbExport($mysql);
+}
+else
+if ($command == "restoreConfig")
+{
+    /* Checks a configuration backup and, with apply=1, writes it.  Nothing is deleted. */
+    global $mysql;
+    manage_require_auth();
+    require_once __DIR__ . '/configBackup.php';
+    header('Content-Type: application/json');
+
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || ($_SERVER['HTTP_X_OPENMT'] ?? '') !== '1')
+        echo json_encode(array('error' => 'Invalid request'));
+    else
+    {
+        $chk = cbCheck((string)($_POST['data'] ?? ''));
+        if (!$chk['ok'])
+            echo json_encode(array('error' => $chk['error']));
+        else
+        {
+            $sum = cbRestore($mysql, $chk, ($_POST['apply'] ?? '') === '1');
+            $sum['created'] = $chk['created'];
+            $sum['host']    = $chk['host'];
+            echo json_encode($sum);
+        }
+    }
+}
+else
 if ($command == "downloadFirmware")
 {
     /* Sends one result file of a build. */

@@ -244,6 +244,7 @@ make
 #   modem/openmths-bridge/         openmths_bridge          (OPENMT_HS firmware, ADF7021 hotspot boards)
 #   modem/openmt-bridge/           openmt_bridge            (OPENMT firmware, sample stream modem)
 #   modem/sx1255-openmt-bridge/    sx1255_bridge            (OpenMT SX1255 radio on the Pi)
+#   modem/hackrf-openmt-bridge/    bridge                   (HackRF over USB; needs libhackrf-dev, see its README.md)
 #   protocols/DMR/                 dmr_host        protocols/DMR/gateway/     dmr_gateway
 #   protocols/DSTAR/               dstar_host      protocols/DSTAR/gateway/   dstar_gateway
 #   protocols/P25/                 p25_host        protocols/P25/gateway/     p25_gateway
@@ -371,7 +372,7 @@ sudo cp protocols/P25/gateway/p25-gateway.service /etc/systemd/system/
 
 # Each bridge has its own service file and a drop-in for modem-host.service in its directory
 # (mmdvm-bridge.service + mmdvm.conf, openmths-bridge.service + openmths.conf,
-# openmt-bridge.service + openmt.conf, sx1255-bridge.service + sx1255.conf). The drop-in makes the modem
+# openmt-bridge.service + openmt.conf, sx1255-bridge.service + sx1255.conf, hackrf-bridge.service + hackrf.conf). The drop-in makes the modem
 # host start after the bridge, and starting the modem host starts the bridge. Install only the drop-in
 # of the bridge you use. Bridge services run as root (they create the link in /dev).
 # Edit the paths and the User= line in each file if OpenMT is not in /home/pi/OpenMT.

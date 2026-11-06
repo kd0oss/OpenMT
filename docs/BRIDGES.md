@@ -8,7 +8,7 @@ packet stream. A small bridge program per modem family does the rest.
 |--------|---------|--------|
 | FRAME  | whole service frames relayed to a bridge that speaks the modem's own framing (relay frames, 0x62 start) | mmdvm_bridge |
 | BIT    | bit-stream frames with a connection id (0x61 start) | openmths_bridge |
-| SAMPLE | audio sample frames (0x61 start) | openmt_bridge, sx1255_bridge |
+| SAMPLE | audio sample frames (0x61 start) | openmt_bridge, sx1255_bridge, hackrf bridge |
 
 ## How a bridge works
 
@@ -115,6 +115,22 @@ command line options give the defaults for rows that do not exist; saved rows
 win. RELOAD and HOST_UP read the rows again and reconfigure the SX1255 only if
 something changed. It publishes `streamType` SAMPLE and `bridgePort`. An old
 host that still sends the 21 byte frame keeps working.
+
+## HackRF bridge (SAMPLE) - implemented, needs more hardware testing
+
+`modem/hackrf-openmt-bridge` presents a HackRF (USB) as a SAMPLE modem. Like the SX1255 bridge it keeps its settings
+in the config database (`app/hrf_db.c`): `rxFrequency`, `txFrequency`, `rxLnaGain`, `rxPgaGain`, `txDacGain` (the
+TX VGA), `rxLevel` (RX gain, 50 is x1), `freqOffsetPpm`, `rxInvert`, `txInvert`. The command line options give the
+defaults of rows that do not exist; saved rows win. RELOAD and HOST_UP read the rows again and retune the receiver
+at once (the transmitter at its next key-up). `--rx-stats` logs the level of the HackRF's samples and the frequency
+error of the signal, to set the gains and the ppm. Service files: `hackrf-bridge.service` and
+`modem-host.service.d/hackrf.conf`.
+
+## One service per mode
+
+Modem_Host refuses a second service that registers a mode another connected service already holds (for example a
+second DMR service, or OpenMT Radio next to the DMR service): the connection is closed and an error is written to
+the error log. The first service is not affected.
 
 ## Modem_Host without modem names - implemented
 
