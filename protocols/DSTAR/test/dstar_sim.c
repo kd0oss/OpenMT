@@ -29,7 +29,11 @@
  * Run once for each modem type, with the host started with the same type
  * (see run_sim.sh):
  *
- * Usage: dstar_sim [-m modem 1-10] [--modem mmdvm|openmt|openmths] [--gap ms]
+ * Usage: dstar_sim [-m modem 1-10] [--modem mmdvm|openmt|openmths] [--gap ms] [--rxfile samples.raw]
+ *
+ * --rxfile (openmt only) replaces the transmission of step 4 with the samples of a file: 16 bit little endian,
+ * 24 kHz, as OpenMT Radio writes with "Record received samples".  It shows what the host makes of a real signal:
+ * the host's log has the header or the reason there is none.
  */
 
 #include <stdio.h>
@@ -49,6 +53,8 @@ enum { KIND_SAMP, KIND_BITS, KIND_FRAME };
 static SimConn modemC;
 static SimConn gwC;
 static int     kind  = KIND_SAMP;
+static const char* rxFile = NULL;
+static int         rxPaceUs = 4000;   /* --rxpace: microseconds between the 96 sample packets of --rxfile (4000 is real time) */   /* --rxfile: samples of a real reception, sent in place of the captured call */
 static int     gapMs = 20; /* time between the voice frames the gateway sends: 20 ms on air */
 
 /* The station and the call, as the header carries them (8 characters each) */
@@ -59,6 +65,7 @@ static const char MY[]   = "N0CALL  ";
 static const char SFX[]  = "TEST";
 
 static uint8_t header[49];
+static uint8_t headerCrc[2];   /* the CRC the header would have; the gateway's header packet does not carry it (dstar_host makes it) */
 static uint8_t dataFrames[DATA_FRAMES][12];
 
 /* What the host sent to the modem */
@@ -154,10 +161,13 @@ static void buildCall(void)
     memcpy(header + 35, MY, 8);
     memcpy(header + 43, SFX, 4);
 
+    /* The header packet of the gateway has no header CRC: the last two bytes stay zero and dstar_host makes the CRC before
+       the header goes on the air.  (The sim used to send it with the CRC, which hid that.)  The header in the slow data
+       of test 3 does carry it. */
     CCITTChecksumReverse ccr;
     ccitt_checksum_init(&ccr);
     ccitt_checksum_update_bytes(&ccr, header + 8, 39);
-    ccitt_checksum_result_bytes(&ccr, header + 47);
+    ccitt_checksum_result_bytes(&ccr, headerCrc);
 
     for (int i = 0; i < DATA_FRAMES; i++)
     {
@@ -317,9 +327,13 @@ int main(int argc, char** argv)
             kindName = argv[++i];
         else if (strcmp(argv[i], "--gap") == 0 && i + 1 < argc)
             gapMs = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--rxpace") == 0 && i + 1 < argc)
+            rxPaceUs = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--rxfile") == 0 && i + 1 < argc)
+            rxFile = argv[++i];
         else
         {
-            fprintf(stderr, "Usage: dstar_sim [-m modem] [--modem mmdvm|openmt|openmths] [--gap ms]\n");
+            fprintf(stderr, "Usage: dstar_sim [-m modem] [--modem mmdvm|openmt|openmths] [--gap ms] [--rxfile samples.raw]\n");
             return 2;
         }
     }
@@ -453,6 +467,44 @@ int main(int argc, char** argv)
     printf("\nTest 2: the transmission comes back from the radio, to the network\n");
     simDrain(&gwC, 100, 500, NULL, NULL);
 
+    if (rxFile != NULL && kind == KIND_SAMP)
+    {
+        FILE* rf = fopen(rxFile, "rb");
+
+        if (rf == NULL)
+        {
+            printf("dstar_sim: cannot read %s\n", rxFile);
+            return 2;
+        }
+
+        int     frames = 0;
+        uint8_t chunk[192];
+
+        while (fread(chunk, 1, sizeof(chunk), rf) == sizeof(chunk))
+        {
+            SimPacket q;
+            memset(&q, 0, sizeof(q));
+            q.data[0] = 0x61;
+            q.data[1] = 0x00;
+            q.data[2] = 8 + sizeof(chunk);
+            q.data[3] = 4;
+            memcpy(q.data + 4, "SAMP", 4);
+            memcpy(q.data + 8, chunk, sizeof(chunk));
+            q.len = 8 + sizeof(chunk);
+            simSendRaw(&modemC, q.data, q.len);
+            simDrain(&gwC, 1, 1, grabGw, NULL);
+            usleep(rxPaceUs);
+            frames++;
+        }
+        fclose(rf);
+        printf("  sent %d frames (%.1f s) of %s\n", frames, frames * 96.0 / 24000.0, rxFile);
+        simDrain(&gwC, 3000, 25000, grabGw, NULL);
+        printf("  gateway got %s header, %d voice frames, %d end (%d other packets)\n",
+               gwHaveHeader ? "a" : "no", gwDataCount, gwEots, gwOther);
+        printf("%s: a header from the file\n", gwHaveHeader ? "PASS" : "FAIL");
+        return gwHaveHeader ? 0 : 1;
+    }
+
     for (int i = 0; i < txCount; i++)
     {
         SimPacket q = *txPackets[i];
@@ -514,22 +566,38 @@ int main(int argc, char** argv)
 
     size_t bytes1 = 0U;
     int    hdrs1  = 0;
+    int    badCrc1 = 0;
 
     for (int i = 0; i < txCount; i++)
     {
         if (kind != KIND_FRAME)
             bytes1 += (size_t)txPackets[i]->len - 8U;
         else if (memcmp(txPackets[i]->data + 4, "DSTH", 4) == 0)
+        {
+            /* the header the host passes to the modem has to carry a right CRC though the one it was given had none */
+            CCITTChecksumReverse hc;
+            uint8_t              crc[2];
+
+            ccitt_checksum_init(&hc);
+            ccitt_checksum_update_bytes(&hc, txPackets[i]->data + 8, 39);
+            ccitt_checksum_result_bytes(&hc, crc);
+            if (memcmp(crc, txPackets[i]->data + 47, 2) != 0)
+                badCrc1++;
             hdrs1++;
+        }
         free(txPackets[i]);
     }
     txCount = 0;
+
+    if (kind == KIND_FRAME)
+        simCheck(hdrs1 >= 1 && badCrc1 == 0, "frame mode: the header sent to the modem has a right CRC (%d of %d wrong)", badCrc1, hdrs1);
 
     /* the 41 header bytes and 4 filler bytes go out five at a time, a pair of
        voice frames for each five, after the frame sync of the superframe */
     uint8_t ssb[45];
     memset(ssb, 0x66, sizeof(ssb));
     memcpy(ssb, header + 8, 41);
+    memcpy(ssb + 39, headerCrc, 2);
 
     for (int i = 0; i < 9; i++)
     {

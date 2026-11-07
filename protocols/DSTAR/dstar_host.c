@@ -2470,6 +2470,18 @@ void processHeader(uint8_t* data, uint8_t length, bool isNet)
                 station_rpt1Call, station_rpt2Call);
     }
 
+    /* A header from the network has no header CRC of its own: the gateway builds it from the DSRP packet and leaves the last
+       two bytes as they were (zero).  The header goes out over the air as it is, and a radio that checks the CRC (OpenMT
+       Radio does) takes the call for a damaged one and never opens the audio, so the CRC is made here for every network
+       header (a CRC that was right is made again the same). */
+    uint8_t netHeader[DSTAR_HEADER_LENGTH_BYTES];
+    if (isNet && length == DSTAR_HEADER_LENGTH_BYTES)
+    {
+        memcpy(netHeader, data, length);
+        setHeaderChecksum(netHeader);
+        data = netHeader;
+    }
+
     buf[0] = 0x61;
     buf[1] = 0x00;
     buf[2] = 0x31;
