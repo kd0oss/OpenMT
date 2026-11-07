@@ -857,6 +857,41 @@ void sendToGw(char* cHeader, uint8_t* ucData, bool bSsEncode, bool bEnd)
         iPktCount = 0;
 }
 
+/* true while a stream from the host has been started to the ircDDB gateway (its header sent) and not yet ended */
+static bool gwStreamOpen = false;
+
+/*
+ * gwEndStream()
+ *
+ * Ends the stream to the ircDDB gateway if one is open.  A call from the host
+ * ends with a voice frame whose slow data is 0x55 0x55 0x55 only when the
+ * sender puts that frame in front of the end pattern (a D-STAR radio does);
+ * OpenMT Radio sends the end pattern alone, so the host's end of
+ * transmission is all there is.  Without the end packet the ircDDB gateway
+ * is left with an open stream, and the next call's header is taken by
+ * sendToGw() for a frame of that stream and never sent.
+ *
+ * Parameters: none.
+ *
+ * Returns: nothing.
+ */
+static void gwEndStream(void)
+{
+    char cBuffer[37];
+    uint8_t ucBytes[12];
+
+    if (!gwStreamOpen)
+        return;
+
+    sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, urCall, myCall, suffix);
+    memcpy(ucBytes, AMBE_SILENCE, 9);
+    ucBytes[9]  = 0x55;
+    ucBytes[10] = 0x55;
+    ucBytes[11] = 0x55;
+    sendToGw(cBuffer, ucBytes, false, true);
+    gwStreamOpen = false;
+}
+
 // Connect to and process incoming IRCDDB gateway bytes.
 static uint64_t jbLastEmitMs  = 0U;   /* when the last frame of this stream went to the host */
 static uint32_t jbQueueFull   = 0U;   /* frames that found the queue to the host full        */
@@ -1614,7 +1649,9 @@ void hostReadLoop(int sockfd)
                 ucBytes[9]  = 0x55;
                 ucBytes[10] = 0x2d;
                 ucBytes[11] = 0x16;
+                gwEndStream();              /* a stream that was never ended (its end packet is lost) must not swallow this header */
                 sendToGw(cBuffer, ucBytes, false, false);
+                gwStreamOpen = true;
             }
         }
         else if (memcmp(type, TYPE_DATA, typeLen) == 0)
@@ -1626,7 +1663,10 @@ void hostReadLoop(int sockfd)
                 sprintf(cBuffer, "%8s%8s%8s%8s%4s", rpt2Call, rpt1Call, urCall, myCall, suffix);
                 //     hexDump((char*)"ucData", (uint8_t*)(buffer + 8), 12);
                 if (buffer[17] == 0x55 && buffer[18] == 0x55 && buffer[19] == 0x55)
+                {
                     sendToGw(cBuffer, (uint8_t*)(buffer + 8), false, true);
+                    gwStreamOpen = false;
+                }
                 else
                     sendToGw(cBuffer, (uint8_t*)(buffer + 8), false, false);
             }
@@ -1634,7 +1674,10 @@ void hostReadLoop(int sockfd)
         else if (memcmp(type, TYPE_EOT, typeLen) == 0)
         {
             if (gwStateIsTxActive())
+            {
+                gwEndStream();              /* no end frame came before it (OpenMT Radio): send the end of the stream now */
                 gwStateEnd("Host EOT");
+            }
         }
 
         delay(500);
