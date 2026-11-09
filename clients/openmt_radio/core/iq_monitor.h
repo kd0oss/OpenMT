@@ -70,6 +70,9 @@ private:
     unsigned                          levels_;
     double                            nominal_;
     SyncKind                          sync_;
+    SyncSmoother                      smoother_;
+    std::mutex                        smoothMutex_;
+    MonitorSnapshot snapshotRaw();
 };
 
 }

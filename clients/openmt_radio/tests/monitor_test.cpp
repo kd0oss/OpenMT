@@ -4,6 +4,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <unistd.h>
 #include <cstdlib>
 #include <vector>
 
@@ -108,6 +109,76 @@ static const double L2[2] = {841.0, -841.0};
 
 int main()
 {
+    {
+        /* samples that stop arriving are reported */
+        RfMonitor m;
+        m.configure(4800.0, 4U, 1260.0);
+        std::vector<int16_t> sig = make(4800U, L4, 4U, 1.0, 20.0, 12U);
+        m.feed(sig.data(), sig.size());
+        check(m.snapshot().silentMs == 0, "samples that are arriving are not silent");
+        usleep(1300000);
+        MonitorSnapshot r = m.snapshot();
+        check(r.silentMs >= 1000 && r.silentMs < 3000 && r.active, "when they stop the age is reported and the last signal is still there");
+        m.feed(sig.data(), 240U);
+        check(m.snapshot().silentMs == 0, "and it clears when they come again");
+    }
+    {
+        /* the averaging of the sync locked reading */
+        SyncSmoother sm;
+        std::srand(11);
+        double rawSq = 0.0, smSq = 0.0;
+        int n = 0;
+        long long t = 1000000;
+        MonitorSnapshot last;
+
+        for (int i = 0; i < 200; i++)                       /* 30 s of a reading every 150 ms, 5 % noise on each */
+        {
+            MonitorSnapshot s;
+            double noise = (std::rand() / (double)RAND_MAX - 0.5) * 2.0 * 63.0;
+
+            s.syncLocked = s.levelsValid = true;
+            s.outer = 1260.0 + noise;
+            s.centre = 0.0;
+            s.spread = 40.0;
+            s.blur = 0.1;
+            s.nominalHz = 1800.0;
+            for (int k = 0; k < 4; k++)
+                s.levels[k] = (k - 1.5) * 0.6667 * s.outer;
+            const double rawOuter = s.outer;
+
+            sm.apply(s, t);
+            t += 150;
+            if (i >= 100)
+            {
+                rawSq += (rawOuter - 1260.0) * (rawOuter - 1260.0);
+                smSq += (s.outer - 1260.0) * (s.outer - 1260.0);
+                n++;
+            }
+            last = s;
+        }
+        std::printf("     noise of the outer level: raw %.1f counts, averaged %.1f counts (%.0f s)\n", std::sqrt(rawSq / n), std::sqrt(smSq / n), last.averagedSeconds);
+        check(std::sqrt(smSq / n) < 0.45 * std::sqrt(rawSq / n), "averaging brings the noise of the reading down to under half");
+        check(last.averagedSeconds > 25.0, "and says how long it has been averaging");
+        check(std::fabs(last.outerHz - last.outer / 0.7) < 1e-6 && std::fabs(last.outerPercent - 100.0 * last.outerHz / 1800.0) < 1e-6, "Hz and percent follow the averaged level");
+
+        /* a different transmitter: a reading 30 % off starts the average again */
+        MonitorSnapshot j;
+        j.syncLocked = j.levelsValid = true;
+        j.outer = 1700.0; j.centre = 0.0; j.nominalHz = 1800.0;
+        sm.apply(j, t);
+        check(std::fabs(j.outer - 1700.0) < 1e-9 && j.averagedSeconds == 0.0, "a reading far from the average starts a new one");
+
+        /* the signal goes for 2 s: the next reading is a fresh start */
+        MonitorSnapshot g;
+        sm.apply(g, t + 500);                               /* no lock: untouched */
+        check(!g.syncLocked && g.averagedSeconds == 0.0, "an unlocked snapshot is left as it is");
+        sm.apply(g, t + 2500);
+        MonitorSnapshot k;
+        k.syncLocked = k.levelsValid = true;
+        k.outer = 1650.0; k.centre = 0.0; k.nominalHz = 1800.0;
+        sm.apply(k, t + 2600);
+        check(std::fabs(k.outer - 1650.0) < 1e-9, "after the signal has gone the average starts again");
+    }
     {
         /* noisy, so that the levels run together: the blind reading is high, the sync locked one is right */
         std::vector<int16_t> sig = shape(p25Symbols(4800U, 1170.0, 60.0, false, 3U), 330.0, 4U);

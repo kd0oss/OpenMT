@@ -92,9 +92,11 @@ SpectrumClient::SpectrumClient() :
     iqSink_(nullptr),
     lastMs_(0),
     frames_(0),
-    addrLen_(0U)
+    nTargets_(0U),
+    automatic_(false),
+    lockedPort_(0U)
 {
-    std::memset(addr_, 0, sizeof(addr_));
+    std::memset(targets_, 0, sizeof(targets_));
 }
 
 SpectrumClient::~SpectrumClient()
@@ -102,35 +104,70 @@ SpectrumClient::~SpectrumClient()
     stop();
 }
 
+std::string SpectrumClient::target() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    return target_;
+}
+
 bool SpectrumClient::start(const std::string& host, unsigned int port, std::string& error)
 {
+    std::vector<unsigned int> ports;
+
+    if (port != 0U)
+        ports.push_back(port);
     stop();
-    target_.clear();
-    if (port == 0U)
+    if (ports.empty())
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        target_.clear();
+        return true;
+    }
+    automatic_ = false;
+    return startAuto(host, ports, error);
+}
+
+bool SpectrumClient::startAuto(const std::string& host, const std::vector<unsigned int>& ports, std::string& error)
+{
+    stop();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        target_.clear();
+    }
+    nTargets_ = 0U;
+    lockedPort_ = 0U;
+    automatic_ = ports.size() > 1U;
+    if (ports.empty())
         return true;
 
-    struct addrinfo hints;
-    struct addrinfo* res = NULL;
-    char portText[16];
+    for (size_t i = 0U; i < ports.size() && i < MaxTargets; i++)
+    {
+        struct addrinfo hints;
+        struct addrinfo* res = NULL;
+        char portText[16];
 
-    std::memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
-    hints.ai_socktype = SOCK_DGRAM;
-    std::snprintf(portText, sizeof(portText), "%u", port);
-    if (getaddrinfo(host.c_str(), portText, &hints, &res) != 0 || res == NULL)
-    {
-        error = "cannot find " + host + " for the RF spectrum";
-        return false;
-    }
-    if (res->ai_addrlen > sizeof(addr_))
-    {
+        std::memset(&hints, 0, sizeof(hints));
+        hints.ai_family   = AF_INET;
+        hints.ai_socktype = SOCK_DGRAM;
+        std::snprintf(portText, sizeof(portText), "%u", ports[i]);
+        if (getaddrinfo(host.c_str(), portText, &hints, &res) != 0 || res == NULL)
+        {
+            error = "cannot find " + host + " for the RF spectrum";
+            return false;
+        }
+        if (res->ai_addrlen > sizeof(targets_[i].addr))
+        {
+            freeaddrinfo(res);
+            error = "address too long";
+            return false;
+        }
+        std::memcpy(targets_[i].addr, res->ai_addr, res->ai_addrlen);
+        targets_[i].len  = res->ai_addrlen;
+        targets_[i].port = ports[i];
         freeaddrinfo(res);
-        error = "address too long";
-        return false;
+        nTargets_++;
     }
-    std::memcpy(addr_, res->ai_addr, res->ai_addrlen);
-    addrLen_ = res->ai_addrlen;
-    freeaddrinfo(res);
 
     fd_ = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd_ < 0)
@@ -150,7 +187,18 @@ bool SpectrumClient::start(const std::string& host, unsigned int port, std::stri
         lastMs_ = 0;
     }
     frames_ = 0;
-    target_ = host + ":" + std::to_string(port);
+    host_ = host;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!automatic_)
+            target_ = host + ":" + std::to_string(ports[0]);
+        else
+        {
+            target_ = host + ": trying ports";
+            for (size_t i = 0U; i < nTargets_; i++)
+                target_ += (i == 0U ? " " : ", ") + std::to_string(targets_[i].port);
+        }
+    }
     running_ = true;
     thread_ = std::thread(&SpectrumClient::run, this);
     return true;
@@ -187,25 +235,51 @@ void SpectrumClient::run()
 {
     long long lastAsk = 0;
     long long lastIqAsk = 0;
+    long long lastAnyMs = nowMs();
     uint8_t buffer[8192];
 
     while (running_)
     {
-        if (wanted_ && nowMs() - lastAsk >= 1000)
-        {
-            (void)sendto(fd_, "SPEC", 4, 0, (const struct sockaddr*)addr_, (socklen_t)addrLen_);
-            lastAsk = nowMs();
-        }
-        if (iqWanted_ && iqSink_ != nullptr && nowMs() - lastIqAsk >= 1000)
-        {
-            (void)sendto(fd_, "IQST", 4, 0, (const struct sockaddr*)addr_, (socklen_t)addrLen_);
-            lastIqAsk = nowMs();
-        }
+        const bool askSpec = wanted_ && nowMs() - lastAsk >= 1000;
+        const bool askIq = iqWanted_ && iqSink_ != nullptr && nowMs() - lastIqAsk >= 1000;
 
-        ssize_t r = recv(fd_, buffer, sizeof(buffer), 0);
+        /* no answer for 5 s from the one that answered: ask them all again */
+        if (automatic_ && lockedPort_ != 0U && (wanted_ || iqWanted_) && nowMs() - lastAnyMs > 5000)
+        {
+            lockedPort_ = 0U;
+            std::lock_guard<std::mutex> lock(mutex_);
+            target_ = host_ + ": trying ports";
+            for (size_t i = 0U; i < nTargets_; i++)
+                target_ += (i == 0U ? " " : ", ") + std::to_string(targets_[i].port);
+        }
+        for (size_t i = 0U; i < nTargets_ && (askSpec || askIq); i++)
+        {
+            if (lockedPort_ != 0U && targets_[i].port != lockedPort_)
+                continue;
+            if (askSpec)
+                (void)sendto(fd_, "SPEC", 4, 0, (const struct sockaddr*)targets_[i].addr, (socklen_t)targets_[i].len);
+            if (askIq)
+                (void)sendto(fd_, "IQST", 4, 0, (const struct sockaddr*)targets_[i].addr, (socklen_t)targets_[i].len);
+        }
+        if (askSpec)
+            lastAsk = nowMs();
+        if (askIq)
+            lastIqAsk = nowMs();
+
+        struct sockaddr_in from;
+        socklen_t fromLen = sizeof(from);
+        ssize_t r = recvfrom(fd_, buffer, sizeof(buffer), 0, (struct sockaddr*)&from, &fromLen);
 
         if (r <= 0)
             continue;                                   /* the receive timeout: look at running_ and the request timer */
+
+        /* the answer comes from the port that was asked: that is the bridge to stay with */
+        const unsigned int fromPort = (unsigned int)ntohs(from.sin_port);
+
+        if (automatic_ && lockedPort_ != 0U && fromPort != lockedPort_)
+            continue;                                   /* another bridge that answered too: one is enough */
+
+        bool good = false;
 
         if (r >= 4 && buffer[0] == 'I' && buffer[1] == 'Q')
         {
@@ -213,24 +287,45 @@ void SpectrumClient::run()
             IqFrame iq;
 
             if (sink != nullptr && parseIqFrame(buffer, (size_t)r, iq))
+            {
                 sink->feed(iq);
-            continue;
+                good = true;
+            }
         }
+        else
+        {
+            RfFrame f;
+            std::vector<uint8_t> raw;
 
-        RfFrame f;
-        std::vector<uint8_t> raw;
+            if (parseRfFrame(buffer, (size_t)r, f, &raw))
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
 
-        if (!parseRfFrame(buffer, (size_t)r, f, &raw))
+                last_   = f;
+                lastMs_ = nowMs();
+                history_.push_back(raw);
+                while (history_.size() > HistoryRows)
+                    history_.pop_front();
+                frames_++;
+                good = true;
+            }
+        }
+        if (!good)
             continue;
-
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        last_   = f;
-        lastMs_ = nowMs();
-        history_.push_back(raw);
-        while (history_.size() > HistoryRows)
-            history_.pop_front();
-        frames_++;
+        lastAnyMs = nowMs();
+        if (automatic_ && lockedPort_ == 0U)
+        {
+            for (size_t i = 0U; i < nTargets_; i++)
+            {
+                if (targets_[i].port == fromPort)
+                {
+                    lockedPort_ = fromPort;
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    target_ = host_ + ":" + std::to_string(fromPort);
+                    break;
+                }
+            }
+        }
     }
 }
 

@@ -7,6 +7,12 @@ project(openmt_radio C CXX)
 option(BUILD_GUI   "Build the Qt program (needs Qt Widgets and Multimedia)" ON)
 option(BUILD_TESTS "Build the core tests" ON)
 
+# The monitor analyses signals on the window's timer: without optimisation (cmake with no build type) that is several times
+# slower and the window can lag.  Optimised unless a build type is given (-DCMAKE_BUILD_TYPE=Debug for debugging).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)

@@ -91,6 +91,8 @@ void IqMonitor::reset()
     lost_     = 0UL;
     overload_ = false;
     lastMs_   = 0;
+    std::lock_guard<std::mutex> smooth(smoothMutex_);
+    smoother_.reset();
 }
 
 void IqMonitor::feed(const IqFrame& frame)
@@ -188,7 +190,33 @@ static void fft(std::vector<std::complex<double>>& a)
 
 MonitorSnapshot IqMonitor::snapshot()
 {
+    MonitorSnapshot s = snapshotRaw();
+    std::lock_guard<std::mutex> lock(smoothMutex_);
+
+    smoother_.apply(s, nowMs());
+    return s;
+}
+
+MonitorSnapshot IqMonitor::snapshotRaw()
+{
     MonitorSnapshot s;
+
+    if (!available())
+    {
+        /* nothing arrives: no analysis (it costs tens of milliseconds, and this runs on the user interface's timer) */
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        s.samples      = total_;
+        s.iqFrames     = frames_;
+        s.iqLost       = lost_;
+        s.fromIq       = true;
+        s.iqRate       = rate_;
+        s.baud         = baud_;
+        s.symbolLevels = levels_;
+        s.nominalHz    = nominal_ / RfMonitor::COUNTS_PER_HZ;
+        return s;
+    }
+
     std::vector<std::complex<float>> x(RING);
     double rate, baud, nominal;
     unsigned levels;
@@ -226,21 +254,34 @@ MonitorSnapshot IqMonitor::snapshot()
     for (size_t i = 0U; i < N; i++)
         z[i] = std::complex<double>(x[RING - N + i]);
 
-    /* the channel: low pass at 7 kHz (a 12.5 kHz channel, with room for a frequency error) */
+    /* the channel: low pass at 7 kHz (a 12.5 kHz channel, with room for a frequency error).  Plain arrays of doubles: this runs on
+       the user interface's timer, and std::complex arithmetic is slow in a build without optimisation */
     {
         static const size_t TAPS = 63U;
         std::vector<double> h = lowPass(TAPS, 7000.0 / rate);
-        std::vector<std::complex<double>> f(N, std::complex<double>(0.0, 0.0));
+        std::vector<double> zr(N), zi(N), fr(N, 0.0), fi(N, 0.0);
 
+        for (size_t i = 0U; i < N; i++)
+        {
+            zr[i] = z[i].real();
+            zi[i] = z[i].imag();
+        }
         for (size_t i = TAPS; i < N; i++)
         {
-            std::complex<double> acc(0.0, 0.0);
+            double ar = 0.0, ai = 0.0;
+            const double* pr = &zr[i - TAPS + 1U];
+            const double* pi = &zi[i - TAPS + 1U];
 
             for (size_t k = 0U; k < TAPS; k++)
-                acc += z[i - k] * h[k];
-            f[i] = acc;
+            {
+                ar += pr[TAPS - 1U - k] * h[k];
+                ai += pi[TAPS - 1U - k] * h[k];
+            }
+            fr[i] = ar;
+            fi[i] = ai;
         }
-        z.swap(f);
+        for (size_t i = 0U; i < N; i++)
+            z[i] = std::complex<double>(fr[i], fi[i]);
     }
 
     /* The noise: the bridge's samples hold 22 kHz either side of the channel, so the bins 14 to 20 kHz away from the centre hold only
@@ -262,7 +303,10 @@ MonitorSnapshot IqMonitor::snapshot()
         size_t nSide[2] = {0U, 0U};
         int segs = 0;
 
-        for (size_t start = 0U; start + FN <= N; start += FN / 2U)
+        /* at most 8 segments, spread over the window: enough for a noise floor, and cheap */
+        const size_t stride = std::max(FN / 2U, (N - FN) / 7U);
+
+        for (size_t start = 0U; start + FN <= N; start += stride)
         {
             std::vector<std::complex<double>> a(FN);
 
@@ -404,7 +448,9 @@ MonitorSnapshot IqMonitor::snapshot()
         std::vector<double> acc(FN / 2U, 0.0);
         int cnt = 0;
 
-        for (size_t start = 0U; start + FN <= w.size(); start += FN / 2U)
+        const size_t sstride = w.size() > FN ? std::max(FN / 2U, (w.size() - FN) / 5U) : FN;
+
+        for (size_t start = 0U; start + FN <= w.size(); start += sstride)
         {
             std::vector<std::complex<double>> a(FN);
 

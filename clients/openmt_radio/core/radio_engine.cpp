@@ -2,6 +2,8 @@
 
 #include "ambe_vocoder.h"
 
+#include <chrono>
+
 namespace openmt
 {
 
@@ -223,9 +225,12 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
 
     FILE** cap = &capture_;
     RfMonitor* mon = &monitor_;
+    std::function<void(const std::string&)> log = events.log;
     link_.setHandlers(
-        [mode, cap, mon](const int16_t* samples, size_t count)
+        [mode, cap, mon, log](const int16_t* samples, size_t count)
         {
+            const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+
             mon->feed(samples, count);
             if (*cap != NULL)
             {
@@ -235,7 +240,17 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
                     std::fwrite(b, 1, 2, *cap);
                 }
             }
+            const std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
+
             mode->rxSamples(samples, count);
+
+            /* a stall here freezes the Monitor charts (they are fed from this thread): say where the time went */
+            const std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
+            const long long monMs = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+            const long long modeMs = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+
+            if ((monMs > 100 || modeMs > 100) && log)
+                log("Radio: slow receive path: monitor " + std::to_string(monMs) + " ms, mode " + std::to_string(modeMs) + " ms for " + std::to_string(count) + " samples");
         },
         [this, mode](bool duplex)
         {
@@ -267,14 +282,22 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
     {
         std::string spectrumError;
 
-        if (!spectrum_.start(s.link.host, s.spectrumPort, spectrumError))
+        bool started;
+
+        if (s.spectrumAuto)
+            started = spectrum_.startAuto(s.link.host, {18050U, 18051U}, spectrumError);
+        else
+            started = spectrum_.start(s.link.host, s.spectrumPort, spectrumError);
+        if (!started)
         {
             if (events.log)
                 events.log("RF spectrum: " + spectrumError);
         }
         else if (events.log)
         {
-            if (s.spectrumPort == 0U)
+            if (s.spectrumAuto)
+                events.log("RF spectrum: " + spectrum_.target() + " (the one that answers is used) while the Monitor tab is shown");
+            else if (s.spectrumPort == 0U)
                 events.log("RF spectrum: off (port 0)");
             else
                 events.log("RF spectrum: asking " + spectrum_.target() + " while the Monitor tab is shown");

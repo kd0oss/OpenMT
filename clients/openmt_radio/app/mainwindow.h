@@ -122,6 +122,7 @@ private:
     QSpinBox*       txLevel_;
     QSpinBox*       rxLevel_;
     QSpinBox*       spectrumPort_;
+    QCheckBox*      spectrumAuto_;
     QSpinBox*       ambeChunk_;
     QSpinBox*       ambeGap_;
     QComboBox*      layout_;

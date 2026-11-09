@@ -218,6 +218,54 @@ int main()
         close(fd);
     }
     {
+        /* automatic port: two candidate ports, only the second has a bridge; the client finds it and stays with it */
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        struct sockaddr_in a;
+        std::memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_port = htons(28065);
+        inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+        bind(fd, (struct sockaddr*)&a, sizeof(a));
+        struct timeval tv = {0, 100000};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        std::atomic<bool> stop(false);
+        std::atomic<int> requests(0);
+        std::thread server([&]()
+        {
+            struct sockaddr_in peer;
+            socklen_t pl = sizeof(peer);
+            bool have = false;
+            while (!stop)
+            {
+                char buf[16];
+                ssize_t r = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr*)&peer, &pl);
+                if (r >= 4 && std::memcmp(buf, "SPEC", 4) == 0)
+                {
+                    requests++;
+                    have = true;
+                }
+                if (have)
+                {
+                    std::vector<uint8_t> f = makeFrame(1000.0, -30.0, -85.0, false, 30, 0);
+                    sendto(fd, f.data(), f.size(), 0, (struct sockaddr*)&peer, pl);
+                }
+            }
+        });
+
+        SpectrumClient c;
+        std::string err;
+        check(c.startAuto("127.0.0.1", {28064U, 28065U}, err), "the automatic client starts");
+        check(c.target().find("trying ports 28064, 28065") != std::string::npos, "it says that it is trying both ports");
+        c.setWanted(true);
+        usleep(1800000);
+        check(c.answeringPort() == 28065U && c.target() == "127.0.0.1:28065", "it finds the port that answers");
+        check(c.snapshot().valid, "and frames come in");
+        c.stop();
+        stop = true;
+        server.join();
+        close(fd);
+    }
+    {
         SpectrumClient c;
         std::string err;
         check(c.start("127.0.0.1", 0, err) && !c.snapshot().valid, "port 0 turns it off");

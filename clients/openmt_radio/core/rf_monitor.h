@@ -54,6 +54,8 @@ struct MonitorSnapshot
     bool     syncLocked  = false;   /* the deviation comes from frame syncs: exact, however noisy the signal is */
     unsigned syncHits    = 0U;      /* the syncs that were found */
     bool     inverted    = false;   /* the syncs were found upside down: the signal is inverted */
+    long long silentMs   = 0;       /* how long since the last samples arrived (0 while they do); the charts then show the last signal */
+    double   averagedSeconds = 0.0; /* the sync locked reading is an average over this many seconds (0 = a single reading) */
 
     bool     fromIq      = false;   /* made from the IQ of the bridge (the true signal), not from the modem's samples */
     double   iqRate      = 0.0;     /* samples a second of the IQ */
@@ -68,6 +70,35 @@ struct MonitorSnapshot
     double                histMin = 0.0;
     double                histMax = 0.0;
     std::vector<float>    spectrum; /* dB, 0 to 12 kHz */
+};
+
+/* The sync locked reading rests on a few syncs a second (P25 sends about 5), so each snapshot of it has a little noise.  This averages
+   the readings over a few seconds (an exponential average with a time constant of 2.5 s), snapshot after snapshot.  The averaged
+   values replace the levels, the offset, the deviation, the spread and the blur; the eye and the histogram stay as they are.  It
+   starts again when the signal goes (1.5 s without a locked reading) or when a reading is far from the average (a different
+   transmitter: the deviation differs by more than 20 % or the offset by more than 25 % of it). */
+class SyncSmoother
+{
+public:
+    SyncSmoother();
+
+    void reset();
+
+    /* s is changed in place; nowMs is a clock in milliseconds */
+    void apply(MonitorSnapshot& s, long long nowMs);
+
+    static const double TimeConstantS;
+
+private:
+    bool      have_;
+    long long lastMs_;
+    long long lastLockedMs_;
+    double    levels_[4];
+    double    centre_;
+    double    outer_;
+    double    spread_;
+    double    blur_;
+    double    seconds_;       /* how long it has been averaging */
 };
 
 class RfMonitor
@@ -103,6 +134,10 @@ private:
     unsigned             levels_;
     double               nominal_;
     SyncKind             sync_;
+    long long            lastFeedMs_;
+    MonitorSnapshot snapshotRaw();
+    SyncSmoother         smoother_;
+    std::mutex           smoothMutex_;
 };
 
 }

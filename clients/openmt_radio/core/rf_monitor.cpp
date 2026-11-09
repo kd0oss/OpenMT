@@ -1,11 +1,17 @@
 #include "rf_monitor.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 
 namespace openmt
 {
+
+static long long steadyMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 const double RfMonitor::COUNTS_PER_HZ = 0.7;
 
@@ -24,7 +30,8 @@ RfMonitor::RfMonitor() :
     baud_(4800.0),
     levels_(4U),
     nominal_(0.0),
-    sync_(SyncKind::None)
+    sync_(SyncKind::None),
+    lastFeedMs_(0)
 {
 }
 
@@ -45,12 +52,16 @@ void RfMonitor::reset()
     std::fill(ring_.begin(), ring_.end(), (int16_t)0);
     head_  = 0U;
     total_ = 0U;
+    lastFeedMs_ = 0;
+    std::lock_guard<std::mutex> smooth(smoothMutex_);
+    smoother_.reset();
 }
 
 void RfMonitor::feed(const int16_t* samples, size_t count)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    lastFeedMs_ = steadyMs();
     for (size_t i = 0U; i < count; i++)
     {
         ring_[head_] = samples[i];
@@ -152,7 +163,7 @@ static void cluster(std::vector<double> v, unsigned k, double* centre, double* s
         sd[c] = cnt[c] > 1U ? std::sqrt(sq[c] / (double)cnt[c]) : 0.0;
 }
 
-MonitorSnapshot RfMonitor::snapshot()
+MonitorSnapshot RfMonitor::snapshotRaw()
 {
     MonitorSnapshot s;
     std::vector<double> x(RING);
@@ -221,6 +232,24 @@ MonitorSnapshot RfMonitor::snapshot()
         return s;
 
     analyse(w, RATE, baud, levels, nominal, sync, s);
+    return s;
+}
+
+MonitorSnapshot RfMonitor::snapshot()
+{
+    MonitorSnapshot s = snapshotRaw();
+    long long fed;
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+
+        fed = lastFeedMs_;
+    }
+    s.silentMs = (fed != 0 && steadyMs() - fed > 1000) ? steadyMs() - fed : 0;
+
+    std::lock_guard<std::mutex> lock(smoothMutex_);
+
+    smoother_.apply(s, steadyMs());
     return s;
 }
 
@@ -508,6 +537,86 @@ void RfMonitor::analyse(const std::vector<double>& w, double rate, double baud, 
     s.syncLocked = true;
     s.syncHits = (unsigned)hitAt.size();
     s.inverted = pol < 0;
+}
+
+const double SyncSmoother::TimeConstantS = 2.5;
+
+SyncSmoother::SyncSmoother()
+{
+    reset();
+}
+
+void SyncSmoother::reset()
+{
+    have_         = false;
+    lastMs_       = 0;
+    lastLockedMs_ = 0;
+    centre_ = outer_ = spread_ = blur_ = seconds_ = 0.0;
+    for (int i = 0; i < 4; i++)
+        levels_[i] = 0.0;
+}
+
+void SyncSmoother::apply(MonitorSnapshot& s, long long nowMs)
+{
+    if (!s.syncLocked || !s.levelsValid)
+    {
+        if (have_ && nowMs - lastLockedMs_ > 1500)
+            reset();                                /* the signal is gone: the next one starts afresh */
+        return;
+    }
+
+    if (have_)
+    {
+        const bool jump = std::fabs(s.outer - outer_) > 0.2 * outer_ ||
+                          std::fabs(s.centre - centre_) > 0.25 * outer_ ||
+                          nowMs - lastLockedMs_ > 1500;
+
+        if (jump)
+            reset();
+    }
+    if (!have_)
+    {
+        have_ = true;
+        for (int i = 0; i < 4; i++)
+            levels_[i] = s.levels[i];
+        centre_  = s.centre;
+        outer_   = s.outer;
+        spread_  = s.spread;
+        blur_    = s.blur;
+        seconds_ = 0.0;
+    }
+    else
+    {
+        double dt = (double)(nowMs - lastMs_) / 1000.0;
+
+        if (dt < 0.0)
+            dt = 0.0;
+        if (dt > 1.0)
+            dt = 1.0;
+
+        const double a = 1.0 - std::exp(-dt / TimeConstantS);
+
+        for (int i = 0; i < 4; i++)
+            levels_[i] += a * (s.levels[i] - levels_[i]);
+        centre_  += a * (s.centre - centre_);
+        outer_   += a * (s.outer - outer_);
+        spread_  += a * (s.spread - spread_);
+        blur_    += a * (s.blur - blur_);
+        seconds_ += dt;
+    }
+    lastMs_       = nowMs;
+    lastLockedMs_ = nowMs;
+
+    for (int i = 0; i < 4; i++)
+        s.levels[i] = levels_[i];
+    s.centre  = centre_;
+    s.outer   = outer_;
+    s.outerHz = outer_ / RfMonitor::COUNTS_PER_HZ;
+    if (s.nominalHz > 0.0)
+        s.outerPercent = 100.0 * s.outerHz / s.nominalHz;
+    s.spread  = spread_;
+    s.blur    = blur_;
+    s.averagedSeconds = seconds_;
 }
 
 }

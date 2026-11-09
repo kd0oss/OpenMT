@@ -58,6 +58,10 @@ public:
     ~SpectrumClient();
 
     bool start(const std::string& host, unsigned int port, std::string& error);   /* port 0: off, true */
+
+    /* Asks every port in the list (the HackRF bridge serves 18050 and the SX1255 bridge 18051) until one answers, then only that
+       one; if it falls silent for 5 s while it is wanted, all of them are asked again (a different bridge may have been started) */
+    bool startAuto(const std::string& host, const std::vector<unsigned int>& ports, std::string& error);
     void stop();
 
     /* the requests are sent while this is true */
@@ -70,8 +74,11 @@ public:
     RfSpectrumSnapshot snapshot();
     unsigned long framesReceived() const { return frames_; }
 
-    /* "host:port" being asked, empty when it is off (or has not been started) */
-    std::string target() const { return target_; }
+    /* "host:port" being asked (or "host: trying ports ..." while an automatic start has no answer yet), empty when it is off */
+    std::string target() const;
+
+    /* the port that answers, 0 when none does yet (or it is off) */
+    unsigned int answeringPort() const { return lockedPort_; }
 
     static const size_t HistoryRows = 120U;
 
@@ -84,13 +91,23 @@ private:
     std::atomic<bool>    iqWanted_;
     std::atomic<IqMonitor*> iqSink_;
     std::thread          thread_;
-    std::mutex           mutex_;
+    mutable std::mutex   mutex_;
     RfFrame              last_;
     long long            lastMs_;
     std::deque<std::vector<uint8_t>> history_;
     std::atomic<unsigned long> frames_;
-    unsigned char        addr_[32];            /* sockaddr_in of the bridge */
-    size_t               addrLen_;
+    static const size_t  MaxTargets = 4U;
+    struct Target
+    {
+        unsigned char    addr[32];             /* sockaddr_in of the bridge */
+        size_t           len;
+        unsigned int     port;
+    };
+    Target               targets_[MaxTargets];
+    size_t               nTargets_;
+    bool                 automatic_;
+    std::atomic<unsigned int> lockedPort_;     /* the target that answers, 0 = not known yet */
+    std::string          host_;
     std::string          target_;
 };
 

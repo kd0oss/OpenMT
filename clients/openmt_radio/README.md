@@ -282,15 +282,18 @@ levels and the deviation come from:
 
 For P25 and DMR the monitor also looks for the frame syncs.  The sync symbols are all +3 or -3, so their mean is the outer level
 without the bias that noise puts on a blind reading: with syncs found the deviation is exact (the readout says so and how many syncs
-were found) and an inverted transmitter is recognised.  A reading needs a few syncs (P25 sends about 5 a second), so it settles
-after a moment and jumps a little with weak signals.  Without syncs (other modes, or none in the last half second) the deviation is
+were found) and an inverted transmitter is recognised.  A reading rests on a few syncs a second (P25 sends about 5), so the sync locked values are averaged over a few seconds (a time
+constant of 2.5 s; the readout says how long it has been averaging).  The average starts again when the signal goes or when a
+reading is far from it (a different transmitter), so it does not smear a change of transmitter; the eye and the histogram are not
+averaged.  Without syncs (other modes, or none in the last half second) the deviation is
 the earlier blind estimate and is marked rough when the levels overlap.
 
 With the HackRF bridge it also shows the RF spectrum of the 125 kHz around the channel with a waterfall, the channel power, the
 noise floor, the signal-to-noise ratio, the frequency error of the signal and the overload state of the HackRF's converter.  The
-tab asks the bridge for these over UDP (the "RF spectrum port" setting, default 18050, on the same host as Modem_Host) only while it
-is shown.  The HackRF bridge answers on port 18050 and the SX1255 bridge on 18051 by default: set the port of the modem in use.
-Other modems do not answer and the RF panels stay empty.
+tab asks the bridge for these over UDP (on the same host as Modem_Host) only while it is shown.  The "RF spectrum port" setting is
+**auto** by default: the radio asks port 18050 (the HackRF bridge) and 18051 (the SX1255 bridge), stays with the one that answers
+(the tab shows which), and asks both again if that one is silent for 5 s, so switching between the bridges needs no setting.  Untick
+auto to use one port (any port, or 0 for none).  Other modems do not answer and the RF panels stay empty.
 
 The Hz figures assume the modem scales its samples at 0.7 counts per Hz, as the protocol hosts do.  When the levels overlap
 (blur above about 0.25) the deviation is only a rough figure (marked with ~).

@@ -39,7 +39,7 @@ MainWindow::MainWindow(QWidget* parent) :
     QMainWindow(parent),
     host_(nullptr), modem_(nullptr), mode_(nullptr), nxBox_(nullptr), dmrBox_(nullptr), p25Box_(nullptr), p25Nac_(nullptr), p25Src_(nullptr), p25Dst_(nullptr), p25Group_(nullptr), ysfBox_(nullptr), ysfCall_(nullptr), ysfDest_(nullptr), ysfDgid_(nullptr), dstarBox_(nullptr), dstarCall_(nullptr), dstarSuffix_(nullptr), dstarUr_(nullptr), dstarRpt1_(nullptr), dstarRpt2_(nullptr), dstarMsg_(nullptr), m17Box_(nullptr), m17Call_(nullptr), m17Dest_(nullptr), m17Can_(nullptr), m17Filter_(nullptr), m17Meta_(nullptr), m17MsgTo_(nullptr), m17Msg_(nullptr), m17Send_(nullptr), fmBox_(nullptr), fmTxTone_(nullptr), fmToneLevel_(nullptr), fmDtmfLevel_(nullptr), fmDtmfHang_(nullptr), fmSquelch_(nullptr), fmRxTone_(nullptr), fmDelay_(nullptr), fmSquelchLevel_(nullptr), fmAuto_(nullptr), dmrCc_(nullptr),
     dmrSrc_(nullptr), dmrDst_(nullptr), dmrGroup_(nullptr), dmrOperation_(nullptr), dmrSlot_(nullptr), dmrTiming_(nullptr), ran_(nullptr), src_(nullptr), dst_(nullptr), group_(nullptr),
-    ambeDev_(nullptr), ambeBaud_(nullptr), noVocoder_(nullptr), capture_(nullptr), invertRx_(nullptr), txLevel_(nullptr), rxLevel_(nullptr), spectrumPort_(nullptr), ambeChunk_(nullptr), ambeGap_(nullptr), layout_(nullptr), audioIn_(nullptr),
+    ambeDev_(nullptr), ambeBaud_(nullptr), noVocoder_(nullptr), capture_(nullptr), invertRx_(nullptr), txLevel_(nullptr), rxLevel_(nullptr), spectrumPort_(nullptr), spectrumAuto_(nullptr), ambeChunk_(nullptr), ambeGap_(nullptr), layout_(nullptr), audioIn_(nullptr),
     audioOut_(nullptr), rate_(nullptr), micGain_(nullptr), spkGain_(nullptr), connect_(nullptr), release_(nullptr), ptt_(nullptr), dtmf_(nullptr), dtmfPad_(nullptr),
     rxLed_(nullptr), txLed_(nullptr), heard_(nullptr), status_(nullptr), micMeter_(nullptr), spkMeter_(nullptr),
     log_(nullptr),
@@ -115,7 +115,21 @@ void MainWindow::buildUi()
     spectrumPort_->setValue(18050);
     spectrumPort_->setToolTip("UDP port of the HackRF bridge's RF spectrum, on the Host above (the Monitor tab asks for it while it is shown). "
                               "Only the HackRF bridge answers. 0 = do not ask");
-    cf->addRow("RF spectrum port", spectrumPort_);
+    spectrumAuto_ = new QCheckBox("auto", conn);
+    spectrumAuto_->setChecked(true);
+    spectrumAuto_->setToolTip("Ask the HackRF bridge (port 18050) and the SX1255 bridge (port 18051) and stay with the one that answers. "
+                              "Untick to use the port on the left only");
+    QObject::connect(spectrumAuto_, SIGNAL(toggled(bool)), spectrumPort_, SLOT(setDisabled(bool)));
+    spectrumPort_->setDisabled(true);
+    {
+        QWidget* row = new QWidget(conn);
+        QHBoxLayout* rl = new QHBoxLayout(row);
+
+        rl->setContentsMargins(0, 0, 0, 0);
+        rl->addWidget(spectrumPort_);
+        rl->addWidget(spectrumAuto_);
+        cf->addRow("RF spectrum port", row);
+    }
 
     /* NXDN */
     QGroupBox* nx = new QGroupBox("NXDN", central);
@@ -554,6 +568,7 @@ void MainWindow::loadSettings()
     txLevel_->setValue(s.value("txLevel", 50).toInt());
     rxLevel_->setValue(s.value("rxLevel", 50).toInt());
     spectrumPort_->setValue(s.value("spectrumPort", 18050).toInt());
+    spectrumAuto_->setChecked(s.value("spectrumAuto", true).toBool());
     ambeChunk_->setValue(s.value("ambeChunk", 64).toInt());
     ambeGap_->setValue(s.value("ambeGap", 500).toInt());
     int li = layout_->findData(s.value("layout", -1).toInt());
@@ -625,6 +640,7 @@ void MainWindow::saveSettings()
     s.setValue("txLevel", txLevel_->value());
     s.setValue("rxLevel", rxLevel_->value());
     s.setValue("spectrumPort", spectrumPort_->value());
+    s.setValue("spectrumAuto", spectrumAuto_->isChecked());
     s.setValue("ambeChunk", ambeChunk_->value());
     s.setValue("ambeGap", ambeGap_->value());
     s.setValue("layout", layout_->currentData().toInt());
@@ -701,7 +717,8 @@ void MainWindow::setConnected(bool connected)
     invertRx_->setEnabled(!connected);
     txLevel_->setEnabled(!connected);
     rxLevel_->setEnabled(!connected);
-    spectrumPort_->setEnabled(!connected);
+    spectrumPort_->setEnabled(!connected && !spectrumAuto_->isChecked());
+    spectrumAuto_->setEnabled(!connected);
     ambeChunk_->setEnabled(!connected);
     ambeGap_->setEnabled(!connected);
     layout_->setEnabled(!connected);
@@ -813,6 +830,7 @@ void MainWindow::onConnect()
     es.nxdn.rxGain = es.dmr.rxGain = es.p25.rxGain = es.ysf.rxGain = es.m17.rxGain = invertRx_->isChecked() ? -level : level;
     es.dstar.rxGain = es.fm.rxGain = level;                             /* D-STAR finds the polarity itself, FM audio has none */
     es.spectrumPort = (unsigned int)spectrumPort_->value();
+    es.spectrumAuto = spectrumAuto_->isChecked();
     es.rxCapture = capture_->isChecked() ? (QDir::homePath() + "/openmt_rx.raw").toStdString() : std::string();
     es.ambeChunk = ambeChunk_->value();
     es.ambeGapUs = ambeGap_->value();

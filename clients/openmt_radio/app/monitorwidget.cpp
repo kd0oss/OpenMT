@@ -8,6 +8,8 @@
 #include <QResizeEvent>
 #include <QSettings>
 #include <QTimer>
+#include <chrono>
+#include <cstdio>
 
 #include <algorithm>
 #include <cmath>
@@ -94,24 +96,41 @@ void MonitorWidget::hideEvent(QHideEvent* event)
     QWidget::hideEvent(event);
 }
 
+static long long nowMs()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
 void MonitorWidget::refresh()
 {
+    static long long lastRefreshMs = 0;
+    const long long startMs = nowMs();
+
+    if (lastRefreshMs != 0 && startMs - lastRefreshMs > 1000)
+        std::fprintf(stderr, "Monitor: the window thread was away for %lld ms\n", (long long)(startMs - lastRefreshMs));
+
     const int choice = source_->currentIndex();      /* 0 automatic, 1 modem samples, 2 IQ */
 
     applySource();                                   /* the radio may have been connected after the tab was shown */
 
     snap_ = monitor_->snapshot();
     iqAvailable_ = iq_ != nullptr && iq_->available();
-    if (iq_ != nullptr && choice != 1)
+    if (iq_ != nullptr && choice != 1 && (choice == 2 || iqAvailable_))        /* automatic: no work while no IQ arrives */
     {
         openmt::MonitorSnapshot q = iq_->snapshot();
 
-        if (choice == 2 || (iqAvailable_ && q.active))
+        /* automatic: the IQ is used while it shows a signal, and also when the modem's samples have stopped (the modem host
+           sends none while it serves another mode, M17 for instance), so the charts stay live */
+        if (choice == 2 || (iqAvailable_ && (q.active || snap_.silentMs > 0)))
             snap_ = q;
     }
     if (spectrum_ != nullptr)
         rf_ = spectrum_->snapshot();
     update();
+
+    lastRefreshMs = nowMs();
+    if (lastRefreshMs - startMs > 100)
+        std::fprintf(stderr, "Monitor: refresh took %lld ms\n", (long long)(lastRefreshMs - startMs));
 }
 
 void MonitorWidget::drawPanel(QPainter& p, const QRect& r, const QString& title)
@@ -214,7 +233,13 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
             col = QColor(120, 220, 120);
         }
 
-        if (s.samples > 0U && s.active)
+        if (!s.fromIq && s.silentMs > 0)
+        {
+            state = QString("no samples from the modem for %1 s (the modem host sends none while it serves another mode): the charts show the last signal")
+                        .arg((double)s.silentMs / 1000.0, 0, 'f', 0);
+            col = QColor(255, 200, 60);
+        }
+        else if (s.samples > 0U && s.active)
         {
             if (s.fromIq)
                 state += QString("   [IQ from the bridge, %1 frames, %2 lost%3]").arg(s.iqFrames).arg(s.iqLost)
@@ -225,6 +250,8 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
                              : "   [modem samples]";
             if (s.syncLocked)
                 state += QString("   frame syncs found: %1%2").arg(s.syncHits).arg(s.inverted ? " (signal inverted)" : "");
+            if (s.syncLocked && s.averagedSeconds >= 0.5)
+                state += QString(", averaged over %1 s").arg(s.averagedSeconds, 0, 'f', 0);
         }
         p.setPen(col);
         p.drawText(readout.adjusted(6, 22, -6, 0), Qt::AlignTop | Qt::AlignLeft, state);

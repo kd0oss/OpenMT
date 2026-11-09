@@ -59,6 +59,7 @@ struct EngineSettings
     int              ambeGapUs   = 500;         /* pause after each chunk */
     bool             noVocoder   = false;       /* run without a dongle (tests, link checks) */
     unsigned int     spectrumPort = 18050;      /* UDP port of the HackRF bridge's RF spectrum (on the Modem_Host machine), 0 = do not ask */
+    bool             spectrumAuto = true;       /* ask 18050 (HackRF bridge) and 18051 (SX1255 bridge) and stay with the one that answers; spectrumPort is then not used */
     std::string      rxCapture;                 /* file that gets every sample received from Modem_Host (16 bit, 24 kHz), "" = none */
 };
 
