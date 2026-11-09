@@ -44,7 +44,7 @@ typedef struct SLOTDATA
     bool dataContent;
     unsigned char CBF;
     bool OVCM;
-    bool rawData[195];
+    bool rawData[196];                  /* the 196 bits of a BPTC(196,96) block (it was 195: the last bit went into deInterData[0]) */
     bool deInterData[196];
     unsigned char tdata[12];
 	bool EMB_raw[128];
