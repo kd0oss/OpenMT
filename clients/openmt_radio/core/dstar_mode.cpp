@@ -241,12 +241,8 @@ void DstarMode::rxSample(int16_t s)
 
     level_ += (std::fabs((double)s) - level_) / 64.0;
     /* The offset of a receiver differs from burst to burst, and the alternating bits that start a call are balanced: while no call is
-       being received the offset is followed quickly, during a call slowly (voice bits are not balanced).  The offset of a burst is
-       not constant at its start either: the modem's own offset filter takes about a tenth of a second to settle (an echo heard
-       through the HackRF bridge began 900 counts off), and a header that is read while the estimate is still that far out has
-       its bits decided wrongly.  So the header is read with a quicker estimate (it is scrambled, so about balanced, and short);
-       only the voice frames after it use the slow one. */
-    dc_ += ((double)s - dc_) / (state_ == RX_SEARCH ? 256.0 : (state_ == RX_HEADER ? 1024.0 : 4096.0));
+       being received the offset is followed quickly, during a call slowly (voice bits are not balanced) */
+    dc_ += ((double)s - dc_) / (state_ == RX_SEARCH ? 256.0 : 4096.0);
 
     if (state_ == RX_SEARCH)
     {
@@ -568,27 +564,7 @@ void DstarMode::rxHeader()
 
     if (!dstarRxHeader(in, out))
     {
-        /* a false sync, or a header too damaged to read.  When the callsigns came out readable all the same, the bits were
-           received right and it is the sender's CRC that is wrong (a station or gateway that did not set it): say so, it is
-           not a signal problem */
-        unsigned int readable = 0U;
-
-        for (unsigned int k = 3U; k < 39U; k++)
-            if (out[k] >= 0x20U && out[k] < 0x7FU)
-                readable++;
-
-        if (readable >= 34U)
-        {
-            std::string text = "D-STAR: a header with readable callsigns (RPT2 '" + trimmed((const char*)out + 3, 8U) + "' RPT1 '" +
-                               trimmed((const char*)out + 11, 8U) + "' UR '" + trimmed((const char*)out + 19, 8U) + "' MY '" +
-                               trimmed((const char*)out + 27, 8U) + "') was received but its CRC is wrong: the sender did not set the header CRC, "
-                               "so the call is ignored (the signal itself is fine)";
-
-            log(text);
-            rxReset();
-            return;                         /* not counted: the "weak or noisy signal" report would be wrong for it */
-        }
-
+        /* a false sync, or a header too damaged to read */
         badHeaders_++;
         rxReset();
         return;

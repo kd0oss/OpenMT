@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 
 #include "audioio.h"
+#include "monitorwidget.h"
 #include "radiocontroller.h"
 
 #include <QCheckBox>
@@ -26,6 +27,8 @@
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTabBar>
+#include <QTabWidget>
 #include <QVBoxLayout>
 
 #include "../core/radio_engine.h"
@@ -36,7 +39,7 @@ MainWindow::MainWindow(QWidget* parent) :
     QMainWindow(parent),
     host_(nullptr), modem_(nullptr), mode_(nullptr), nxBox_(nullptr), dmrBox_(nullptr), p25Box_(nullptr), p25Nac_(nullptr), p25Src_(nullptr), p25Dst_(nullptr), p25Group_(nullptr), ysfBox_(nullptr), ysfCall_(nullptr), ysfDest_(nullptr), ysfDgid_(nullptr), dstarBox_(nullptr), dstarCall_(nullptr), dstarSuffix_(nullptr), dstarUr_(nullptr), dstarRpt1_(nullptr), dstarRpt2_(nullptr), dstarMsg_(nullptr), m17Box_(nullptr), m17Call_(nullptr), m17Dest_(nullptr), m17Can_(nullptr), m17Filter_(nullptr), m17Meta_(nullptr), m17MsgTo_(nullptr), m17Msg_(nullptr), m17Send_(nullptr), fmBox_(nullptr), fmTxTone_(nullptr), fmToneLevel_(nullptr), fmDtmfLevel_(nullptr), fmDtmfHang_(nullptr), fmSquelch_(nullptr), fmRxTone_(nullptr), fmDelay_(nullptr), fmSquelchLevel_(nullptr), fmAuto_(nullptr), dmrCc_(nullptr),
     dmrSrc_(nullptr), dmrDst_(nullptr), dmrGroup_(nullptr), dmrOperation_(nullptr), dmrSlot_(nullptr), dmrTiming_(nullptr), ran_(nullptr), src_(nullptr), dst_(nullptr), group_(nullptr),
-    ambeDev_(nullptr), ambeBaud_(nullptr), noVocoder_(nullptr), capture_(nullptr), invertRx_(nullptr), txLevel_(nullptr), rxLevel_(nullptr), ambeChunk_(nullptr), ambeGap_(nullptr), layout_(nullptr), audioIn_(nullptr),
+    ambeDev_(nullptr), ambeBaud_(nullptr), noVocoder_(nullptr), capture_(nullptr), invertRx_(nullptr), txLevel_(nullptr), rxLevel_(nullptr), spectrumPort_(nullptr), ambeChunk_(nullptr), ambeGap_(nullptr), layout_(nullptr), audioIn_(nullptr),
     audioOut_(nullptr), rate_(nullptr), micGain_(nullptr), spkGain_(nullptr), connect_(nullptr), release_(nullptr), ptt_(nullptr), dtmf_(nullptr), dtmfPad_(nullptr),
     rxLed_(nullptr), txLed_(nullptr), heard_(nullptr), status_(nullptr), micMeter_(nullptr), spkMeter_(nullptr),
     log_(nullptr),
@@ -107,6 +110,12 @@ void MainWindow::buildUi()
     rxLevel_->setValue(50);
     rxLevel_->setToolTip("Scales the samples received from Modem_Host, like rxLevel of the protocol hosts (the samples are multiplied by this / 50; default 50)");
     cf->addRow("Receive level", rxLevel_);
+    spectrumPort_ = new QSpinBox(conn);
+    spectrumPort_->setRange(0, 65535);
+    spectrumPort_->setValue(18050);
+    spectrumPort_->setToolTip("UDP port of the HackRF bridge's RF spectrum, on the Host above (the Monitor tab asks for it while it is shown). "
+                              "Only the HackRF bridge answers. 0 = do not ask");
+    cf->addRow("RF spectrum port", spectrumPort_);
 
     /* NXDN */
     QGroupBox* nx = new QGroupBox("NXDN", central);
@@ -472,7 +481,13 @@ void MainWindow::buildUi()
     log_->setMinimumHeight(110);
     top->addWidget(log_, 1);
 
-    setCentralWidget(central);
+    /* the radio is one tab, the signal monitor the other (the space bar must keep working as push to talk, so the tabs take no focus) */
+    QTabWidget* tabs = new QTabWidget(this);
+    tabs->setFocusPolicy(Qt::NoFocus);
+    tabs->tabBar()->setFocusPolicy(Qt::NoFocus);
+    tabs->addTab(central, "Radio");
+    tabs->addTab(new MonitorWidget(&radio_->monitor(), &radio_->spectrum(), tabs), "Monitor");
+    setCentralWidget(tabs);
 
     QObject::connect(mode_, SIGNAL(currentIndexChanged(int)), this, SLOT(onModeChanged()));
     QObject::connect(connect_, SIGNAL(clicked()), this, SLOT(onConnect()));
@@ -538,6 +553,7 @@ void MainWindow::loadSettings()
     invertRx_->setChecked(s.value("invertRx", false).toBool());
     txLevel_->setValue(s.value("txLevel", 50).toInt());
     rxLevel_->setValue(s.value("rxLevel", 50).toInt());
+    spectrumPort_->setValue(s.value("spectrumPort", 18050).toInt());
     ambeChunk_->setValue(s.value("ambeChunk", 64).toInt());
     ambeGap_->setValue(s.value("ambeGap", 500).toInt());
     int li = layout_->findData(s.value("layout", -1).toInt());
@@ -608,6 +624,7 @@ void MainWindow::saveSettings()
     s.setValue("invertRx", invertRx_->isChecked());
     s.setValue("txLevel", txLevel_->value());
     s.setValue("rxLevel", rxLevel_->value());
+    s.setValue("spectrumPort", spectrumPort_->value());
     s.setValue("ambeChunk", ambeChunk_->value());
     s.setValue("ambeGap", ambeGap_->value());
     s.setValue("layout", layout_->currentData().toInt());
@@ -684,6 +701,7 @@ void MainWindow::setConnected(bool connected)
     invertRx_->setEnabled(!connected);
     txLevel_->setEnabled(!connected);
     rxLevel_->setEnabled(!connected);
+    spectrumPort_->setEnabled(!connected);
     ambeChunk_->setEnabled(!connected);
     ambeGap_->setEnabled(!connected);
     layout_->setEnabled(!connected);
@@ -794,6 +812,7 @@ void MainWindow::onConnect()
 
     es.nxdn.rxGain = es.dmr.rxGain = es.p25.rxGain = es.ysf.rxGain = es.m17.rxGain = invertRx_->isChecked() ? -level : level;
     es.dstar.rxGain = es.fm.rxGain = level;                             /* D-STAR finds the polarity itself, FM audio has none */
+    es.spectrumPort = (unsigned int)spectrumPort_->value();
     es.rxCapture = capture_->isChecked() ? (QDir::homePath() + "/openmt_rx.raw").toStdString() : std::string();
     es.ambeChunk = ambeChunk_->value();
     es.ambeGapUs = ambeGap_->value();

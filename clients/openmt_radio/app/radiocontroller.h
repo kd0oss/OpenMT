@@ -22,6 +22,8 @@ public:
     void stop();
     bool running() const;
     QString vocoderDescription() const;
+    openmt::RfMonitor& monitor() { return engine_.monitor(); }
+    openmt::SpectrumClient& spectrum() { return engine_.spectrum(); }
 
     void ptt(bool down);
     bool releaseModem();

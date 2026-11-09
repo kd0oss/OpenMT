@@ -47,6 +47,7 @@ target_sources(sx1255_bridge PRIVATE
     app/bridge.c
     app/bridge_db.c
     ../../tools/bridge_common.c
+    ../../tools/rf_spectrum.c
     ../../tools/tools.c
     ../../tools/string_builder.c
     ../../tools/RingBuffer.c

@@ -239,8 +239,9 @@ bool AmbeVocoder::setCodec(Codec codec)
     return true;
 }
 
-/* the 88 bit frame of the callers is u0 .. u7 (12, 12, 12, 12, 11, 11, 11 and 7 bits), most significant bit first, as OP25's
-   imbe_pack makes it */
+/* the 88 bit frame of the callers is u0 .. u7 (12, 12, 12, 12, 11, 11, 11 and 7 bits), most significant bit first.  The
+   vocoder's u7 uses all of its 7 bits (bit 0 included), so it goes to and from the air as it is, with no shift: with a
+   one bit shift the speech sounded robotic on a real radio. */
 static const unsigned int U_BITS[8] = {12U, 12U, 12U, 12U, 11U, 11U, 11U, 7U};
 
 static void packU(const int16_t* u, uint8_t* out)
@@ -249,7 +250,6 @@ static void packU(const int16_t* u, uint8_t* out)
     int16_t w[8];
 
     std::memcpy(w, u, sizeof(w));
-    w[7] = (int16_t)((w[7] >> 1) & 0x7F);       /* the vocoder keeps u7 shifted left by one (bit 0 is free) */
 
     std::memset(out, 0x00, 11U);
     for (unsigned int v = 0U; v < 8U; v++)
@@ -270,7 +270,6 @@ static void unpackU(const uint8_t* in, int16_t* u)
             value = (value << 1) | ((in[pos >> 3] >> (7U - (pos & 7U))) & 1);
         u[v] = (int16_t)value;
     }
-    u[7] = (int16_t)(u[7] << 1);
 }
 
 bool AmbeVocoder::encodeImbeBatch(const int16_t* pcm, unsigned int n, uint8_t* blocks)

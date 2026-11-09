@@ -61,6 +61,7 @@
 #include "dsp.h"
 #include "bridge_common.h"
 #include "bridge_db.h"
+#include "rf_spectrum.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -170,6 +171,9 @@ typedef struct
     uint16_t rx_pll_bw_khz;
     uint16_t tx_pll_bw_khz;
     const char *alsa_capture_dev;
+    unsigned int spectrum_port;     /* UDP port that serves the RF spectrum to monitors (OpenMT Radio's Monitor tab), 0 = off */
+    const char *spectrum_bind;      /* address it listens on, NULL = every interface */
+    bool spectrum_flip;             /* turn the frequency axis of the spectrum round (--spectrum-flip) */
     const char *alsa_playback_dev;
     double deviation_hz;
     atomic_bool rx_invert; /* negate the baseband sign before Q15 conversion --
@@ -319,6 +323,9 @@ config_set_defaults(bridge_config_t *cfg)
     cfg->rx_pll_bw_khz = 300;
     cfg->tx_pll_bw_khz = 300;
     cfg->alsa_capture_dev = "hw:0,1";
+    cfg->spectrum_port = RFSPEC_SX1255_PORT;
+    cfg->spectrum_bind = NULL;
+    cfg->spectrum_flip = false;
     cfg->alsa_playback_dev = "hw:0,0";
     /* FM deviation. Retune from a fresh capture+decode measurement if
      * anything about the DSP chain upstream of this value changes. */
@@ -390,6 +397,15 @@ print_usage(const char *argv0)
         "                        slave device at PATH (e.g. /dev/sx1255modem)\n"
         "                        so OpenMT's modemtty config doesn't need\n"
         "                        updating every run\n"
+        "  --spectrum-port N     UDP port that serves the RF spectrum of the received channel\n"
+        "                        to monitors such as OpenMT Radio's Monitor tab (default 18051,\n"
+        "                        0 = off).  Frames are only computed and sent while a monitor\n"
+        "                        asks for them.  See tools/rf_spectrum.h for the protocol\n"
+        "  --spectrum-bind ADDR  IPv4 address it listens on (default: every interface)\n"
+        "  --spectrum-flip       turn the frequency axis of the spectrum round.  The spectrum does\n"
+        "                        not depend on --rx-invert (measured on a HAT: a signal above the\n"
+        "                        RX frequency showed above centre with RX invert on); use this\n"
+        "                        only if yours shows the other way round\n"
         "  --rx-invert           negate the baseband sign before Q15 conversion\n"
         "                        (this is the default -- see --no-rx-invert).\n"
         "                        Sync correlation can tolerate a polarity flip\n"
@@ -538,6 +554,18 @@ parse_args(int argc, char **argv, bridge_config_t *cfg)
         else if (strcmp(argv[i], "--capture") == 0 && (val = NEXT_ARG()) != NULL)
         {
             cfg->alsa_capture_dev = val;
+        }
+        else if (strcmp(argv[i], "--spectrum-port") == 0 && (val = NEXT_ARG()) != NULL)
+        {
+            cfg->spectrum_port = (unsigned int)strtoul(val, NULL, 10);
+        }
+        else if (strcmp(argv[i], "--spectrum-bind") == 0 && (val = NEXT_ARG()) != NULL)
+        {
+            cfg->spectrum_bind = val;
+        }
+        else if (strcmp(argv[i], "--spectrum-flip") == 0)
+        {
+            cfg->spectrum_flip = true;
         }
         else if (strcmp(argv[i], "--playback") == 0 && (val = NEXT_ARG()) != NULL)
         {
@@ -1527,6 +1555,20 @@ rx_thread_main(void *arg)
     rx_thread_arg_t *a = arg;
     uint8_t q15_payload[SAMPLES_PER_FRAME * 2];
     int q15_count = 0;
+    rfspec_t *spec = rfspec_create((uint16_t)a->cfg->spectrum_port, a->cfg->spectrum_bind, SX1255_SAMPLE_RATE_HZ);
+
+    if (a->cfg->spectrum_port != 0U)
+    {
+        if (spec != NULL)
+        {
+            log_msg( "bridge: serving the RF spectrum to monitors on UDP port %u\n", a->cfg->spectrum_port);
+        }
+        else
+        {
+            log_msg( "bridge: cannot serve the RF spectrum on UDP port %u (in use?): the Monitor tab will have no RF spectrum\n",
+                a->cfg->spectrum_port);
+        }
+    }
 
     log_msg( "bridge: RX thread running\n");
     while (!g_stop)
@@ -1539,6 +1581,15 @@ rx_thread_main(void *arg)
         {
             log_msg( "bridge: capture error, stopping RX thread\n");
             break;
+        }
+
+        if (spec != NULL && n_iq > 0 && rfspec_poll(spec))
+        {
+            /* the spectrum of the channel: the SX1255's samples are full scale at 1.0 */
+            rfspec_set_freq(spec, a->cfg->rx_freq_hz);
+            rfspec_set_mirror(spec, a->cfg->spectrum_flip);
+            rfspec_level(spec, iq_buf, (size_t)n_iq);
+            rfspec_feed(spec, iq_buf, (size_t)n_iq);
         }
 
         for (i = 0; i < n_iq; i++)
@@ -1574,6 +1625,7 @@ rx_thread_main(void *arg)
             }
         }
     }
+    rfspec_destroy(spec);
     log_msg( "bridge: RX thread exiting\n");
     return NULL;
 }

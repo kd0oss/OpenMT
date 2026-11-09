@@ -198,6 +198,19 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
 
     RadioMode* mode = mode_.get();
 
+    /* symbol rate, number of symbol levels and the nominal outer level (counts) of the mode, for the signal monitor */
+    switch (s.mode)
+    {
+        case MODE_NXDN:  monitor_.configure(2400.0, 4U, 735.0);  break;
+        case MODE_DMR:   monitor_.configure(4800.0, 4U, 1362.0); break;
+        case MODE_P25:   monitor_.configure(4800.0, 4U, 1260.0); break;
+        case MODE_YSF:   monitor_.configure(4800.0, 4U, 1890.0); break;
+        case MODE_DSTAR: monitor_.configure(4800.0, 2U, 841.0);  break;
+        case MODE_M17:   monitor_.configure(4800.0, 4U, 1481.0); break;
+        default:         monitor_.configure(0.0, 0U, 0.0);       break;
+    }
+    monitor_.reset();
+
     if (!s.rxCapture.empty())
     {
         capture_ = std::fopen(s.rxCapture.c_str(), "wb");
@@ -208,9 +221,11 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
     }
 
     FILE** cap = &capture_;
+    RfMonitor* mon = &monitor_;
     link_.setHandlers(
-        [mode, cap](const int16_t* samples, size_t count)
+        [mode, cap, mon](const int16_t* samples, size_t count)
         {
+            mon->feed(samples, count);
             if (*cap != NULL)
             {
                 for (size_t i = 0U; i < count; i++)
@@ -246,6 +261,23 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
 
     link_.forceIdle();                  /* a mode this radio held when it was last closed or crashed */
     mode_->start();
+
+    {
+        std::string spectrumError;
+
+        if (!spectrum_.start(s.link.host, s.spectrumPort, spectrumError))
+        {
+            if (events.log)
+                events.log("RF spectrum: " + spectrumError);
+        }
+        else if (events.log)
+        {
+            if (s.spectrumPort == 0U)
+                events.log("RF spectrum: off (port 0)");
+            else
+                events.log("RF spectrum: asking " + spectrum_.target() + " while the Monitor tab is shown");
+        }
+    }
     running_ = true;
     return true;
 }
@@ -262,6 +294,7 @@ void RadioEngine::stop()
 
     link_.forceIdle();
     link_.close();
+    spectrum_.stop();
     if (capture_ != NULL)
     {
         std::fclose(capture_);

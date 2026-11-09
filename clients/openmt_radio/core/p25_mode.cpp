@@ -925,6 +925,9 @@ void P25Mode::txCall()
     int16_t pcm[9U * Vocoder::Samples];
     const size_t need = sizeof(pcm) / sizeof(pcm[0]);
     unsigned int index = 0U, frames = 0U;
+    unsigned int underruns = 0U, clipped = 0U;
+    int peak = 0;
+    double energy = 0.0;
     bool ok = true;
 
     /* a call being received is over for us */
@@ -1004,8 +1007,20 @@ void P25Mode::txCall()
         if (got == 0U && last)
             break;
 
+        if (got < need && !last)
+            underruns++;                    /* the microphone did not keep up: the rest of the LDU is silence */
         for (size_t i = got; i < need; i++)
             pcm[i] = 0;
+        for (size_t i = 0U; i < got; i++)
+        {
+            int a = pcm[i] < 0 ? -(int)pcm[i] : (int)pcm[i];
+
+            if (a > peak)
+                peak = a;
+            if (a >= 32767)
+                clipped++;
+            energy += (double)pcm[i] * (double)pcm[i];
+        }
 
         if (!vocoder_.encodeImbeBatch(pcm, 9U, blocks))
         {
@@ -1044,6 +1059,16 @@ void P25Mode::txCall()
 
     hangUntil_ = nowMs() + cfg_.modeHangMs;
     txActive_ = false;
+
+    if (frames > 0U)
+    {
+        /* what the vocoder was given: speech that is too quiet, clipped or full of gaps sounds robotic */
+        double rms = std::sqrt(energy / ((double)frames * (double)need));
+
+        log("TX audio: peak " + std::to_string(peak) + ", rms " + std::to_string((int)rms) + " of 32767, " +
+            std::to_string(clipped) + " clipped samples, " + std::to_string(underruns) + " of " +
+            std::to_string(frames) + " voice frames short of microphone audio");
+    }
 
     info.event = CALL_TX_END;
     info.text = std::to_string(frames) + " voice frames";

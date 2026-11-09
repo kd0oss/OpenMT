@@ -954,7 +954,10 @@ static void testYsfLoopback()
     std::printf("ysf loopback ok\n");
 }
 
-static void testDstarLoopback()
+/* txDelayMs: the length of the alternating bits before the header.  noise: the peak of noise added to the samples (symbol 841), which is what
+   a receiver's discriminator gives; with noise the speech may have bit errors, so only the call is checked.  A long preamble with noise
+   matches the sync within two bit errors now and then; the receiver must not let such a false start swallow the real one. */
+static void testDstarLoopbackWith(unsigned int txDelayMs, int noise, const char* name)
 {
     FakeHost host;
     Recorder rec;
@@ -970,7 +973,7 @@ static void testDstarLoopback()
     s.dstar.callsign        = "KD0OSS";
     s.dstar.ur              = "CQCQCQ";
     s.dstar.message         = "OPENMT RADIO TEST 01";
-    s.dstar.txDelayMs       = 100;
+    s.dstar.txDelayMs       = txDelayMs;
     s.dstar.modeHangMs      = 200;
 
     engine.events.rxAudio = [&rec](const int16_t* p, size_t n)
@@ -1061,6 +1064,22 @@ static void testDstarLoopback()
     std::vector<int16_t> air(2400U, 0);
     air.insert(air.end(), sent.begin(), sent.end());
     air.insert(air.end(), 4800U, 0);
+    if (noise > 0)
+    {
+        uint32_t seed = 12345U;
+
+        for (size_t k = 0U; k < air.size(); k++)
+        {
+            int sum = 0;
+
+            for (int j = 0; j < 4; j++)
+            {
+                seed = seed * 1664525U + 1013904223U;
+                sum += (int)((seed >> 16) & 0xFFFFU) - 32768;
+            }
+            air[k] = (int16_t)(air[k] + (int)((long long)sum * noise / 131072));
+        }
+    }
     host.inject(air);
 
     CHECK(waitFor([&rec]()
@@ -1101,13 +1120,24 @@ static void testDstarLoopback()
 
     std::printf("dstar loopback: sent %zu samples, received %zu speech blocks, %zu of %u identical and in order\n",
                 sent.size(), rxBlocks, inOrder, blocks);
-    CHECK(rxBlocks == blocks, "%zu speech blocks received, %u sent", rxBlocks, blocks);
-    CHECK(inOrder == blocks, "only %zu of %u speech blocks are right", inOrder, blocks);
+    if (noise == 0)
+    {
+        CHECK(rxBlocks == blocks, "%zu speech blocks received, %u sent", rxBlocks, blocks);
+        CHECK(inOrder == blocks, "only %zu of %u speech blocks are right", inOrder, blocks);
+    }
+    else
+        CHECK(rxBlocks + 2U >= blocks && rxBlocks <= blocks, "%zu speech blocks received, %u sent", rxBlocks, blocks);
 
     l.unlock();                         /* the watcher thread of the link may be logging into rec */
     engine.stop();
     CHECK(!engine.running(), "still running");
-    std::printf("dstar loopback ok\n");
+    std::printf("%s ok\n", name);
+}
+
+static void testDstarLoopback()
+{
+    testDstarLoopbackWith(100U, 0, "dstar loopback");
+    testDstarLoopbackWith(600U, 450, "dstar loopback, long preamble and noise");
 }
 
 static void testM17Loopback()

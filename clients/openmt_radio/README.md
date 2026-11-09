@@ -263,3 +263,19 @@ The receiver accepts the base station, mobile and direct mode slot 1 and 2 sync 
 4. Pick the sound card devices, press Connect, then hold Push To Talk (or the space bar, which works wherever the cursor is except in a text or number box). The log is cleared each time you press Connect.
 
 The block layout is detected when connecting; set it by hand only if reception or transmission sounds wrong.
+
+## Monitor tab
+
+The Monitor tab is a virtual service monitor.  From the samples received from Modem_Host it shows the eye diagram, the histogram of
+the symbol values, the deviation of the outer symbols (in Hz and as a share of the mode's nominal), the symbol levels and how much
+they blur into each other, and a spectrum of the demodulated signal.  A clipping warning appears when the samples reach the limit
+of the modem.
+
+With the HackRF bridge it also shows the RF spectrum of the 125 kHz around the channel with a waterfall, the channel power, the
+noise floor, the signal-to-noise ratio, the frequency error of the signal and the overload state of the HackRF's converter.  The
+tab asks the bridge for these over UDP (the "RF spectrum port" setting, default 18050, on the same host as Modem_Host) only while it
+is shown.  The HackRF bridge answers on port 18050 and the SX1255 bridge on 18051 by default: set the port of the modem in use.
+Other modems do not answer and the RF panels stay empty.
+
+The Hz figures assume the modem scales its samples at 0.7 counts per Hz, as the protocol hosts do.  When the levels overlap
+(blur above about 0.25) the deviation is only a rough figure (marked with ~).

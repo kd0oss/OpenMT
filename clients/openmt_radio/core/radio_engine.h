@@ -17,6 +17,8 @@
 #include "fm_mode.h"
 #include "nxdn_mode.h"
 #include "radio_mode.h"
+#include "rf_monitor.h"
+#include "rf_spectrum.h"
 #include "vocoder.h"
 
 namespace openmt
@@ -55,6 +57,7 @@ struct EngineSettings
     int              ambeChunk   = 64;          /* bytes per write to the chip, 0 = whole packet */
     int              ambeGapUs   = 500;         /* pause after each chunk */
     bool             noVocoder   = false;       /* run without a dongle (tests, link checks) */
+    unsigned int     spectrumPort = 18050;      /* UDP port of the HackRF bridge's RF spectrum (on the Modem_Host machine), 0 = do not ask */
     std::string      rxCapture;                 /* file that gets every sample received from Modem_Host (16 bit, 24 kHz), "" = none */
 };
 
@@ -84,6 +87,13 @@ public:
 
     std::string vocoderDescription() const;
 
+    /* The signal monitor: it sees every sample received from Modem_Host (before the receive gain of the mode) and can be asked
+       for an analysis at any time, from any thread */
+    RfMonitor& monitor() { return monitor_; }
+
+    /* The RF spectrum from the HackRF bridge (no frames from any other modem).  It is only asked for while setSpectrumWanted(true) */
+    SpectrumClient& spectrum() { return spectrum_; }
+
     /* The AMBE3000R dongle.  Opening its serial port can reset it (DTR) and it needs seconds to come back, so the port is opened
        once and stays open until closeDongle() or the end of the program, whether the mode that runs uses the dongle or not.
        start() uses the open dongle for the modes that need it (and opens it itself if it is not open); a different device or baud
@@ -104,6 +114,8 @@ private:
     std::string                  dongleDevice_;
     unsigned int                 dongleBaud_;
     std::unique_ptr<RadioMode>   mode_;
+    RfMonitor                    monitor_;
+    SpectrumClient               spectrum_;
     bool                         running_;
     FILE*                        capture_;
 };

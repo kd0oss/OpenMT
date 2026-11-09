@@ -371,6 +371,38 @@ static float p25RfBer(bool isNet)
     return ber;
 }
 
+/*
+ * p25SaveCallEnd()
+ *
+ * Saves the last call and the history record of an RF or network call that
+ * has just ended: callsign with the radio ID as suffix, or the ID alone if
+ * the ID has no callsign.  Every way a call can end uses this, so the
+ * dashboard shows the same for all of them.
+ *
+ * Parameters:
+ *   isNet - true if the call came from the network.
+ *
+ * Returns: nothing.
+ */
+static void p25SaveCallEnd(bool isNet)
+{
+    char tmp[100];
+    const char* cType = isNet ? "NET" : "RF";
+
+    bzero(tmp, sizeof(tmp));
+    sprintf(tmp, "%u", p25srcId);
+    if (strcasecmp(src_callsign, tmp) != 0)
+    {
+        saveLastCall(1, modemName, "P25", cType, src_callsign, tmp, dst_callsign, "", NULL, "", false);
+        saveHistory(modemName, "P25", cType, src_callsign, tmp, dst_callsign, p25RfBer(isNet), "", duration);
+    }
+    else
+    {
+        saveLastCall(1, modemName, "P25", cType, tmp, "", dst_callsign, "", NULL, "", false);
+        saveHistory(modemName, "P25", cType, tmp, "", dst_callsign, p25RfBer(isNet), "", duration);
+    }
+}
+
 /* True while the link control of the call being relayed is known: LDU1 gives
  * the first, LDU2 the second.  A frame is only rebuilt from link control that
  * was decoded in this call, never from an earlier call's. */
@@ -701,8 +733,7 @@ void decodeP25(uint8_t* data, bool isNet)
             }
             pthread_mutex_unlock(&stateMutex);
 
-            saveLastCall(1, modemName, "P25", cType, src_callsign, "", dst_callsign, "", NULL, "", false);
-            saveHistory(modemName, "P25", cType, src_callsign, "", dst_callsign, p25RfBer(isNet), "", duration);
+            p25SaveCallEnd(isNet);
 
             pthread_mutex_lock(&stateMutex);
             rf_state = RS_RF_LISTENING;
@@ -1201,6 +1232,20 @@ void processHdr(q15_t sample)
                 break;
         }
 
+        if (p25duid == P25_DUID_TDU || p25duid == P25_DUID_TDULC)
+        {
+            /* A terminator ends the transmission: back to idle, not on to
+             * following LDUs that will never come (they were decoded from
+             * noise and sent to the host after the EOT) */
+            p25state      = P25RXS_NONE;
+            p25lduEndPtr  = NOENDPTR;
+            p25averagePtr = NOAVEPTR;
+            p25countdown  = 0U;
+            p25maxCorr    = 0;
+            p25duid       = 0U;
+            return;
+        }
+
         p25minSyncPtr = p25lduSyncPtr + P25_LDU_FRAME_LENGTH_SAMPLES - 1U;
         if (p25minSyncPtr >= P25_LDU_FRAME_LENGTH_SAMPLES)
             p25minSyncPtr -= P25_LDU_FRAME_LENGTH_SAMPLES;
@@ -1270,6 +1315,24 @@ void processLdu(q15_t sample)
             p25countdown  = 0U;
             p25maxCorr    = 0;
             p25duid       = 0U;
+
+            /* The terminator was not seen (damaged sync or NID, so it was
+             * taken for another LDU).  Close the call with a rebuilt RF
+             * terminator, as bit mode does, so it is not left open. */
+            uint8_t eot[8U + P25_TERM_FRAME_LENGTH_BYTES];
+
+            memset(eot, 0x00, sizeof(eot));
+            eot[0] = 0x61;
+            eot[1] = 0x00;
+            eot[2] = (uint8_t)sizeof(eot);
+            eot[3] = 0x04;
+            memcpy(eot + 4, "P25E", 4);
+            addSync(eot + 8);
+            encodeNID(eot + 8, P25_DUID_TERM);
+            addBusyBits(eot + 8, P25_TERM_FRAME_LENGTH_BITS, false, true);
+
+            fprintf(stderr, "P25: sync lost, ending call without a terminator\n");
+            decodeFrame(eot, (uint8_t)sizeof(eot), false);
         }
         else
         {
@@ -2014,19 +2077,7 @@ void decodeFrame(uint8_t* buffer, uint8_t length, bool isNet)
             }
 
             duration = difftime(time(NULL), start_time);
-            char tmp[100];
-            bzero(tmp, 100);
-            sprintf(tmp, "%u", p25srcId);
-            if (strcasecmp(src_callsign, tmp) != 0)
-            {
-                saveLastCall(1, modemName, "P25", cType, src_callsign, tmp, dst_callsign, "", NULL, "", false);
-                saveHistory(modemName, "P25", cType, src_callsign, tmp, dst_callsign, p25RfBer(isNet), "", duration);
-            }
-            else
-            {
-                saveLastCall(1, modemName, "P25", cType, tmp, "", dst_callsign, "", NULL, "", false);
-                saveHistory(modemName, "P25", cType, tmp, "", dst_callsign, p25RfBer(isNet), "", duration);
-            }
+            p25SaveCallEnd(isNet);
         }
     }
 }
