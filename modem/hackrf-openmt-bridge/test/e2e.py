@@ -346,10 +346,113 @@ def startup_checks(bridge):
     rc, out = go(["--tx-amplitude", "2"])
     check(rc != 0, "bad --tx-amplitude refused")
 
+def spectrum_checks(bridge):
+    """The RF spectrum server: nothing is sent until a monitor asks; then frames show the channel; overload is flagged."""
+    import socket
+    print("spectrum")
+    d = tempfile.mkdtemp(prefix="hrfe2e")
+    rxf, txf, logf, pty = (os.path.join(d, n) for n in ("rx.cs8", "tx.cs8", "bridge.log", "pty"))
+    A = pattern(4800 * 5, 11)                          # 5 s of 4FSK
+    np.concatenate([fm_iq(A, amp=100, seed=1), fm_iq(A, amp=500, seed=2)]).tofile(rxf)     # then so strong that it clips
+    port = 28052
+    lf = open(logf, "w")
+    p = subprocess.Popen([bridge, "--serial", rxf + "," + txf, "--pty-symlink", pty, "--spectrum-port", str(port),
+                          "--spectrum-bind", "127.0.0.1", "--rx-freq", "434000000"],
+                         stderr=lf, stdout=lf, env=dict(os.environ, HRF_SIM_SPEED="1"))
+    for _ in range(100):
+        if os.path.exists(pty) and "running" in log_text(logf):
+            break
+        time.sleep(0.1)
+    host = Host(pty)                                   # the bridge only runs RX while a host is connected
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(0.2)
+    to = ("127.0.0.1", port)
+
+    def frames(seconds, ask):
+        out = []
+        t_end = time.monotonic() + seconds
+        t_ask = 0.0
+        while time.monotonic() < t_end:
+            if ask and time.monotonic() - t_ask > 1.0:
+                sock.sendto(b"SPEC", to)
+                t_ask = time.monotonic()
+            try:
+                out.append(sock.recv(4096))
+            except socket.timeout:
+                pass
+        return out
+
+    check(len(frames(1.0, False)) == 0, "no frames before a monitor asks")
+    fr = frames(2.0, True)
+    check(len(fr) >= 8, "frames arrive about 8 a second once asked (%d in 2 s)" % len(fr))
+    good = [f for f in fr if len(f) == 20 + 1024 and f[:4] == b"SPEC" and f[4] == 1]
+    check(len(good) == len(fr) and len(fr) > 0, "every frame has the right size, magic and version")
+    if good:
+        f = good[-1]
+        freq, span = struct.unpack("<II", f[8:16])
+        check(freq == 434000000 and span == 125000, "centre %d Hz, span %d Hz" % (freq, span))
+        bins = -0.5 * np.frombuffer(f[20:], np.uint8).astype(float)
+        hz = (np.arange(1024) - 512) * span / 1024.0
+        inband = bins[np.abs(hz) < 6250]
+        far = bins[np.abs(hz) > 30000]
+        chan_db = 10 * np.log10(np.sum(10 ** (inband / 10))) - 1.76          # (the noise bandwidth of the Hann window)
+        print("       channel power %.1f dBFS (signal amplitude 100/128 = -2.1 dBFS), far-out median %.1f dBFS" % (chan_db, np.median(far)))
+        check(abs(chan_db - (-2.1)) < 1.5, "the power of the channel is the power of the signal")
+        check(np.median(far) < chan_db - 40, "the band outside the channel is at least 40 dB lower")
+        check((f[5] & 1) == 0, "no overload flag for a normal signal")
+    # the IQ side channel: asked for on the same port with "IQST"
+    got = []
+    t_end = time.monotonic() + 1.5
+    t_ask = 0.0
+    while time.monotonic() < t_end:
+        if time.monotonic() - t_ask > 1.0:
+            sock.sendto(b"IQST", to)
+            t_ask = time.monotonic()
+        try:
+            g = sock.recv(4096)
+        except socket.timeout:
+            continue
+        if g[:4] == b"IQFR":
+            got.append(g)
+    check(len(got) > 100, "IQ frames arrive once asked (%d in 1.5 s)" % len(got))
+    goodiq = [g for g in got if len(g) == 24 + 4 * 300 and g[4] == 1]
+    check(len(goodiq) == len(got) and len(got) > 0, "every IQ frame has the right size and version")
+    if len(goodiq) > 50:
+        seqs = [struct.unpack("<I", g[16:20])[0] for g in goodiq]
+        check(all(b == a + 1 for a, b in zip(seqs, seqs[1:])), "IQ sequence numbers are consecutive")
+        rate = struct.unpack("<I", goodiq[0][12:16])[0]
+        check(rate == 62500, "IQ sample rate %d" % rate)
+        z = []
+        for g in goodiq:
+            v = np.frombuffer(g[24:], "<i2").astype(float) / (32767.0 * (1 << g[20]))
+            z.append(v[0::2] + 1j * v[1::2])
+        z = np.concatenate(z)
+        fhz = np.angle(z[1:] * np.conj(z[:-1])) * rate / (2 * np.pi)
+        b, a = sps.butter(4, 3500.0 / (rate / 2))          # what a receiver does after the discriminator
+        fhz = sps.filtfilt(b, a, fhz)[500:-500]
+        hi, lo = np.percentile(fhz, 99), np.percentile(fhz, 1)
+        print("       IQ discriminator: high %.0f Hz, low %.0f Hz, mean %.0f Hz (the test signal swings +-%.0f Hz)" % (hi, lo, np.mean(fhz), 3 * DEV_PER_UNIT))
+        check(abs(abs(hi) - 3 * DEV_PER_UNIT) < 0.08 * 3 * DEV_PER_UNIT and abs(abs(lo) - 3 * DEV_PER_UNIT) < 0.08 * 3 * DEV_PER_UNIT,
+              "the deviation read from the IQ is the deviation of the signal (within 8 %)")
+        check(abs(np.mean(fhz)) < 400, "the channel is at the centre of the IQ")
+    fr2 = frames(3.5, True)
+    over = [f for f in fr2 if f[:4] == b"SPEC" and f[5] & 1]
+    overiq = [f for f in fr2 if f[:4] == b"IQFR" and f[5] & 1]
+    check(len(over) > 0 and all(f[16] == 127 for f in over), "the strong signal is flagged as overload (%d frames)" % len(over))
+    check(len(overiq) > 0, "and the IQ frames carry the overload flag too (%d frames)" % len(overiq))
+    host.close()
+    p.send_signal(signal.SIGINT)
+    try:
+        p.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        p.kill()
+    check("no 'failed' in log" and "failed" not in log_text(logf), "no 'failed' in log")
+
 if __name__ == "__main__":
     bridge = sys.argv[1]
     startup_checks(bridge)
     run(bridge)
     tx_edge_cases(bridge)
+    spectrum_checks(bridge)
     print("OVERALL:", "PASSED" if not fails else "FAILED (%d)" % fails)
     sys.exit(1 if fails else 0)

@@ -400,12 +400,16 @@ print_usage(const char *argv0)
         "  --spectrum-port N     UDP port that serves the RF spectrum of the received channel\n"
         "                        to monitors such as OpenMT Radio's Monitor tab (default 18051,\n"
         "                        0 = off).  Frames are only computed and sent while a monitor\n"
-        "                        asks for them.  See tools/rf_spectrum.h for the protocol\n"
+        "                        asks for them.  The same port also serves the IQ of the\n"
+        "                        channel (62.5 kS/s, about 250 KB/s, on request) for the true\n"
+        "                        deviation and the eye of the Monitor tab.  See\n"
+        "                        tools/rf_spectrum.h for the protocol\n"
         "  --spectrum-bind ADDR  IPv4 address it listens on (default: every interface)\n"
         "  --spectrum-flip       turn the frequency axis of the spectrum round.  The spectrum does\n"
         "                        not depend on --rx-invert (measured on a HAT: a signal above the\n"
         "                        RX frequency showed above centre with RX invert on); use this\n"
-        "                        only if yours shows the other way round\n"
+        "                        only if yours shows the other way round (it turns the IQ round\n"
+        "                        as well, so the deviation keeps its sign)\n"
         "  --rx-invert           negate the baseband sign before Q15 conversion\n"
         "                        (this is the default -- see --no-rx-invert).\n"
         "                        Sync correlation can tolerate a polarity flip\n"
@@ -1561,7 +1565,7 @@ rx_thread_main(void *arg)
     {
         if (spec != NULL)
         {
-            log_msg( "bridge: serving the RF spectrum to monitors on UDP port %u\n", a->cfg->spectrum_port);
+            log_msg( "bridge: serving the RF spectrum and the IQ of the channel to monitors on UDP port %u\n", a->cfg->spectrum_port);
         }
         else
         {

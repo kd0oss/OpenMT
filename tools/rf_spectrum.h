@@ -21,6 +21,22 @@
  *   A full scale complex tone (|x| = 1) is 0 dBFS in its bin (the bins are calibrated for tones).  To add the bins of a wider
  *   signal into a power, take 1.76 dB off the sum: the noise bandwidth of the Hann window is 1.5 bins.
  *   Frames are sent about 8 times a second.
+ *
+ * IQ side channel, same socket and port (the narrow band signal itself, for an analysis of the real deviation and the eye)
+ *   request, monitor -> bridge   "IQST"   (4 bytes; repeat at least every 5 s)
+ *   frame,   bridge -> monitor   (about 200 a second)
+ *       0  "IQFR"
+ *       4  u8   version = 1
+ *       5  u8   flags: bit 0 = the converter hit full scale since the last frame
+ *       6  u16  number of complex samples n (300)
+ *       8  u32  centre frequency, Hz
+ *      12  u32  sample rate, Hz (the span / 2: low passed at 22 kHz, the channel at 0 Hz)
+ *      16  u32  sequence number of the frame (a gap = frames lost)
+ *      20  u8   shift: the samples were multiplied by 2^shift before they were made 16 bit (divide it out)
+ *      21  u8   1 = the frequency axis was turned round (RX invert): the samples are the true ones either way
+ *      22  u16  reserved (0)
+ *      24  n x (i16 I, i16 Q), full scale 1.0 = 32767 (before the shift)
+ *   The frequency of the samples is the true one: a positive frequency is above the centre.
  */
 #ifndef HRF_SPECTRUM_H
 #define HRF_SPECTRUM_H
@@ -60,7 +76,7 @@ void rfspec_level(rfspec_t *s, const float complex *iq, size_t n);
    frames is the true one. Call it before rfspec_feed() */
 void rfspec_set_mirror(rfspec_t *s, bool mirror);
 
-/* Baseband samples at span_hz; sends a frame when one is due */
+/* Baseband samples at span_hz; sends a spectrum frame and the IQ frames when they are due.  span_hz must be even (the IQ rate is half of it) */
 void rfspec_feed(rfspec_t *s, const float complex *bb, size_t n);
 
 #ifdef __cplusplus

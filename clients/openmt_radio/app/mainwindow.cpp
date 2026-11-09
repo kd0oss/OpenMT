@@ -486,7 +486,7 @@ void MainWindow::buildUi()
     tabs->setFocusPolicy(Qt::NoFocus);
     tabs->tabBar()->setFocusPolicy(Qt::NoFocus);
     tabs->addTab(central, "Radio");
-    tabs->addTab(new MonitorWidget(&radio_->monitor(), &radio_->spectrum(), tabs), "Monitor");
+    tabs->addTab(new MonitorWidget(&radio_->monitor(), &radio_->spectrum(), &radio_->iq(), tabs), "Monitor");
     setCentralWidget(tabs);
 
     QObject::connect(mode_, SIGNAL(currentIndexChanged(int)), this, SLOT(onModeChanged()));

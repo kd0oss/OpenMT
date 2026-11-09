@@ -57,6 +57,7 @@ add_library(openmt_radio_core STATIC
     core/fm_mode.cpp
     core/codec2_codec.cpp
     core/rf_monitor.cpp
+    core/iq_monitor.cpp
     core/rf_spectrum.cpp
     ${OPENMT_ROOT}/protocols/m17/M17/M17Callsign.cpp
     ${OPENMT_ROOT}/protocols/m17/M17/M17FrameDecoder.cpp
@@ -73,6 +74,8 @@ if (BUILD_TESTS)
     target_link_libraries(spectrum_client_test PRIVATE openmt_radio_core)
     add_executable(monitor_test tests/monitor_test.cpp)
     target_link_libraries(monitor_test PRIVATE openmt_radio_core)
+    add_executable(iq_monitor_test tests/iq_monitor_test.cpp)
+    target_link_libraries(iq_monitor_test PRIVATE openmt_radio_core)
     add_executable(core_test tests/core_test.cpp)
     target_link_libraries(core_test PRIVATE openmt_radio_core)
     add_executable(dmr_interop_tool tests/dmr_interop_tool.cpp ${OPENMT_ROOT}/tools/test/sim_common.c)
@@ -91,6 +94,7 @@ if (BUILD_TESTS)
     enable_testing()
     add_test(NAME core_test COMMAND core_test)
     add_test(NAME monitor_test COMMAND monitor_test)
+    add_test(NAME iq_monitor_test COMMAND iq_monitor_test)
     add_test(NAME spectrum_client_test COMMAND spectrum_client_test)
 endif()
 

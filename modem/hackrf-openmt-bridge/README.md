@@ -243,3 +243,27 @@ log line `bridge: RX gains lna=.. vga=..` at start and `settings changed -- ... 
 the values in use. If the gains are at 0 and it still clips, the signal is simply too strong for a receiver
 this close to a transmitter: move the antenna away or put an attenuator in line. Do not put the HackRF
 on a transmitter's antenna connector.
+
+## RF spectrum for monitors
+
+The bridge can serve the spectrum of the received channel to a monitor program, for example the Monitor tab of OpenMT Radio.
+It is a side channel over UDP and does not touch Modem_Host or the other services.  The server is `tools/rf_spectrum.c`, shared with the SX1255 bridge (which uses port 18051 by default).  On this bridge the frequency axis is turned round when RX invert is on, because that is what negating the demodulated signal does (the HackRF's I/Q has the ordinary convention).  The SX1255 bridge does not do that: its spectrum is not tied to RX invert (`--spectrum-flip` turns it round).
+
+- `--spectrum-port N` (default 18050, 0 = off) and `--spectrum-bind ADDR` (default: all interfaces).
+- A monitor sends the 4 bytes `SPEC` at least every 5 seconds; the bridge answers with about 8 frames a second of 1024 bins over
+  the 125 kHz around the channel, plus the HackRF's converter state (peak, share of samples at full scale, overload flag).
+  Nothing is computed or sent while no monitor asks.
+- The frame layout is described in `tools/rf_spectrum.h`.  The spectrum is that of the baseband the DSP chain sees (the channel
+  shifted to 0 Hz, 125 kHz wide), not of the full 2 MHz the HackRF receives.
+- The port has no password: it only gives out the spectrum, but bind it to a trusted address (`--spectrum-bind`) on an exposed network.
+- Tests: `test_spectrum` and `test_iq` (the server alone) and `test/e2e.py` (the bridge with the software HackRF).
+
+### IQ of the channel
+
+On the same port the monitor can ask for the channel itself with the request `IQST` (every second, like `SPEC`): the 125 kS/s
+baseband is low passed at 22 kHz and decimated by 2, and sent as about 200 datagrams a second of 300 complex 16 bit samples
+(62.5 kS/s, about 250 KB/s, only while a monitor asks).  Each frame has a gain shift (a weak signal is scaled up before it is made
+16 bit; the monitor divides it out), a sequence number so losses show, and the converter's overload flag.  The frequency axis is the
+true one (RX invert is taken out, as for the spectrum).  The layout is in `tools/rf_spectrum.h`.  OpenMT Radio's Monitor tab uses
+it for the true deviation in Hz, the carrier's frequency error and an eye diagram at 13 samples a symbol.  The SX1255 bridge serves
+the same, from the same code.

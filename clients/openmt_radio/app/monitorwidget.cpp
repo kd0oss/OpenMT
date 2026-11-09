@@ -1,26 +1,72 @@
 #include "monitorwidget.h"
 
+#include <QComboBox>
 #include <QImage>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPen>
+#include <QResizeEvent>
+#include <QSettings>
 #include <QTimer>
 
 #include <algorithm>
 #include <cmath>
 
-MonitorWidget::MonitorWidget(openmt::RfMonitor* monitor, openmt::SpectrumClient* spectrum, QWidget* parent) :
+MonitorWidget::MonitorWidget(openmt::RfMonitor* monitor, openmt::SpectrumClient* spectrum, openmt::IqMonitor* iq, QWidget* parent) :
     QWidget(parent),
     monitor_(monitor),
     spectrum_(spectrum),
+    iq_(iq),
+    source_(new QComboBox(this)),
     snap_(),
     rf_(),
-    timer_(new QTimer(this))
+    timer_(new QTimer(this)),
+    iqAvailable_(false)
 {
     timer_->setInterval(150);
     QObject::connect(timer_, SIGNAL(timeout()), this, SLOT(refresh()));
     setAutoFillBackground(true);
     setFocusPolicy(Qt::NoFocus);                /* the space bar is the push to talk key */
+
+    source_->addItem("Source: automatic");
+    source_->addItem("Source: modem samples");
+    source_->addItem("Source: IQ from the bridge");
+    source_->setFocusPolicy(Qt::NoFocus);
+    source_->setToolTip("IQ: the true signal from the HackRF or SX1255 bridge (real deviation in Hz and the frequency error).\n"
+                        "Modem samples: what the decoder sees (assumes 0.7 counts per Hz).\n"
+                        "Automatic: the IQ when the bridge sends it and there is a signal in it.");
+    {
+        QSettings settings("OpenMT", "OpenMT Radio");
+
+        source_->setCurrentIndex(std::max(0, std::min(2, settings.value("monitorSource", 0).toInt())));
+    }
+    if (iq_ == nullptr || spectrum_ == nullptr)
+    {
+        source_->setCurrentIndex(1);
+        source_->setEnabled(false);
+    }
+    QObject::connect(source_, SIGNAL(currentIndexChanged(int)), this, SLOT(sourceChanged()));
+}
+
+void MonitorWidget::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    source_->setGeometry(width() - 8 - 4 - 230, 8 + 3, 230, 22);
+}
+
+/* asks the bridge for the IQ only while it is used (it is about 250 KB/s) */
+void MonitorWidget::applySource()
+{
+    if (spectrum_ != nullptr)
+        spectrum_->setIqWanted(isVisible() && iq_ != nullptr && source_->currentIndex() != 1);
+}
+
+void MonitorWidget::sourceChanged()
+{
+    QSettings settings("OpenMT", "OpenMT Radio");
+
+    settings.setValue("monitorSource", source_->currentIndex());
+    applySource();
 }
 
 QSize MonitorWidget::minimumSizeHint() const
@@ -34,19 +80,35 @@ void MonitorWidget::showEvent(QShowEvent* event)
     if (spectrum_ != nullptr)
         spectrum_->setWanted(true);                 /* the HackRF bridge only computes the spectrum while it is asked */
     timer_->start();
+    applySource();
 }
 
 void MonitorWidget::hideEvent(QHideEvent* event)
 {
     timer_->stop();
     if (spectrum_ != nullptr)
+    {
         spectrum_->setWanted(false);
+        spectrum_->setIqWanted(false);
+    }
     QWidget::hideEvent(event);
 }
 
 void MonitorWidget::refresh()
 {
+    const int choice = source_->currentIndex();      /* 0 automatic, 1 modem samples, 2 IQ */
+
+    applySource();                                   /* the radio may have been connected after the tab was shown */
+
     snap_ = monitor_->snapshot();
+    iqAvailable_ = iq_ != nullptr && iq_->available();
+    if (iq_ != nullptr && choice != 1)
+    {
+        openmt::MonitorSnapshot q = iq_->snapshot();
+
+        if (choice == 2 || (iqAvailable_ && q.active))
+            snap_ = q;
+    }
     if (spectrum_ != nullptr)
         rf_ = spectrum_->snapshot();
     update();
@@ -129,7 +191,11 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
         QString state;
         QColor col(200, 200, 200);
 
-        if (s.samples == 0U)
+        if (s.samples == 0U && s.fromIq)
+        {
+            state = "no IQ yet: only the HackRF and SX1255 bridges send it (the RF spectrum port is the one that is asked)";
+        }
+        else if (s.samples == 0U)
         {
             state = "no samples yet: connect to a modem";
         }
@@ -148,6 +214,18 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
             col = QColor(120, 220, 120);
         }
 
+        if (s.samples > 0U && s.active)
+        {
+            if (s.fromIq)
+                state += QString("   [IQ from the bridge, %1 frames, %2 lost%3]").arg(s.iqFrames).arg(s.iqLost)
+                             .arg(s.iqOverload ? ", CONVERTER OVERLOAD" : "");
+            else
+                state += source_->currentIndex() != 1 && !iqAvailable_
+                             ? "   [modem samples; no IQ from the bridge: is it the new build, and is the RF spectrum port the bridge's?]"
+                             : "   [modem samples]";
+            if (s.syncLocked)
+                state += QString("   frame syncs found: %1%2").arg(s.syncHits).arg(s.inverted ? " (signal inverted)" : "");
+        }
         p.setPen(col);
         p.drawText(readout.adjusted(6, 22, -6, 0), Qt::AlignTop | Qt::AlignLeft, state);
         p.setPen(QColor(220, 225, 230));
@@ -158,12 +236,14 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
 
         if (s.levelsValid)
         {
-            l2 = QString("%1 deviation of the outer symbols: %2 Hz = %3% of nominal%4  (nominal %5 Hz)")
+            l2 = QString("%1 deviation of the outer symbols: %2 Hz = %3% of nominal%4  (nominal %5 Hz)%6")
                      .arg(s.approximate ? "~" : "=")
                      .arg(s.outerHz, 0, 'f', 0)
                      .arg(s.outerPercent, 0, 'f', 0)
                      .arg(s.approximate ? ", rough: the levels overlap" : "")
-                     .arg(s.nominalHz, 0, 'f', 0);
+                     .arg(s.nominalHz, 0, 'f', 0)
+                     .arg(s.syncLocked ? (s.fromIq ? "   exact, from the frame syncs, in real Hz" : "   exact, from the frame syncs (at 0.7 counts per Hz)")
+                                       : (s.fromIq ? "   in real Hz" : ""));
             if (s.symbolLevels == 4U)
                 l3 = QString("levels (counts): %1  %2  %3  %4    offset %5    spread %6    blur %7")
                          .arg(s.levels[0], 0, 'f', 0).arg(s.levels[1], 0, 'f', 0).arg(s.levels[2], 0, 'f', 0).arg(s.levels[3], 0, 'f', 0)
@@ -177,6 +257,8 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
         {
             l2 = "this mode has no symbols: only the spectrum is shown";
         }
+        if (s.levelsValid && s.fromIq)
+            l3 += QString("    frequency error %1 Hz").arg(s.centre / openmt::RfMonitor::COUNTS_PER_HZ, 0, 'f', 0);
         p.drawText(readout.adjusted(6, 40, -6, 0), Qt::AlignTop | Qt::AlignLeft, l1);
         p.drawText(readout.adjusted(6, 56, -6, 0), Qt::AlignTop | Qt::AlignLeft, l2);
         p.drawText(readout.adjusted(6, 72, -6, 0), Qt::AlignTop | Qt::AlignLeft, l3);

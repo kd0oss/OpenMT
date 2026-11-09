@@ -1,5 +1,6 @@
 /* Tests of the RF spectrum client: frames of the bridge's protocol, parsed and measured; a fake bridge answers requests. */
 
+#include "iq_monitor.h"
 #include "rf_spectrum.h"
 
 #include <arpa/inet.h>
@@ -133,6 +134,84 @@ int main()
         int before = requests;
         usleep(2500000);
         check(requests == before, "it stops asking when the tab is hidden");
+        c.stop();
+        stop = true;
+        server.join();
+        close(fd);
+    }
+    {
+        /* a fake bridge that serves IQ: "IQST" starts frames, and the client hands them to the IQ monitor */
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        struct sockaddr_in a;
+        std::memset(&a, 0, sizeof(a));
+        a.sin_family = AF_INET;
+        a.sin_port = htons(28062);
+        inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+        bind(fd, (struct sockaddr*)&a, sizeof(a));
+        struct timeval tv = {0, 5000};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        std::atomic<bool> stop(false);
+        std::atomic<int> iqRequests(0);
+        std::atomic<int> specRequests(0);
+        std::thread server([&]()
+        {
+            struct sockaddr_in peer;
+            socklen_t pl = sizeof(peer);
+            bool have = false;
+            uint32_t seq = 0U;
+            long long last = 0;
+            while (!stop)
+            {
+                char buf[16];
+                ssize_t r = recvfrom(fd, buf, sizeof(buf), 0, (struct sockaddr*)&peer, &pl);
+                if (r >= 4 && std::memcmp(buf, "IQST", 4) == 0)
+                {
+                    iqRequests++;
+                    have = true;
+                    last = 0;
+                }
+                if (r >= 4 && std::memcmp(buf, "SPEC", 4) == 0)
+                    specRequests++;
+                if (have)
+                {
+                    uint8_t f[24 + 4 * 300];
+                    std::memset(f, 0, sizeof(f));
+                    std::memcpy(f, "IQFR", 4);
+                    f[4] = 1;
+                    f[6] = 300 & 0xFF;
+                    f[7] = 300 >> 8;
+                    f[12] = 0x24; f[13] = 0xF4;                 /* 62500 */
+                    f[16] = (uint8_t)(seq & 0xFF); f[17] = (uint8_t)((seq >> 8) & 0xFF);
+                    seq++;
+                    for (int k = 0; k < 300; k++)
+                    {
+                        int16_t re = (int16_t)(10000 * std::cos(0.1 * k)), im = (int16_t)(10000 * std::sin(0.1 * k));
+                        std::memcpy(f + 24 + 4 * k, &re, 2);
+                        std::memcpy(f + 26 + 4 * k, &im, 2);
+                    }
+                    sendto(fd, f, sizeof(f), 0, (struct sockaddr*)&peer, pl);
+                    usleep(4000);
+                    (void)last;
+                }
+            }
+        });
+
+        SpectrumClient c;
+        IqMonitor iq;
+        std::string err;
+        c.setIqSink(&iq);
+        check(c.start("127.0.0.1", 28062, err), "the IQ client starts");
+        usleep(1300000);
+        check(iqRequests == 0 && !iq.available(), "no IQ is asked for until it is wanted");
+        c.setIqWanted(true);
+        usleep(2500000);
+        check(iqRequests >= 2 && iqRequests <= 4, "IQ is asked for about once a second");
+        check(iq.available() && iq.framesReceived() > 100UL, "the IQ frames reach the IQ monitor");
+        check(specRequests == 0, "and no spectrum is asked for while only IQ is wanted");
+        c.setIqWanted(false);
+        int before = iqRequests;
+        usleep(2500000);
+        check(iqRequests == before, "it stops asking for IQ when it is not wanted");
         c.stop();
         stop = true;
         server.join();

@@ -271,6 +271,21 @@ the symbol values, the deviation of the outer symbols (in Hz and as a share of t
 they blur into each other, and a spectrum of the demodulated signal.  A clipping warning appears when the samples reach the limit
 of the modem.
 
+**Source of the eye and the deviation.**  The box at the top right of the Monitor tab chooses where the eye, the histogram, the
+levels and the deviation come from:
+
+- *IQ from the bridge*: the HackRF and SX1255 bridges can send the received channel itself.  The radio demodulates it on its own, so
+  the deviation is in real Hz (no assumption about the modem's scaling), the carrier's frequency error is shown, and the eye has
+  13 samples a symbol.  It is the transmitter that is measured, like a service monitor does.  Only these two bridges send IQ.
+- *Modem samples*: what Modem_Host delivers, i.e. what the decoder sees (0.7 counts per Hz).  Works with every modem.
+- *Automatic* (default): the IQ when the bridge sends it and there is a signal in it, otherwise the modem samples.
+
+For P25 and DMR the monitor also looks for the frame syncs.  The sync symbols are all +3 or -3, so their mean is the outer level
+without the bias that noise puts on a blind reading: with syncs found the deviation is exact (the readout says so and how many syncs
+were found) and an inverted transmitter is recognised.  A reading needs a few syncs (P25 sends about 5 a second), so it settles
+after a moment and jumps a little with weak signals.  Without syncs (other modes, or none in the last half second) the deviation is
+the earlier blind estimate and is marked rough when the levels overlap.
+
 With the HackRF bridge it also shows the RF spectrum of the 125 kHz around the channel with a waterfall, the channel power, the
 noise floor, the signal-to-noise ratio, the frequency error of the signal and the overload state of the HackRF's converter.  The
 tab asks the bridge for these over UDP (the "RF spectrum port" setting, default 18050, on the same host as Modem_Host) only while it

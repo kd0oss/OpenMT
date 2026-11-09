@@ -16,6 +16,11 @@
 #define FRAME_EVERY_MS 125LL
 #define HEADER_BYTES  20U
 
+#define IQ_HEADER_BYTES 24U
+#define IQ_BLOCK       300U             /* complex samples per datagram: 24 + 4 * 300 = 1224 bytes */
+#define IQ_TAPS        63U              /* low pass before the decimation by 2 */
+#define IQ_CUTOFF_HZ   22000.0
+
 typedef struct
 {
     struct sockaddr_in addr;
@@ -38,6 +43,19 @@ struct hrf_spec
     unsigned int  frames;
     long long     last_send_ms;
     bool          active;
+
+    /* IQ side channel */
+    sub_t         iq_sub[MAX_SUBS];
+    bool          iq_active;
+    bool          spec_active;
+    float         iq_taps[IQ_TAPS];
+    float complex iq_hist[IQ_TAPS];
+    size_t        iq_pos;
+    unsigned int  iq_phase;
+    float complex iq_out[IQ_BLOCK];
+    size_t        iq_fill;
+    uint32_t      iq_seq;
+    bool          iq_clip;
 
     bool          mirror;
     int           adc_peak;
@@ -146,6 +164,27 @@ rfspec_create(uint16_t port, const char *bind_addr, uint32_t span_hz)
         s->window[i] = 0.5f - 0.5f * cosf(2.0f * (float)M_PI * (float)i / (float)(RFSPEC_BINS - 1U));
         s->window_sum += s->window[i];
     }
+    {
+        /* Blackman windowed sinc, unity gain at DC */
+        double fc = IQ_CUTOFF_HZ / (double)span_hz;
+        double sum = 0.0;
+        const double mid = (double)(IQ_TAPS - 1U) / 2.0;
+
+        for (i = 0; i < IQ_TAPS; i++)
+        {
+            double x = (double)i - mid;
+            double h = (x == 0.0) ? 2.0 * fc : sin(2.0 * M_PI * fc * x) / (M_PI * x);
+            double w = 0.42 - 0.5 * cos(2.0 * M_PI * (double)i / (double)(IQ_TAPS - 1U)) +
+                       0.08 * cos(4.0 * M_PI * (double)i / (double)(IQ_TAPS - 1U));
+
+            s->iq_taps[i] = (float)(h * w);
+            sum += h * w;
+        }
+        for (i = 0; i < IQ_TAPS; i++)
+        {
+            s->iq_taps[i] = (float)((double)s->iq_taps[i] / sum);
+        }
+    }
     return s;
 }
 
@@ -192,13 +231,14 @@ rfspec_poll(rfspec_t *s)
         {
             break;
         }
-        if (r >= 4 && memcmp(req, "SPEC", 4) == 0)
+        if (r >= 4 && (memcmp(req, "SPEC", 4) == 0 || memcmp(req, "IQST", 4) == 0))
         {
+            sub_t *list = memcmp(req, "IQST", 4) == 0 ? s->iq_sub : s->sub;
             int slot = -1;
 
             for (i = 0; i < MAX_SUBS; i++)
             {
-                if (s->sub[i].used && s->sub[i].addr.sin_addr.s_addr == from.sin_addr.s_addr && s->sub[i].addr.sin_port == from.sin_port)
+                if (list[i].used && list[i].addr.sin_addr.s_addr == from.sin_addr.s_addr && list[i].addr.sin_port == from.sin_port)
                 {
                     slot = i;
                     break;
@@ -206,33 +246,50 @@ rfspec_poll(rfspec_t *s)
             }
             for (i = 0; slot < 0 && i < MAX_SUBS; i++)
             {
-                if (!s->sub[i].used)
+                if (!list[i].used)
                 {
                     slot = i;
                 }
             }
             if (slot >= 0)
             {
-                s->sub[slot].addr = from;
-                s->sub[slot].last_ms = now;
-                s->sub[slot].used = true;
+                list[slot].addr = from;
+                list[slot].last_ms = now;
+                list[slot].used = true;
             }
         }
     }
-    for (i = 0; i < MAX_SUBS; i++)
     {
-        if (s->sub[i].used && now - s->sub[i].last_ms > SUB_TIMEOUT_MS)
+        bool spec_any = false;
+        bool iq_any = false;
+
+        for (i = 0; i < MAX_SUBS; i++)
         {
-            s->sub[i].used = false;
+            if (s->sub[i].used && now - s->sub[i].last_ms > SUB_TIMEOUT_MS)
+            {
+                s->sub[i].used = false;
+            }
+            if (s->iq_sub[i].used && now - s->iq_sub[i].last_ms > SUB_TIMEOUT_MS)
+            {
+                s->iq_sub[i].used = false;
+            }
+            spec_any = spec_any || s->sub[i].used;
+            iq_any = iq_any || s->iq_sub[i].used;
         }
-        if (s->sub[i].used)
+        if (!iq_any && s->iq_active)
         {
-            any = true;
+            s->iq_fill = 0;
+            s->iq_phase = 0;
+            s->iq_pos = 0;
+            memset(s->iq_hist, 0, sizeof(s->iq_hist));
         }
+        s->spec_active = spec_any;
+        s->iq_active = iq_any;
+        any = spec_any || iq_any;
     }
-    if (!any && s->active)
+    if (!s->spec_active && s->active)
     {
-        /* the last monitor has gone: drop what was collected */
+        /* the last spectrum monitor has gone: drop what was collected */
         s->fill = 0;
         s->frames = 0;
         memset(s->power, 0, sizeof(s->power));
@@ -265,6 +322,7 @@ rfspec_adc(rfspec_t *s, const int8_t *iq, size_t n_bytes)
         if (av >= 127)
         {
             s->adc_clip++;
+            s->iq_clip = true;
         }
     }
     s->adc_n += n_bytes;
@@ -297,6 +355,7 @@ rfspec_level(rfspec_t *s, const float complex *iq, size_t n)
         if (a >= 0.99f)
         {
             s->adc_clip++;
+            s->iq_clip = true;
         }
     }
     s->adc_n += 2 * n;
@@ -378,12 +437,115 @@ send_frame(rfspec_t *s)
     s->adc_clip = 0;
 }
 
+static void
+put_iq_frame(rfspec_t *s)
+{
+    uint8_t out[IQ_HEADER_BYTES + 4U * IQ_BLOCK];
+    float peak = 0.0f;
+    unsigned int shift = 0;
+    size_t k;
+    int i;
+
+    for (k = 0; k < IQ_BLOCK; k++)
+    {
+        float a = fabsf(crealf(s->iq_out[k]));
+        float b = fabsf(cimagf(s->iq_out[k]));
+
+        if (a > peak)
+        {
+            peak = a;
+        }
+        if (b > peak)
+        {
+            peak = b;
+        }
+    }
+    /* scale up so the largest sample lands near 3/4 of the 16 bit range: the signal is often far below full scale */
+    while (shift < 15U && peak * (float)(1U << (shift + 1U)) * 32767.0f <= 24000.0f)
+    {
+        shift++;
+    }
+    memcpy(out, "IQFR", 4);
+    out[4] = 1;
+    out[5] = s->iq_clip ? 1 : 0;
+    put16(out + 6, (uint16_t)IQ_BLOCK);
+    put32(out + 8, s->centre_hz);
+    put32(out + 12, s->span_hz / 2U);
+    put32(out + 16, s->iq_seq++);
+    out[20] = (uint8_t)shift;
+    out[21] = s->mirror ? 1 : 0;
+    put16(out + 22, 0);
+    for (k = 0; k < IQ_BLOCK; k++)
+    {
+        float scale = 32767.0f * (float)(1U << shift);
+        float re = crealf(s->iq_out[k]) * scale;
+        float im = cimagf(s->iq_out[k]) * scale;
+
+        if (s->mirror)
+        {
+            im = -im;                       /* f -> -f, the same turn as the spectrum's */
+        }
+        re = re > 32767.0f ? 32767.0f : (re < -32767.0f ? -32767.0f : re);
+        im = im > 32767.0f ? 32767.0f : (im < -32767.0f ? -32767.0f : im);
+        put16(out + IQ_HEADER_BYTES + 4U * k, (uint16_t)(int16_t)lroundf(re));
+        put16(out + IQ_HEADER_BYTES + 4U * k + 2U, (uint16_t)(int16_t)lroundf(im));
+    }
+    for (i = 0; i < MAX_SUBS; i++)
+    {
+        if (s->iq_sub[i].used)
+        {
+            (void)sendto(s->fd, out, sizeof(out), MSG_DONTWAIT, (const struct sockaddr *)&s->iq_sub[i].addr, sizeof(s->iq_sub[i].addr));
+        }
+    }
+    s->iq_clip = false;
+}
+
+/* low pass and decimate by 2: the channel at 0 Hz, span/2 samples a second */
+static void
+iq_feed(rfspec_t *s, const float complex *bb, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+    {
+        s->iq_hist[s->iq_pos] = bb[i];
+        s->iq_pos = (s->iq_pos + 1U) % IQ_TAPS;
+        s->iq_phase ^= 1U;
+        if (s->iq_phase == 0U)
+        {
+            float complex acc = 0.0f;
+            size_t k;
+            size_t idx = s->iq_pos;                 /* the oldest sample */
+
+            for (k = 0; k < IQ_TAPS; k++)
+            {
+                acc += s->iq_hist[idx] * s->iq_taps[IQ_TAPS - 1U - k];
+                idx = (idx + 1U) % IQ_TAPS;
+            }
+            s->iq_out[s->iq_fill++] = acc;
+            if (s->iq_fill == IQ_BLOCK)
+            {
+                put_iq_frame(s);
+                s->iq_fill = 0;
+            }
+        }
+    }
+}
+
 void
 rfspec_feed(rfspec_t *s, const float complex *bb, size_t n)
 {
     size_t i;
 
     if (s == NULL || !s->active)
+    {
+        return;
+    }
+    if (s->iq_active)
+    {
+        iq_feed(s, bb, n);
+    }
+    if (!s->spec_active)
     {
         return;
     }

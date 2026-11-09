@@ -26,6 +26,7 @@ option(HRF_DB "Read the settings from the OpenMT config database" ON)
 add_executable(bridge
     app/bridge.c
     app/hrf_db.c
+    ../../tools/rf_spectrum.c
     dsp/dsp.c
     dsp/hrf_frontend.c
 )
@@ -66,8 +67,19 @@ add_executable(test_frontend test/test_frontend.c dsp/hrf_frontend.c)
 target_include_directories(test_frontend PRIVATE dsp)
 target_link_libraries(test_frontend PRIVATE m)
 
-set_target_properties(bridge test_frontend PROPERTIES
+# Unit test of the RF spectrum server (UDP on localhost, no hardware needed).
+add_executable(test_spectrum test/test_spectrum.c ../../tools/rf_spectrum.c)
+target_include_directories(test_spectrum PRIVATE ../../tools)
+target_link_libraries(test_spectrum PRIVATE m)
+
+add_executable(test_iq test/test_iq.c ../../tools/rf_spectrum.c)
+target_include_directories(test_iq PRIVATE ../../tools)
+target_link_libraries(test_iq PRIVATE m)
+
+set_target_properties(bridge test_frontend test_spectrum test_iq PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 
 enable_testing()
 add_test(NAME frontend COMMAND test_frontend)
+add_test(NAME spectrum COMMAND test_spectrum)
+add_test(NAME iq COMMAND test_iq)

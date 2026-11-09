@@ -24,6 +24,7 @@ public:
     QString vocoderDescription() const;
     openmt::RfMonitor& monitor() { return engine_.monitor(); }
     openmt::SpectrumClient& spectrum() { return engine_.spectrum(); }
+    openmt::IqMonitor& iq() { return engine_.iq(); }
 
     void ptt(bool down);
     bool releaseModem();

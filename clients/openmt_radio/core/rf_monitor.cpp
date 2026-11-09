@@ -23,17 +23,19 @@ RfMonitor::RfMonitor() :
     total_(0U),
     baud_(4800.0),
     levels_(4U),
-    nominal_(0.0)
+    nominal_(0.0),
+    sync_(SyncKind::None)
 {
 }
 
-void RfMonitor::configure(double baud, unsigned symbolLevels, double nominalOuter)
+void RfMonitor::configure(double baud, unsigned symbolLevels, double nominalOuter, SyncKind sync)
 {
     std::lock_guard<std::mutex> lock(mutex_);
 
     baud_    = baud;
     levels_  = symbolLevels;
     nominal_ = nominalOuter;
+    sync_    = sync;
 }
 
 void RfMonitor::reset()
@@ -157,6 +159,7 @@ MonitorSnapshot RfMonitor::snapshot()
     double baud;
     unsigned levels;
     double nominal;
+    SyncKind sync;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -167,6 +170,7 @@ MonitorSnapshot RfMonitor::snapshot()
         baud      = baud_;
         levels    = levels_;
         nominal   = nominal_;
+        sync      = sync_;
     }
 
     s.baud         = baud;
@@ -216,11 +220,55 @@ MonitorSnapshot RfMonitor::snapshot()
     if (baud <= 0.0 || levels < 2U || !s.active)
         return s;
 
-    const double sps = RATE / baud;
-    const size_t nSym = (size_t)((double)N / sps) - 4U;
+    analyse(w, RATE, baud, levels, nominal, sync, s);
+    return s;
+}
+
+/* The sync patterns as symbol values (+3, +1, -1, -3): dibit 01 = +3, 00 = +1, 10 = -1, 11 = -3 */
+static std::vector<std::vector<int>> syncPatterns(SyncKind kind)
+{
+    std::vector<uint64_t> words;
+
+    if (kind == SyncKind::P25)
+        words.push_back(0x5575F5FF77FFULL);
+    else if (kind == SyncKind::DMR)
+    {
+        words.push_back(0x755FD7DF75F7ULL);     /* base station voice */
+        words.push_back(0xDFF57D75DF5DULL);     /* base station data */
+        words.push_back(0x7F7D5DD57DFDULL);     /* mobile voice */
+        words.push_back(0xD5D7F77FD757ULL);     /* mobile data */
+    }
+
+    std::vector<std::vector<int>> out;
+
+    for (size_t w = 0U; w < words.size(); w++)
+    {
+        std::vector<int> p;
+
+        for (int i = 23; i >= 0; i--)
+        {
+            unsigned d = (unsigned)((words[w] >> (2 * i)) & 3U);
+
+            p.push_back(d == 1U ? 3 : (d == 0U ? 1 : (d == 2U ? -1 : -3)));
+        }
+        out.push_back(p);
+    }
+    return out;
+}
+
+void RfMonitor::analyse(const std::vector<double>& w, double rate, double baud, unsigned levels, double nominal, SyncKind syncKind,
+                        MonitorSnapshot& s)
+{
+    if (baud <= 0.0 || levels < 2U)
+        return;
+
+    const double sps = rate / baud;
+    if ((double)w.size() / sps < 4.0 + (double)MIN_SYMBOLS)
+        return;
+    const size_t nSym = (size_t)((double)w.size() / sps) - 4U;
 
     if (nSym < MIN_SYMBOLS)
-        return s;
+        return;
 
     /* the sampling instant: the offset within a symbol where the samples are, on average, furthest from zero (at the symbol
        centres the signal sits on its levels, between them it moves from one to the next) */
@@ -309,7 +357,157 @@ MonitorSnapshot RfMonitor::snapshot()
 
     s.blur = gap > 0.0 ? sdMean / gap : 0.0;
     s.approximate = s.blur > 0.25;
-    return s;
+
+    /* with the frame syncs found the outer levels are known exactly: the sync symbols are all +3 or -3, so the mean of the samples
+       at them is the level, whatever the noise (the blind k-means above is pulled outwards by the noise) */
+    std::vector<std::vector<int>> patterns = syncPatterns(syncKind);
+
+    if (patterns.empty() || levels != 4U)
+        return;
+
+    const size_t L = 24U;
+    double mean = 0.0;
+
+    for (size_t i = 0U; i < sym.size(); i++)
+        mean += sym[i];
+    mean /= (double)sym.size();
+
+    std::vector<size_t> hitAt;          /* the start of each sync */
+    std::vector<int>    hitSign;        /* +1 normal, -1 upside down */
+    std::vector<const std::vector<int>*> hitPat;
+
+    for (size_t k = 0U; k + L <= sym.size(); k++)
+    {
+        double sSq = 0.0;
+
+        for (size_t i = 0U; i < L; i++)
+            sSq += (sym[k + i] - mean) * (sym[k + i] - mean);
+        if (sSq <= 0.0)
+            continue;
+
+        for (size_t p = 0U; p < patterns.size(); p++)
+        {
+            double dot = 0.0;
+
+            for (size_t i = 0U; i < L; i++)
+                dot += (sym[k + i] - mean) * (double)patterns[p][i];
+
+            double r = dot / std::sqrt(sSq * 9.0 * (double)L);
+
+            if (std::fabs(r) > 0.93)
+            {
+                hitAt.push_back(k);
+                hitSign.push_back(r > 0.0 ? 1 : -1);
+                hitPat.push_back(&patterns[p]);
+                k += L - 1U;            /* no overlapping syncs */
+                break;
+            }
+        }
+    }
+    if (hitAt.size() < 2U)
+        return;
+
+    int votes = 0;
+
+    for (size_t h = 0U; h < hitSign.size(); h++)
+        votes += hitSign[h];
+
+    const int pol = votes >= 0 ? 1 : -1;
+    double hiSum = 0.0, loSum = 0.0;
+    size_t hiN = 0U, loN = 0U;
+
+    for (size_t h = 0U; h < hitAt.size(); h++)
+    {
+        if (hitSign[h] != pol)
+            continue;
+        for (size_t i = 0U; i < L; i++)
+        {
+            if ((*hitPat[h])[i] * pol > 0)
+            {
+                hiSum += sym[hitAt[h] + i];
+                hiN++;
+            }
+            else
+            {
+                loSum += sym[hitAt[h] + i];
+                loN++;
+            }
+        }
+    }
+    if (hiN < 8U || loN < 8U)
+        return;
+
+    const double hiMean = hiSum / (double)hiN;
+    const double loMean = loSum / (double)loN;
+    const double centre = (hiMean + loMean) / 2.0;
+    const double outer  = (hiMean - loMean) / 2.0;
+
+    if (outer <= 0.0)
+        return;
+
+    /* the spread of the outer levels at the syncs, and the inner levels from the rest of the symbols cut at the middles */
+    double sq = 0.0;
+
+    for (size_t h = 0U; h < hitAt.size(); h++)
+    {
+        if (hitSign[h] != pol)
+            continue;
+        for (size_t i = 0U; i < L; i++)
+        {
+            double ref = (*hitPat[h])[i] * pol > 0 ? hiMean : loMean;
+
+            sq += (sym[hitAt[h] + i] - ref) * (sym[hitAt[h] + i] - ref);
+        }
+    }
+
+    const double sdOuter = std::sqrt(sq / (double)(hiN + loN));
+    double inSum[2] = {0.0, 0.0}, inSq[2] = {0.0, 0.0};
+    size_t inN[2] = {0U, 0U};
+
+    for (size_t i = 0U; i < sym.size(); i++)
+    {
+        double v = sym[i] - centre;
+
+        if (std::fabs(v) < 2.0 * outer / 3.0)
+        {
+            unsigned c = v < 0.0 ? 0U : 1U;
+
+            inSum[c] += sym[i];
+            inN[c]++;
+        }
+    }
+    for (unsigned c = 0U; c < 2U; c++)
+        if (inN[c] > 0U)
+            inSum[c] /= (double)inN[c];
+    for (size_t i = 0U; i < sym.size(); i++)
+    {
+        double v = sym[i] - centre;
+
+        if (std::fabs(v) < 2.0 * outer / 3.0)
+        {
+            unsigned c = v < 0.0 ? 0U : 1U;
+
+            inSq[c] += (sym[i] - inSum[c]) * (sym[i] - inSum[c]);
+        }
+    }
+
+    s.levels[0] = loMean;
+    s.levels[3] = hiMean;
+    s.levels[1] = inN[0] > 0U ? inSum[0] : centre - outer / 3.0;
+    s.levels[2] = inN[1] > 0U ? inSum[1] : centre + outer / 3.0;
+    s.centre = centre;
+    s.outer = outer;
+    s.outerHz = outer / COUNTS_PER_HZ;
+    s.outerPercent = nominal > 0.0 ? 100.0 * outer / nominal : 0.0;
+
+    const double sdIn = (inN[0] > 1U && inN[1] > 1U) ? (std::sqrt(inSq[0] / (double)inN[0]) + std::sqrt(inSq[1] / (double)inN[1])) / 2.0 : sdOuter;
+
+    s.spread = (2.0 * sdOuter + 2.0 * sdIn) / 4.0;
+    s.blur = outer > 0.0 ? s.spread / (2.0 * outer / 3.0) : 0.0;
+    s.approximate = false;
+    s.syncLocked = true;
+    s.syncHits = (unsigned)hitAt.size();
+    s.inverted = pol < 0;
 }
 
 }

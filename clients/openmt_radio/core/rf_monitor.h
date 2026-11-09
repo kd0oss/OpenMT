@@ -20,6 +20,15 @@
 namespace openmt
 {
 
+/* The frame sync of a mode, when the monitor can look for it: the sync symbols are only the outer levels (+3 and -3), so they give
+   the true outer deviation whatever the noise is (the mean of known symbols has no bias) */
+enum class SyncKind
+{
+    None,
+    P25,        /* 5575F5FF77FF */
+    DMR         /* the four 48 bit syncs of base station and mobile, voice and data */
+};
+
 struct MonitorSnapshot
 {
     bool     active      = false;   /* a signal is present (the level is above the gate) */
@@ -42,6 +51,16 @@ struct MonitorSnapshot
 
     bool     approximate = false;   /* the levels overlap (blur above 0.25): the deviation is only roughly right, high by about the noise */
 
+    bool     syncLocked  = false;   /* the deviation comes from frame syncs: exact, however noisy the signal is */
+    unsigned syncHits    = 0U;      /* the syncs that were found */
+    bool     inverted    = false;   /* the syncs were found upside down: the signal is inverted */
+
+    bool     fromIq      = false;   /* made from the IQ of the bridge (the true signal), not from the modem's samples */
+    double   iqRate      = 0.0;     /* samples a second of the IQ */
+    unsigned long iqFrames = 0UL;   /* frames received */
+    unsigned long iqLost = 0UL;     /* frames missing in the sequence */
+    bool     iqOverload  = false;   /* the converter reached full scale */
+
     std::vector<float>    eye;      /* eyeTraces rows of eyePoints values, each trace two symbols wide, centred on the sampling instant */
     unsigned              eyeTraces = 0;
     unsigned              eyePoints = 0;
@@ -57,7 +76,7 @@ public:
     RfMonitor();
 
     /* baud: symbols per second (0 for none), levels: 2 or 4, nominalOuter: counts of the outer symbol of the mode (0 = unknown) */
-    void configure(double baud, unsigned symbolLevels, double nominalOuter);
+    void configure(double baud, unsigned symbolLevels, double nominalOuter, SyncKind sync = SyncKind::None);
     void reset();
 
     /* from the thread that receives the samples */
@@ -67,6 +86,11 @@ public:
     MonitorSnapshot snapshot();
 
     static const double COUNTS_PER_HZ;   /* 0.7 */
+
+    /* The symbol part of the analysis, for any sample rate: w is the demodulated signal in counts (0.7 per Hz) of one burst of
+       signal.  Fills in the eye, the histogram, the levels, the deviation and the sync lock of s (the rest of s is the caller's). */
+    static void analyse(const std::vector<double>& w, double rate, double baud, unsigned levels, double nominal, SyncKind sync,
+                        MonitorSnapshot& s);
 
 private:
     static const size_t RING = 24000U;
@@ -78,6 +102,7 @@ private:
     double               baud_;
     unsigned             levels_;
     double               nominal_;
+    SyncKind             sync_;
 };
 
 }

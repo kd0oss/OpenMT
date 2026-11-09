@@ -1,4 +1,5 @@
 #include "rf_spectrum.h"
+#include "iq_monitor.h"
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -87,6 +88,8 @@ SpectrumClient::SpectrumClient() :
     fd_(-1),
     running_(false),
     wanted_(false),
+    iqWanted_(false),
+    iqSink_(nullptr),
     lastMs_(0),
     frames_(0),
     addrLen_(0U)
@@ -170,9 +173,20 @@ void SpectrumClient::setWanted(bool wanted)
     wanted_ = wanted;
 }
 
+void SpectrumClient::setIqSink(IqMonitor* sink)
+{
+    iqSink_ = sink;
+}
+
+void SpectrumClient::setIqWanted(bool wanted)
+{
+    iqWanted_ = wanted;
+}
+
 void SpectrumClient::run()
 {
     long long lastAsk = 0;
+    long long lastIqAsk = 0;
     uint8_t buffer[8192];
 
     while (running_)
@@ -182,11 +196,26 @@ void SpectrumClient::run()
             (void)sendto(fd_, "SPEC", 4, 0, (const struct sockaddr*)addr_, (socklen_t)addrLen_);
             lastAsk = nowMs();
         }
+        if (iqWanted_ && iqSink_ != nullptr && nowMs() - lastIqAsk >= 1000)
+        {
+            (void)sendto(fd_, "IQST", 4, 0, (const struct sockaddr*)addr_, (socklen_t)addrLen_);
+            lastIqAsk = nowMs();
+        }
 
         ssize_t r = recv(fd_, buffer, sizeof(buffer), 0);
 
         if (r <= 0)
             continue;                                   /* the receive timeout: look at running_ and the request timer */
+
+        if (r >= 4 && buffer[0] == 'I' && buffer[1] == 'Q')
+        {
+            IqMonitor* sink = iqSink_;
+            IqFrame iq;
+
+            if (sink != nullptr && parseIqFrame(buffer, (size_t)r, iq))
+                sink->feed(iq);
+            continue;
+        }
 
         RfFrame f;
         std::vector<uint8_t> raw;

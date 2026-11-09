@@ -201,15 +201,16 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
     /* symbol rate, number of symbol levels and the nominal outer level (counts) of the mode, for the signal monitor */
     switch (s.mode)
     {
-        case MODE_NXDN:  monitor_.configure(2400.0, 4U, 735.0);  break;
-        case MODE_DMR:   monitor_.configure(4800.0, 4U, 1362.0); break;
-        case MODE_P25:   monitor_.configure(4800.0, 4U, 1260.0); break;
-        case MODE_YSF:   monitor_.configure(4800.0, 4U, 1890.0); break;
-        case MODE_DSTAR: monitor_.configure(4800.0, 2U, 841.0);  break;
-        case MODE_M17:   monitor_.configure(4800.0, 4U, 1481.0); break;
-        default:         monitor_.configure(0.0, 0U, 0.0);       break;
+        case MODE_NXDN:  monitor_.configure(2400.0, 4U, 735.0);  iq_.configure(2400.0, 4U, 735.0, SyncKind::None);  break;
+        case MODE_DMR:   monitor_.configure(4800.0, 4U, 1362.0, SyncKind::DMR); iq_.configure(4800.0, 4U, 1362.0, SyncKind::DMR); break;
+        case MODE_P25:   monitor_.configure(4800.0, 4U, 1260.0, SyncKind::P25); iq_.configure(4800.0, 4U, 1260.0, SyncKind::P25); break;
+        case MODE_YSF:   monitor_.configure(4800.0, 4U, 1890.0); iq_.configure(4800.0, 4U, 1890.0, SyncKind::None); break;
+        case MODE_DSTAR: monitor_.configure(4800.0, 2U, 841.0);  iq_.configure(4800.0, 2U, 841.0, SyncKind::None);  break;
+        case MODE_M17:   monitor_.configure(4800.0, 4U, 1481.0); iq_.configure(4800.0, 4U, 1481.0, SyncKind::None); break;
+        default:         monitor_.configure(0.0, 0U, 0.0);       iq_.configure(0.0, 0U, 0.0, SyncKind::None);       break;
     }
     monitor_.reset();
+    iq_.reset();
 
     if (!s.rxCapture.empty())
     {
@@ -262,6 +263,7 @@ bool RadioEngine::start(const EngineSettings& settings, std::string& error)
     link_.forceIdle();                  /* a mode this radio held when it was last closed or crashed */
     mode_->start();
 
+    spectrum_.setIqSink(&iq_);
     {
         std::string spectrumError;
 

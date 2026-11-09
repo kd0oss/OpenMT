@@ -51,6 +51,7 @@
 #include "hrf_db.h"
 #include "bridge_common.h"
 #include "hrf_frontend.h"
+#include "rf_spectrum.h"
 #include "dsp.h"
 
 #include <stdio.h>
@@ -150,6 +151,8 @@ typedef struct
     bool tx_amp;                 /* 14 dB RF amp while transmitting */
     bool bias_tee;               /* antenna port power */
     bool rx_stats;               /* log the level of the HackRF samples every 2 s (--rx-stats) */
+    unsigned int spectrum_port;  /* UDP port that serves the RF spectrum to monitors (OpenMT Radio's Monitor tab), 0 = off */
+    const char *spectrum_bind;   /* address it listens on, NULL = every interface */
     float tx_amplitude;          /* fraction of int8 full scale for the (constant envelope) TX signal */
     double deviation_hz;
     atomic_bool rx_invert;       /* negate the baseband sign before Q15 conversion */
@@ -199,6 +202,8 @@ config_set_defaults(bridge_config_t *cfg)
     cfg->rx_amp = false;
     cfg->tx_amp = false;
     cfg->bias_tee = false;
+    cfg->spectrum_port = RFSPEC_DEFAULT_PORT;
+    cfg->spectrum_bind = NULL;
     cfg->tx_amplitude = 0.9f;
     /* The FM deviation, TX symbol scale, RX gain and Q15 conventions are
      * properties of the 125 kSa/s DSP chain and of what the protocol
@@ -261,6 +266,11 @@ print_usage(const char *argv0)
         "  --tx-invert / --no-tx-invert   negate TX baseband (default off)\n"
         "  --rx-stats            log the level of the HackRF's 8-bit samples every 2 s,\n"
         "                        to set the LNA/VGA gains\n"
+        "  --spectrum-port N     UDP port that serves the RF spectrum of the received channel\n"
+        "                        to monitors such as OpenMT Radio's Monitor tab (default 18050,\n"
+        "                        0 = off).  Frames are only computed and sent while a monitor\n"
+        "                        asks for them.  See tools/rf_spectrum.h for the protocol\n"
+        "  --spectrum-bind ADDR  IPv4 address it listens on (default: every interface)\n"
         "  --rx-gain MULT        scale on baseband before Q15 at rxLevel 50 (default 0.41);\n"
         "                        the Modem tab's rxLevel multiplies it by rxLevel/50\n"
         "  --tx-symbol-scale N   divisor for incoming Q15 TX samples (default 494)\n"
@@ -348,6 +358,14 @@ parse_args(int argc, char **argv, bridge_config_t *cfg)
         else if (strcmp(argv[i], "--tx-amp") == 0)
         {
             cfg->tx_amp = true;
+        }
+        else if (strcmp(argv[i], "--spectrum-port") == 0 && (val = NEXT_ARG()) != NULL)
+        {
+            cfg->spectrum_port = (unsigned int)strtoul(val, NULL, 10);
+        }
+        else if (strcmp(argv[i], "--spectrum-bind") == 0 && (val = NEXT_ARG()) != NULL)
+        {
+            cfg->spectrum_bind = val;
         }
         else if (strcmp(argv[i], "--rx-stats") == 0)
         {
@@ -1372,6 +1390,19 @@ rx_thread_main(void *arg)
     unsigned long st_n = 0, st_clip = 0;
     int st_peak = 0;
     long long st_ms = monotonic_ms();
+    rfspec_t *spec = rfspec_create((uint16_t)cfg->spectrum_port, cfg->spectrum_bind, BB_RATE);
+
+    if (cfg->spectrum_port != 0U)
+    {
+        if (spec != NULL)
+        {
+            log_msg("bridge: serving the RF spectrum to monitors on UDP port %u\n", cfg->spectrum_port);
+        }
+        else
+        {
+            log_msg("bridge: cannot serve the RF spectrum on UDP port %u (in use?): the Monitor tab will have no RF spectrum\n", cfg->spectrum_port);
+        }
+    }
 
     log_msg("bridge: RX thread running\n");
     while (!g_stop)
@@ -1434,6 +1465,14 @@ rx_thread_main(void *arg)
         }
         n_bb = hrf_rx_fe_process(a->fe, (const int8_t *)raw, nb / 2U, bb, (65536 / 2) / (size_t)b->ratio + 16);
 
+        if (spec != NULL && rfspec_poll(spec))
+        {
+            rfspec_set_freq(spec, cfg->rx_freq_hz);
+            rfspec_set_mirror(spec, atomic_load(&cfg->rx_invert));
+            rfspec_adc(spec, (const int8_t *)raw, nb);
+            rfspec_feed(spec, bb, n_bb);
+        }
+
         for (s = 0; s < n_bb; s++)
         {
             float baseband[16];
@@ -1480,6 +1519,7 @@ rx_thread_main(void *arg)
         }
     }
     dsp_rx_pipeline_destroy(dsp);
+    rfspec_destroy(spec);
     free(raw);
     free(bb);
     log_msg("bridge: RX thread exiting\n");

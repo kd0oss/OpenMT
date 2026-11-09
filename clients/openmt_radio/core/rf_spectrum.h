@@ -21,6 +21,8 @@
 namespace openmt
 {
 
+class IqMonitor;
+
 struct RfFrame
 {
     uint32_t           centreHz  = 0;
@@ -61,6 +63,10 @@ public:
     /* the requests are sent while this is true */
     void setWanted(bool wanted);
 
+    /* the IQ of the channel ("IQST" requests, about 250 KB/s while on) goes to this monitor; null or false asks for none */
+    void setIqSink(IqMonitor* sink);
+    void setIqWanted(bool wanted);
+
     RfSpectrumSnapshot snapshot();
     unsigned long framesReceived() const { return frames_; }
 
@@ -75,6 +81,8 @@ private:
     int                  fd_;
     std::atomic<bool>    running_;
     std::atomic<bool>    wanted_;
+    std::atomic<bool>    iqWanted_;
+    std::atomic<IqMonitor*> iqSink_;
     std::thread          thread_;
     std::mutex           mutex_;
     RfFrame              last_;

@@ -18,6 +18,7 @@
 #include "nxdn_mode.h"
 #include "radio_mode.h"
 #include "rf_monitor.h"
+#include "iq_monitor.h"
 #include "rf_spectrum.h"
 #include "vocoder.h"
 
@@ -94,6 +95,10 @@ public:
     /* The RF spectrum from the HackRF bridge (no frames from any other modem).  It is only asked for while setSpectrumWanted(true) */
     SpectrumClient& spectrum() { return spectrum_; }
 
+    /* The signal monitor made from the IQ of the bridge (the HackRF and SX1255 bridges): the true deviation and frequency error.
+       The IQ is only asked for while the Monitor tab shows it (spectrum().setIqWanted(true)) */
+    IqMonitor& iq() { return iq_; }
+
     /* The AMBE3000R dongle.  Opening its serial port can reset it (DTR) and it needs seconds to come back, so the port is opened
        once and stays open until closeDongle() or the end of the program, whether the mode that runs uses the dongle or not.
        start() uses the open dongle for the modes that need it (and opens it itself if it is not open); a different device or baud
@@ -115,6 +120,7 @@ private:
     unsigned int                 dongleBaud_;
     std::unique_ptr<RadioMode>   mode_;
     RfMonitor                    monitor_;
+    IqMonitor                    iq_;               /* before spectrum_: the client thread feeds it, so it is destroyed after */
     SpectrumClient               spectrum_;
     bool                         running_;
     FILE*                        capture_;
