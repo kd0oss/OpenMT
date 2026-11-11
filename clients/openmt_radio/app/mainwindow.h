@@ -2,7 +2,10 @@
 #define OPENMT_MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QString>
 #include <QVector>
+
+#include "../core/remote_ui.h"
 
 class QComboBox;
 class QDoubleSpinBox;
@@ -18,17 +21,31 @@ class QPlainTextEdit;
 class QProgressBar;
 class QSlider;
 class QKeyEvent;
+class QTimer;
 
 class AudioIO;
 class RadioController;
+class RemoteBridge;
 
-class MainWindow : public QMainWindow
+class MainWindow : public QMainWindow, public openmt::RemoteUi
 {
     Q_OBJECT
 
 public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow();
+
+    /* openmt::RemoteUi: what a remote client can do (called on this thread) */
+    std::map<std::string, openmt::Json> remoteSettings() override;
+    std::string remoteApplySettings(const std::map<std::string, openmt::Json>& values) override;
+    openmt::Json remoteOptions() override;
+    openmt::Json remoteStatus() override;
+    std::string remoteConnect() override;
+    std::string remoteDisconnect() override;
+    std::string remoteRelease() override;
+    std::string remoteOpenDongle() override;
+    std::string remoteSendMessage(const std::string& to, const std::string& text) override;
+    std::string remoteSetMeta(const std::string& text) override;
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -55,8 +72,13 @@ private slots:
     void onGains();
     void onModeChanged();
     void onDmrOperation();
+    void onRemoteChanged();
+    void onRemoteNewToken();
+    void refreshRemoteInfo();
 
 private:
+    void loadRemoteSettings();
+    void applyRemote();
     void buildUi();
     void loadSettings();
     void saveSettings();
@@ -149,6 +171,19 @@ private:
     RadioController* radio_;
     bool             pttHeld_;
     bool             connected_;
+
+    /* the remote control */
+    RemoteBridge*    remote_ = nullptr;
+    QCheckBox*       remoteEnable_ = nullptr;
+    QSpinBox*        remotePort_ = nullptr;
+    QLineEdit*       remoteToken_ = nullptr;
+    QPushButton*     remoteNewToken_ = nullptr;
+    QLabel*          remoteInfo_ = nullptr;
+    QTimer*          remoteTimer_ = nullptr;
+    QString          remoteTokenRaw_;
+    QString          remoteError_;
+    bool             rxOn_ = false;                 /* for the status the clients get */
+    bool             txOn_ = false;
 };
 
 #endif

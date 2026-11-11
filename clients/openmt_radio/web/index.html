@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>OpenMT Radio remote</title>
+<style>
+:root{--bg:#0f1318;--card:#1a2029;--line:#2c3644;--fg:#e6ebf1;--dim:#8b98a8;--ok:#3ecf8e;--warn:#f5b942;--bad:#ef5b5b;--acc:#4da3ff}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+body{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);-webkit-tap-highlight-color:transparent}
+main{max-width:640px;margin:0 auto;padding:12px}
+h1{font-size:1.15rem;margin:.2rem 0 .6rem}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:0 0 12px}
+label{display:block;color:var(--dim);font-size:.85rem;margin:.5rem 0 .15rem}
+input,select,button{font:inherit;color:var(--fg)}
+input[type=text],input[type=password],input[type=number],select{width:100%;padding:.55rem .6rem;background:#0b0f14;border:1px solid var(--line);border-radius:8px}
+input:disabled,select:disabled{opacity:.45}
+button{padding:.6rem .9rem;background:#243040;border:1px solid var(--line);border-radius:10px;cursor:pointer;touch-action:manipulation}
+button.pri{background:var(--acc);border-color:var(--acc);color:#04121f;font-weight:600}
+button.bad{background:#4a2326;border-color:#7a3236}
+button:disabled{opacity:.4;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>*{flex:1 1 auto}
+.tabs{display:flex;gap:6px;margin:0 0 12px;position:sticky;top:0;background:var(--bg);padding:6px 0;z-index:2}
+.tabs button{flex:1;padding:.5rem .2rem}
+.tabs button.on{background:var(--acc);color:#04121f;border-color:var(--acc);font-weight:600}
+.pill{display:inline-block;padding:.1rem .55rem;border-radius:99px;font-size:.8rem;background:#243040;margin-right:6px}
+.pill.ok{background:#14442f;color:var(--ok)}.pill.warn{background:#4a3a14;color:var(--warn)}.pill.bad{background:#4a2326;color:var(--bad)}
+.big{font-size:1.25rem;font-weight:600}
+.dim{color:var(--dim)}
+.err{color:var(--bad);min-height:1.3em}
+#ptt{width:100%;height:150px;font-size:1.6rem;font-weight:700;border-radius:18px;background:#243040;user-select:none;-webkit-user-select:none;touch-action:none}
+#ptt.tx{background:var(--bad);border-color:var(--bad);color:#fff}
+#ptt:disabled{opacity:.35}
+.pad{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.pad button{padding:.8rem 0;font-size:1.1rem}
+pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.35 ui-monospace,Menlo,Consolas,monospace}
+#log{max-height:60vh;overflow:auto}
+details{border-top:1px solid var(--line);padding:.4rem 0}
+summary{cursor:pointer;font-weight:600;padding:.3rem 0}
+.hidden{display:none!important}
+table{width:100%;border-collapse:collapse}td{padding:.15rem 0}td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.bar{height:10px;background:#0b0f14;border-radius:5px;overflow:hidden;position:relative}
+.bar i{position:absolute;top:0;bottom:0;background:var(--acc)}
+input[type=range]{width:100%}
+.chk{display:flex;gap:.5rem;align-items:center;margin:.5rem 0;color:var(--fg);font-size:1rem}
+.chk input{width:auto}
+</style>
+</head>
+<body>
+<main>
+
+<section id="login" class="card">
+  <h1>OpenMT Radio remote</h1>
+  <label for="token">Pairing token (shown in OpenMT Radio, "Remote control")</label>
+  <input id="token" type="password" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH-JKLM-NPQR-STUV-WXYZ">
+  <label class="chk"><input id="remember" type="checkbox" checked> Stay signed in on this device</label>
+  <button id="loginBtn" class="pri" style="width:100%">Connect</button>
+  <button id="forget" style="width:100%;margin-top:8px">Forget the saved token</button>
+  <p id="storeNote" class="dim" style="font-size:.85rem;margin:.3rem 0"></p>
+  <p id="loginErr" class="err"></p>
+  <p class="dim" style="font-size:.85rem">The token is never sent: the page and the radio prove to each other that they know it. Anyone who has the token can
+  transmit, so use this on your own network or a VPN.</p>
+</section>
+
+<section id="app" class="hidden">
+  <div class="row" style="margin-bottom:6px">
+    <div><span id="linkPill" class="pill">offline</span><span id="radioPill" class="pill">radio</span><span id="pttPill" class="pill">ptt</span></div>
+    <button id="logout" style="flex:0 0 auto">Disconnect</button>
+  </div>
+  <nav class="tabs">
+    <button data-tab="radio" class="on">Radio</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="monitor">Monitor</button>
+    <button data-tab="log">Log</button>
+  </nav>
+
+  <div id="tab-radio">
+    <div class="card">
+      <div class="big" id="modeLine">-</div>
+      <div id="statusLine" class="dim">-</div>
+      <div id="heardLine" class="dim"></div>
+      <div id="callLine" style="margin-top:.5rem"></div>
+      <div class="row" style="margin-top:.6rem">
+        <button id="connectBtn" class="pri">Connect radio</button>
+        <button id="disconnectBtn">Disconnect</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="releaseBtn">Release modem</button>
+        <button id="dongleBtn">Open dongle</button>
+      </div>
+      <p id="cmdErr" class="err"></p>
+    </div>
+
+    <div class="card">
+      <button id="ptt" disabled>PUSH TO TALK</button>
+      <label class="chk"><input id="latch" type="checkbox"> Tap to start and stop (instead of holding)</label>
+      <div id="pttNote" class="dim" style="font-size:.85rem"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button id="audioBtn">Mute audio</button>
+        <label class="chk" style="flex:1 1 40%"><input id="ulaw" type="checkbox" checked> Compressed (mu-law)</label>
+      </div>
+      <label>Volume on this device <span id="volVal"></span></label>
+      <input id="vol" type="range" min="0" max="300" step="5" value="100">
+      <label>Microphone level of this device <span id="micLvlVal"></span></label>
+      <input id="micLvl" type="range" min="0" max="400" step="5" value="100">
+      <div id="audioInfo" class="dim" style="font-size:.85rem;margin-top:8px">audio off</div>
+      <div id="rxMeter" class="bar" style="margin-top:10px"><i style="left:0;width:0"></i></div>
+    </div>
+
+    <div class="card">
+      <label>DTMF</label>
+      <div class="pad" id="dtmfPad"></div>
+    </div>
+
+    <div class="card" id="msgCard">
+      <label for="msgTo">Message to (M17)</label>
+      <input id="msgTo" type="text" maxlength="20" autocapitalize="characters">
+      <label for="msgText">Text</label>
+      <input id="msgText" type="text" maxlength="200">
+      <div class="row" style="margin-top:8px"><button id="msgSend">Send message</button></div>
+      <label for="metaText">Text sent with every transmission (M17)</label>
+      <input id="metaText" type="text" maxlength="200">
+      <div class="row" style="margin-top:8px"><button id="metaSet">Set</button></div>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="hidden">
+    <div class="card">
+      <div class="dim" id="setNote">Settings other than the levels and M17 texts can only change while the radio is disconnected.</div>
+      <div class="row" style="margin:8px 0"><button id="setSave" class="pri">Save changes</button><button id="setReload">Reload</button></div>
+      <p id="setErr" class="err"></p>
+      <div id="setForm"></div>
+    </div>
+  </div>
+
+  <div id="tab-monitor" class="hidden">
+    <div class="card">
+      <div class="dim" id="monSource">waiting ...</div>
+      <canvas id="monCanvas" width="600" height="120" style="width:100%;height:120px;background:#0b0f14;border-radius:8px"></canvas>
+      <table id="monTable"></table>
+    </div>
+  </div>
+
+  <div id="tab-log" class="hidden"><div class="card"><pre id="log"></pre></div></div>
+</section>
+
+</main>
+<script>
+"use strict";
+/* OpenMT Radio web client: protocol in REMOTE_PROTOCOL.md.  Everything the radio sends is put on the page as text (textContent),
+   never as markup. */
+
+var LIVE = {micGain: 1, spkGain: 1, m17Meta: 1, m17MsgTo: 1};
+var SECTIONS = [
+    ["Connection", /^(host|modem|mode|layout)$/], ["NXDN", /^(ran|src|dst|group)$/], ["DMR", /^dmr/], ["P25", /^p25/], ["YSF", /^ysf/],
+    ["D-STAR", /^dstar/], ["M17", /^m17/], ["FM", /^fm/], ["Vocoder", /^(ambe|noVocoder|capture|invertRx)/],
+    ["Audio and levels", /^(txLevel|rxLevel|spectrum|audioIn|audioOut|rate|micGain|spkGain)/]
+];
+
+function $(id) { return document.getElementById(id); }
+function text(el, s) { el.textContent = s === undefined || s === null ? "" : String(s); }
+
+var S = {                                   /* the state of the page */
+    ws: null, token: "", loggedIn: false, wantOnline: false, nextId: 1, pending: {}, retry: 0, retryTimer: 0, pingTimer: 0,
+    radio: {}, options: null, settings: {}, holding: false, pttBusy: false, keepTimer: 0,
+    audioOn: false, ctx: null, nextPlay: 0, mic: null, txSeq: 0, tab: "radio", monitorOn: false, wake: null, rxLevel: 0
+};
+
+/* ---------------------------------------------------------------- crypto */
+function normToken(t) { return t.replace(/[^A-Za-z0-9]/g, "").toUpperCase(); }
+function hex(buf) { return Array.prototype.map.call(new Uint8Array(buf), function (b) { return (b < 16 ? "0" : "") + b.toString(16); }).join(""); }
+function hmacHex(token, msg) {
+    var enc = new TextEncoder();
+    return crypto.subtle.importKey("raw", enc.encode(token), {name: "HMAC", hash: "SHA-256"}, false, ["sign"]).then(function (k) {
+        return crypto.subtle.sign("HMAC", k, enc.encode(msg));
+    }).then(hex);
+}
+function sameText(a, b) {                   /* not early-exit */
+    if (a.length !== b.length) return false;
+    var d = 0;
+    for (var i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return d === 0;
+}
+
+/* ---------------------------------------------------------------- G.711 mu-law */
+function ulawDecode(c) {
+    c = ~c & 0xFF;
+    var t = ((c & 0x0F) << 3) + 0x84;
+    t <<= (c & 0x70) >> 4;
+    return (c & 0x80) ? (0x84 - t) : (t - 0x84);
+}
+function ulawEncode(s) {
+    var sign = 0;
+    if (s < 0) { s = -s; sign = 0x80; }
+    if (s > 32635) s = 32635;
+    s += 0x84;
+    var exp = 7;
+    for (var mask = 0x4000; (s & mask) === 0 && exp > 0; mask >>= 1) exp--;
+    var man = (s >> (exp + 3)) & 0x0F;
+    return ~(sign | (exp << 4) | man) & 0xFF;
+}
+
+/* ---------------------------------------------------------------- connection */
+function setLink(label, cls) { var e = $("linkPill"); text(e, label); e.className = "pill " + (cls || ""); }
+
+function logLine(t, time) {
+    var d = time ? new Date(time) : new Date();
+    var el = $("log");
+    var stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent += d.toLocaleTimeString() + "  " + t + "\n";
+    if (el.textContent.length > 60000) el.textContent = el.textContent.slice(-40000);
+    if (stick) el.scrollTop = el.scrollHeight;
+}
+
+function openSocket() {
+    clearTimeout(S.retryTimer);
+    var ws = new WebSocket("wss://" + location.host + "/openmt");
+    ws.binaryType = "arraybuffer";
+    S.ws = ws;
+    S.loggedIn = false;
+    setLink("connecting", "warn");
+    var nonce = null, cnonce = null;
+
+    ws.onmessage = function (ev) {
+        if (ws !== S.ws) return;
+        if (typeof ev.data !== "string") { onAudio(ev.data); return; }
+        var m;
+        try { m = JSON.parse(ev.data); } catch (e) { return; }
+        if (m.type === "hello") {
+            nonce = m.nonce;
+            var r = new Uint8Array(16);
+            crypto.getRandomValues(r);
+            cnonce = hex(r);
+            hmacHex(S.token, "C" + nonce + cnonce).then(function (resp) {
+                if (ws === S.ws && ws.readyState === 1) ws.send(JSON.stringify({type: "auth", cnonce: cnonce, response: resp}));
+            });
+        } else if (m.type === "auth_ok") {
+            hmacHex(S.token, "S" + nonce + cnonce).then(function (proof) {
+                if (ws !== S.ws) return;
+                if (!sameText(proof, String(m.proof || ""))) {
+                    S.wantOnline = false;
+                    $("loginErr").textContent = "The radio did not prove that it knows the token. This is not your radio, or someone is in between.";
+                    ws.close();
+                    return;
+                }
+                onLoggedIn();
+            });
+        } else if (m.type === "auth_failed") {
+            S.wantOnline = false;
+            try { localStorage.removeItem("openmtToken"); } catch (e) {}
+            $("loginErr").textContent = m.error ? "Refused: " + m.error : "Wrong token (five mistakes lock this address out for a minute).";
+        } else if (m.type === "reply") {
+            var p = S.pending[m.id];
+            if (p) { delete S.pending[m.id]; clearTimeout(p.timer); p.resolve(m); }
+        } else if (S.loggedIn) {
+            onEvent(m);
+        }
+    };
+    ws.onclose = function () {
+        if (ws !== S.ws) return;
+        onClosed();
+    };
+    ws.onerror = function () {};
+}
+
+function onClosed() {
+    S.loggedIn = false;
+    S.ws = null;
+    clearInterval(S.pingTimer);
+    Object.keys(S.pending).forEach(function (k) { var p = S.pending[k]; clearTimeout(p.timer); p.resolve({ok: false, error: "connection lost"}); });
+    S.pending = {};
+    stopTx(false);
+    stopAudio(true);
+    S.monitorOn = false;
+    refreshButtons();
+    if (S.wantOnline) {
+        var wait = Math.min(15000, 1000 * Math.pow(2, S.retry++));
+        setLink("reconnecting", "warn");
+        S.retryTimer = setTimeout(openSocket, wait);
+    } else {
+        setLink("offline", "bad");
+        if (!$("login").classList.contains("hidden")) return;
+        showLogin();
+    }
+}
+
+function send(obj) { if (S.ws && S.ws.readyState === 1) { S.ws.send(JSON.stringify(obj)); return true; } return false; }
+
+function call(cmd, args, timeoutMs) {
+    return new Promise(function (resolve) {
+        var id = S.nextId++;
+        var m = {id: id, cmd: cmd};
+        if (args) Object.keys(args).forEach(function (k) { m[k] = args[k]; });
+        if (!send(m)) { resolve({ok: false, error: "not connected"}); return; }
+        S.pending[id] = {resolve: resolve, timer: setTimeout(function () { delete S.pending[id]; resolve({ok: false, error: "no answer (" + cmd + ")"}); }, timeoutMs || 10000)};
+    });
+}
+
+/* Keeps the token in the browser and checks that it can be read back; says on the login page when the browser refuses. */
+function rememberToken(token) {
+    var note = "";
+    try {
+        if (token) {
+            localStorage.setItem("openmtToken", token);
+            if (localStorage.getItem("openmtToken") !== token) throw new Error("it was not kept");
+            note = "Token saved on this device (this page: " + location.host + ").";
+        } else {
+            localStorage.removeItem("openmtToken");
+        }
+    } catch (e) {
+        note = "This browser will not keep the token (" + (e && e.name ? e.name : "storage refused") + "). Private windows and pages opened after a certificate warning can do this.";
+    }
+    text($("storeNote"), note);
+}
+
+function onLoggedIn() {
+    rememberToken($("remember").checked ? S.token : "");
+    S.loggedIn = true;
+    S.retry = 0;
+    setLink("online", "ok");
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    $("loginErr").textContent = "";
+    clearInterval(S.pingTimer);
+    S.pingTimer = setInterval(function () { send({id: S.nextId++, cmd: "ping"}); }, 10000);
+    S.pending = S.pending || {};
+    refreshButtons();
+    loadSettings();
+    if (S.tab === "monitor") monitorStart();
+    if (!S.muted) startAudio();
+    if (navigator.wakeLock && !S.wake) {
+        navigator.wakeLock.request("screen").then(function (w) { S.wake = w; w.addEventListener("release", function () { S.wake = null; }); }, function () {});
+    }
+}
+
+function showLogin() {
+    $("app").classList.add("hidden");
+    $("login").classList.remove("hidden");
+}
+
+/* ---------------------------------------------------------------- events */
+function onEvent(m) {
+    switch (m.type) {
+    case "state": onState(m); break;
+    case "call": onCallEvent(m); break;
+    case "log": logLine(m.text, m.time); break;
+    case "ptt":
+        if (S.holding && m.owner !== "remote") {
+            S.holding = false;
+            stopTx(false);
+            text($("pttNote"), "The key was released" + (m.reason ? ": " + m.reason : "") + ".");
+        }
+        break;
+    case "monitor": onMonitor(m); break;
+    case "error": logLine("radio: " + m.error); break;
+    }
+}
+
+function onState(m) {
+    S.radio = m;
+    text($("modeLine"), (m.modeLabel || "") + (m.connected ? "  (connected)" : "  (not connected)"));
+    text($("statusLine"), m.status);
+    text($("heardLine"), m.heard);
+    var rp = $("radioPill");
+    text(rp, m.connected ? (m.tx ? "transmitting" : m.rx ? "receiving" : "idle") : "radio off");
+    rp.className = "pill " + (m.connected ? (m.tx ? "bad" : m.rx ? "ok" : "") : "warn");
+    var pp = $("pttPill");
+    text(pp, "key: " + (m.ptt === "remote" ? (S.holding ? "you" : "another client") : m.ptt === "local" ? "desktop" : "free"));
+    pp.className = "pill " + (m.ptt === "none" ? "" : (S.holding ? "bad" : "warn"));
+    $("dtmfPad").style.opacity = m.dtmf ? 1 : 0.4;
+    $("msgCard").classList.toggle("hidden", !m.messages && m.mode !== 5);
+    refreshButtons();
+    applyLiveEnable();
+}
+
+function onCallEvent(m) {
+    var names = {rx_start: "Receiving", rx_info: "Receiving", rx_end: "Received", rx_lost: "Lost", tx_start: "Transmitting", tx_end: "Sent"};
+    var s = (names[m.event] || m.event) + ": ";
+    if (m.text) s += m.text + "  "; 
+    s += "src " + m.src + " > dst " + m.dst + (m.group ? " (group)" : "") + (m.ber ? "  BER " + Number(m.ber).toFixed(1) + "%" : "");
+    text($("callLine"), s);
+}
+
+function refreshButtons() {
+    var on = S.loggedIn, c = !!S.radio.connected;
+    $("connectBtn").disabled = !on || c;
+    $("disconnectBtn").disabled = !on || !c;
+    $("releaseBtn").disabled = !on;
+    $("dongleBtn").disabled = !on || c;
+    $("ptt").disabled = !on || !c;
+    $("audioBtn").disabled = !on;
+    $("ptt").classList.toggle("tx", S.holding);
+    text($("ptt"), S.holding ? "TRANSMITTING" : "PUSH TO TALK");
+}
+
+/* ---------------------------------------------------------------- commands of the Radio tab */
+function report(r) { text($("cmdErr"), r && r.ok ? "" : (r && r.error) || "failed"); }
+$("connectBtn").onclick = function () { text($("cmdErr"), "connecting ..."); $("connectBtn").disabled = true; call("connect", null, 60000).then(function (r) { report(r); refreshButtons(); }); };
+$("disconnectBtn").onclick = function () { stopTx(true); call("disconnect", null, 30000).then(report); };
+$("releaseBtn").onclick = function () { call("release_modem", null, 30000).then(report); };
+$("dongleBtn").onclick = function () { call("open_dongle", null, 30000).then(report); };
+$("msgSend").onclick = function () { call("send_message", {to: $("msgTo").value, text: $("msgText").value}).then(function (r) { report(r); if (r.ok) $("msgText").value = ""; }); };
+$("metaSet").onclick = function () { call("set_meta", {text: $("metaText").value}).then(report); };
+
+/* the pad in the usual order: 1 2 3 A / 4 5 6 B / 7 8 9 C / * 0 # D */
+(function () {
+    var order = ["1","2","3","A","4","5","6","B","7","8","9","C","*","0","#","D"];
+    var pad = $("dtmfPad");
+    pad.textContent = "";
+    order.forEach(function (d) {
+        var b = document.createElement("button");
+        b.textContent = d;
+        b.onclick = function () { call("dtmf", {digit: d}).then(report); };
+        pad.appendChild(b);
+    });
+})();
+
+/* The levels of this device only: the radio's own speaker and microphone settings are not touched */
+function loadLevel(id, key, label) {
+    var v = 100;
+    try { var t = localStorage.getItem(key); if (t !== null && isFinite(Number(t))) v = Number(t); } catch (e) {}
+    $(id).value = v;
+    text($(label), v + " %");
+}
+function levelOf(id) { return Number($(id).value) / 100; }
+$("vol").oninput = function () {
+    text($("volVal"), $("vol").value + " %");
+    if (S.out) S.out.gain.value = levelOf("vol");
+    try { localStorage.setItem("openmtVol", $("vol").value); } catch (e) {}
+};
+$("micLvl").oninput = function () {
+    text($("micLvlVal"), $("micLvl").value + " %");
+    try { localStorage.setItem("openmtMic", $("micLvl").value); } catch (e) {}
+};
+loadLevel("vol", "openmtVol", "volVal");
+loadLevel("micLvl", "openmtMic", "micLvlVal");
+
+/* ---------------------------------------------------------------- push to talk */
+function pttDown() {
+    if (S.holding || S.pttBusy || !S.loggedIn) return;
+    S.pttBusy = true;
+    text($("pttNote"), "");
+    var go = ensureMic().then(function () { return S.audioOn || S.muted ? null : startAudio(); });
+    go.then(function () { return call("ptt", {down: true}); }).then(function (r) {
+        S.pttBusy = false;
+        if (!r.ok) { text($("pttNote"), r.error || "refused"); S.pressed = false; return; }
+        if (!S.pressed) { call("ptt", {down: false}); return; }       /* the finger left before the answer came */
+        S.holding = true;
+        S.txSeq = 0;
+        clearInterval(S.keepTimer);
+        S.keepTimer = setInterval(function () { send({cmd: "ptt_keepalive"}); }, 300);
+        if (!S.mic) text($("pttNote"), "No microphone: the radio transmits silence.");
+        refreshButtons();
+        onState(S.radio);
+    });
+}
+function stopTx(tell) {
+    clearInterval(S.keepTimer);
+    var was = S.holding;
+    S.holding = false;
+    S.pressed = false;
+    if (tell && was) send({id: S.nextId++, cmd: "ptt", down: false});
+    refreshButtons();
+}
+function pttUp() {
+    S.pressed = false;
+    if (S.holding) stopTx(true);
+}
+(function () {
+    var b = $("ptt");
+    b.addEventListener("pointerdown", function (e) {
+        e.preventDefault();
+        if ($("latch").checked) {
+            if (S.holding) { pttUp(); } else { S.pressed = true; pttDown(); }
+        } else {
+            try { b.setPointerCapture(e.pointerId); } catch (x) {}
+            S.pressed = true;
+            pttDown();
+        }
+    });
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach(function (n) {
+        b.addEventListener(n, function () { if (!$("latch").checked) pttUp(); });
+    });
+    b.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    /* a page that goes away must not leave the key down (the radio also drops it after 1.5 s) */
+    document.addEventListener("visibilitychange", function () { if (document.hidden) pttUp(); });
+    window.addEventListener("blur", function () { if (!$("latch").checked) pttUp(); });
+    window.addEventListener("pagehide", pttUp);
+    document.addEventListener("keydown", function (e) {
+        if (e.code === "Space" && !e.repeat && S.tab === "radio" && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName) && !$("ptt").disabled) {
+            e.preventDefault();
+            if ($("latch").checked) { if (S.holding) pttUp(); else { S.pressed = true; pttDown(); } } else { S.pressed = true; pttDown(); }
+        }
+    });
+    document.addEventListener("keyup", function (e) { if (e.code === "Space" && !$("latch").checked) pttUp(); });
+})();
+
+/* ---------------------------------------------------------------- audio */
+/* A browser plays sound only after the person has touched the page: the login button does that (unlockAudio), so the audio starts by itself
+   once logged in.  The microphone is asked for when the key is first pressed. */
+function unlockAudio() {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!S.ctx) S.ctx = new AC();
+    if (S.ctx.state === "suspended") S.ctx.resume();
+    if (!S.out) { S.out = S.ctx.createGain(); S.out.connect(S.ctx.destination); }
+    S.out.gain.value = levelOf("vol");
+}
+
+function ensureMic() {
+    if (S.mic) return Promise.resolve();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        text($("pttNote"), "This browser gives no microphone here: the key sends silence.");
+        return Promise.resolve();
+    }
+    return navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: false}}).then(openMic, function (e) {
+        text($("pttNote"), "No microphone (" + (e && e.name ? e.name : "refused") + "): you can listen, and the key sends silence.");
+    });
+}
+
+function startAudio() {
+    unlockAudio();
+    if (!S.ctx) { text($("pttNote"), "This browser cannot play audio."); return Promise.resolve(); }
+    return call("audio_start", {codec: $("ulaw").checked ? "ulaw" : "pcm16", rx: true, tx: true}).then(function (r) {
+        if (!r.ok) { text($("pttNote"), r.error || "audio refused"); return; }
+        S.audioOn = true;
+        S.nextPlay = 0; S.frac = 0; S.prev = 0; S.rxFrames = 0; S.rxLast = 0;
+        S.codec = $("ulaw").checked ? 1 : 0;
+        text($("audioBtn"), "Mute audio");
+    });
+}
+
+function stopAudio(local) {
+    if (!local) send({id: S.nextId++, cmd: "audio_stop"});
+    S.audioOn = false;
+    if (S.mic) {
+        try { S.mic.node.disconnect(); S.mic.src.disconnect(); S.mic.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+        S.mic = null;
+    }
+    text($("audioBtn"), "Unmute audio");
+}
+$("audioBtn").onclick = function () { if (S.audioOn) { S.muted = true; stopTx(true); stopAudio(false); } else { S.muted = false; startAudio(); } };
+$("ulaw").onchange = function () { if (S.audioOn) { stopAudio(false); startAudio(); } };
+
+function onAudio(buf) {
+    var v = new Uint8Array(buf);
+    if (!S.audioOn || !S.ctx || v.length < 5 || v[0] !== 1) return;
+    var n, pcm;
+    if (v[1] === 1) {
+        n = v.length - 4;
+        pcm = new Float32Array(n);
+        for (var i = 0; i < n; i++) pcm[i] = ulawDecode(v[4 + i]) / 32768;
+    } else {
+        n = (v.length - 4) >> 1;
+        pcm = new Float32Array(n);
+        var dv = new DataView(buf);
+        for (var j = 0; j < n; j++) pcm[j] = dv.getInt16(4 + 2 * j, true) / 32768;
+    }
+    var peak = 0;
+    for (var k = 0; k < n; k++) { var a = Math.abs(pcm[k]); if (a > peak) peak = a; }
+    S.rxLevel = Math.max(peak, S.rxLevel * 0.85);
+    S.rxFrames = (S.rxFrames || 0) + 1;
+    S.rxLast = Date.now();
+    if (S.ctx.state !== "running") S.ctx.resume();
+    /* up to the rate of the device ourselves (linear): browsers differ in what they accept for a buffer of 8 kHz */
+    var rate = S.ctx.sampleRate, step = 8000 / rate, outN = Math.max(0, Math.ceil((n - 1 + S.frac) / step - 1e-9)), o = new Float32Array(outN);
+    for (var q = 0; q < outN; q++) {
+        var pos = q * step - S.frac;                    /* position in this frame; negative: between the last sample of the frame before and this one */
+        var i0 = Math.floor(pos), f = pos - i0;
+        var a0 = i0 < 0 ? S.prev : pcm[i0], a1 = (i0 + 1) < n ? pcm[i0 + 1] : pcm[n - 1];
+        o[q] = a0 + (a1 - a0) * f;
+    }
+    S.frac = S.frac + n - outN * step;
+    S.prev = pcm[n - 1];
+    var ab = S.ctx.createBuffer(1, outN, rate);
+    ab.copyToChannel(o, 0);
+    var src = S.ctx.createBufferSource();
+    src.buffer = ab;
+    src.connect(S.out);
+    var now = S.ctx.currentTime;
+    if (S.nextPlay < now + 0.02) S.nextPlay = now + 0.16;         /* a jitter buffer of about 160 ms */
+    if (S.nextPlay > now + 1.0) S.nextPlay = now + 0.16;          /* too far ahead: start over */
+    src.start(S.nextPlay);
+    S.nextPlay += outN / rate;
+}
+setInterval(function () {
+    var info = "audio off";
+    if (S.audioOn && S.ctx) {
+        info = "audio " + S.ctx.state + ", " + (S.ctx.sampleRate / 1000) + " kHz, " + (S.rxFrames || 0) + " frames received" +
+               (S.rxLast ? ", last " + ((Date.now() - S.rxLast) / 1000).toFixed(1) + " s ago" : ", none yet (the radio sends audio while it receives)");
+    }
+    text($("audioInfo"), info);
+    S.rxLevel *= 0.8;
+    var i = $("rxMeter").firstElementChild;
+    i.style.width = Math.min(100, Math.round(S.rxLevel * 100)) + "%";
+}, 100);
+
+function openMic(stream) {
+    var ctx = S.ctx;
+    var src = ctx.createMediaStreamSource(stream);
+    var node = ctx.createScriptProcessor(2048, 1, 1);
+    var rate = ctx.sampleRate, phase = 0, acc = 0, cnt = 0;
+    var out = new Int16Array(160), fill = 0;
+    node.onaudioprocess = function (e) {
+        var inp = e.inputBuffer.getChannelData(0);
+        e.outputBuffer.getChannelData(0).fill(0);
+        if (!S.holding) { phase = 0; acc = 0; cnt = 0; fill = 0; return; }
+        for (var i = 0; i < inp.length; i++) {
+            acc += inp[i]; cnt++;
+            phase += 8000;
+            if (phase >= rate) {                       /* a box filter down to 8 kHz */
+                phase -= rate;
+                var s = Math.round((acc / cnt) * 32767 * levelOf("micLvl"));
+                out[fill++] = s > 32767 ? 32767 : s < -32768 ? -32768 : s;
+                acc = 0; cnt = 0;
+                if (fill === 160) { sendMic(out); fill = 0; }
+            }
+        }
+    };
+    src.connect(node);
+    node.connect(ctx.destination);                     /* silent: the output is zeros; the node only runs when connected */
+    S.mic = {stream: stream, src: src, node: node};
+}
+
+function sendMic(pcm) {
+    if (!S.ws || S.ws.readyState !== 1 || S.ws.bufferedAmount > 32768) return;
+    var ulaw = S.codec === 1;
+    var buf = new Uint8Array(4 + (ulaw ? 160 : 320));
+    buf[0] = 2; buf[1] = ulaw ? 1 : 0;
+    buf[2] = (S.txSeq >> 8) & 0xFF; buf[3] = S.txSeq & 0xFF;
+    S.txSeq = (S.txSeq + 1) & 0xFFFF;
+    if (ulaw) for (var i = 0; i < 160; i++) buf[4 + i] = ulawEncode(pcm[i]);
+    else for (var j = 0; j < 160; j++) { buf[4 + 2 * j] = pcm[j] & 0xFF; buf[5 + 2 * j] = (pcm[j] >> 8) & 0xFF; }
+    S.ws.send(buf.buffer);
+}
+
+/* ---------------------------------------------------------------- settings */
+function loadSettings() {
+    Promise.all([call("get_options"), call("get_settings")]).then(function (rs) {
+        if (rs[0].ok) S.options = rs[0].result;
+        if (rs[1].ok) { S.settings = rs[1].result.settings; buildSettings(); }
+    });
+}
+
+function sectionOf(key) {
+    for (var i = 0; i < SECTIONS.length; i++) if (SECTIONS[i][1].test(key)) return SECTIONS[i][0];
+    return "Other";
+}
+
+function buildSettings() {
+    var form = $("setForm");
+    form.textContent = "";
+    var groups = {}, order = [];
+    Object.keys(S.settings).sort().forEach(function (k) {
+        var g = sectionOf(k);
+        if (!groups[g]) { groups[g] = []; order.push(g); }
+        groups[g].push(k);
+    });
+    SECTIONS.map(function (s) { return s[0]; }).concat(["Other"]).forEach(function (g) {
+        if (!groups[g]) return;
+        var d = document.createElement("details");
+        var sm = document.createElement("summary");
+        sm.textContent = g;
+        d.appendChild(sm);
+        groups[g].forEach(function (k) { d.appendChild(settingField(k)); });
+        form.appendChild(d);
+    });
+    var gain = S.settings;
+    if (gain.m17Meta !== undefined) $("metaText").value = gain.m17Meta;
+    if (gain.m17MsgTo !== undefined) $("msgTo").value = gain.m17MsgTo;
+    applyLiveEnable();
+}
+
+function settingField(key) {
+    var v = S.settings[key];
+    var wrap = document.createElement("div");
+    var lab = document.createElement("label");
+    lab.textContent = key;
+    wrap.appendChild(lab);
+    var choices = null;
+    if (key === "mode" && S.options && S.options.modes) {
+        choices = S.options.modes.map(function (m) { return {value: m.id, label: m.label + (m.available === false ? " (not available)" : "")}; });
+    } else if (S.options && S.options.choices && S.options.choices[key]) {
+        choices = S.options.choices[key];
+    }
+    var el;
+    if (typeof v === "boolean") {
+        el = document.createElement("input");
+        el.type = "checkbox";
+        el.checked = v;
+        lab.className = "chk";
+        lab.insertBefore(el, lab.firstChild);
+        el.dataset.key = key; el.dataset.type = "b"; el.dataset.orig = v ? "1" : "0";
+        return wrap;
+    }
+    if (choices) {
+        el = document.createElement("select");
+        var found = false;
+        choices.forEach(function (c) {
+            var o = document.createElement("option");
+            o.value = String(c.value);
+            o.textContent = c.label;
+            if (String(c.value) === String(v)) { o.selected = true; found = true; }
+            el.appendChild(o);
+        });
+        if (!found) { var o2 = document.createElement("option"); o2.value = String(v); o2.textContent = String(v); o2.selected = true; el.appendChild(o2); }
+    } else {
+        el = document.createElement("input");
+        el.type = typeof v === "number" ? "number" : "text";
+        if (typeof v === "number") el.step = "any";
+        el.value = v;
+    }
+    el.dataset.key = key;
+    el.dataset.type = typeof v === "number" ? "n" : "s";
+    el.dataset.orig = String(v);
+    wrap.appendChild(el);
+    return wrap;
+}
+
+function applyLiveEnable() {
+    var c = !!S.radio.connected;
+    var els = $("setForm").querySelectorAll("[data-key]");
+    for (var i = 0; i < els.length; i++) if (els[i].tagName !== "LABEL") els[i].disabled = c && !LIVE[els[i].dataset.key];
+}
+
+$("setReload").onclick = function () { text($("setErr"), ""); loadSettings(); };
+$("setSave").onclick = function () {
+    var changes = {}, n = 0;
+    var els = $("setForm").querySelectorAll("[data-key]");
+    for (var i = 0; i < els.length; i++) {
+        var e = els[i];
+        if (e.tagName === "LABEL" || e.disabled) continue;
+        var t = e.dataset.type, now;
+        if (t === "b") now = e.checked ? "1" : "0";
+        else now = e.value;
+        if (now === e.dataset.orig) continue;
+        changes[e.dataset.key] = t === "b" ? e.checked : t === "n" ? Number(now) : now;
+        n++;
+    }
+    if (!n) { text($("setErr"), "Nothing changed."); return; }
+    text($("setErr"), "saving ...");
+    call("set_settings", {settings: changes}).then(function (r) {
+        text($("setErr"), r.ok ? "Saved." : (r.error || "refused"));
+        if (r.ok) loadSettings();
+    });
+};
+
+/* ---------------------------------------------------------------- monitor */
+function monitorStart() { if (!S.monitorOn && S.loggedIn) { S.monitorOn = true; call("monitor_start", {intervalMs: 500}); } }
+function monitorStop() { if (S.monitorOn) { S.monitorOn = false; send({id: S.nextId++, cmd: "monitor_stop"}); } }
+
+function onMonitor(m) {
+    var src = m.source === "iq" ? "IQ from the SDR" : "samples from the modem";
+    text($("monSource"), (m.active ? "Signal: " : "No signal: ") + src + (m.silentMs > 0 ? "  (no data for " + (m.silentMs / 1000).toFixed(1) + " s)" : ""));
+    var rows = [["RMS", m.rms], ["Peak", m.peak], ["Clipped", m.clipped], ["Baud", m.baud], ["Deviation (outer, Hz)", m.outerHz], ["Nominal (Hz)", m.nominalHz],
+        ["Outer %", m.outerPercent], ["Spread", m.spread], ["Blur", m.blur], ["Sync locked", m.syncLocked], ["Sync hits", m.syncHits],
+        ["Inverted", m.inverted], ["Averaged (s)", m.averagedSeconds]];
+    if (m.source === "iq") rows.push(["IQ rate", m.iqRate], ["IQ frames", m.iqFrames], ["IQ lost", m.iqLost], ["IQ overload", m.iqOverload]);
+    var t = $("monTable");
+    t.textContent = "";
+    rows.forEach(function (r) {
+        if (r[1] === undefined) return;
+        var tr = document.createElement("tr"), a = document.createElement("td"), b = document.createElement("td");
+        a.textContent = r[0];
+        b.textContent = typeof r[1] === "number" ? (Math.round(r[1] * 100) / 100) : String(r[1]);
+        tr.appendChild(a); tr.appendChild(b); t.appendChild(tr);
+    });
+    var c = $("monCanvas"), g = c.getContext("2d"), w = c.width, h = c.height;
+    g.clearRect(0, 0, w, h);
+    if (m.levelsValid && m.levels && m.levels.length) {
+        var mx = 1;
+        m.levels.forEach(function (l) { mx = Math.max(mx, Math.abs(l)); });
+        g.strokeStyle = "#2c3644"; g.beginPath(); g.moveTo(0, h / 2); g.lineTo(w, h / 2); g.stroke();
+        g.strokeStyle = "#4da3ff"; g.lineWidth = 3;
+        m.levels.forEach(function (l) {
+            var y = h / 2 - (l / mx) * (h / 2 - 8);
+            g.beginPath(); g.moveTo(40, y); g.lineTo(w - 40, y); g.stroke();
+        });
+        if (m.centre !== undefined) { g.strokeStyle = "#f5b942"; g.lineWidth = 1; var yc = h / 2 - (m.centre / mx) * (h / 2 - 8); g.beginPath(); g.moveTo(0, yc); g.lineTo(w, yc); g.stroke(); }
+    } else {
+        g.fillStyle = "#8b98a8"; g.font = "16px sans-serif"; g.fillText("no symbol levels yet", 20, h / 2);
+    }
+}
+
+/* ---------------------------------------------------------------- tabs, login */
+Array.prototype.forEach.call(document.querySelectorAll(".tabs button"), function (b) {
+    b.onclick = function () {
+        S.tab = b.dataset.tab;
+        Array.prototype.forEach.call(document.querySelectorAll(".tabs button"), function (x) { x.classList.toggle("on", x === b); });
+        ["radio", "settings", "monitor", "log"].forEach(function (t) { $("tab-" + t).classList.toggle("hidden", t !== S.tab); });
+        if (S.tab === "monitor") monitorStart(); else monitorStop();
+    };
+});
+
+function doLogin() {
+    var t = normToken($("token").value);
+    if (!window.crypto || !crypto.subtle) { text($("loginErr"), "This page needs a secure connection (https). Open it from the radio's address."); return; }
+    if (t.length !== 24) { text($("loginErr"), "The token has 24 characters."); return; }
+    S.token = t;
+    unlockAudio();                                  /* this click is what lets the browser play sound */
+    text($("loginErr"), "");
+    try { localStorage.removeItem("openmtOff"); } catch (e) {}
+    S.wantOnline = true;
+    S.retry = 0;
+    openSocket();
+}
+$("loginBtn").onclick = doLogin;
+$("forget").onclick = function () {
+    try { localStorage.removeItem("openmtToken"); localStorage.removeItem("openmtOff"); } catch (e) {}
+    $("token").value = "";
+    text($("storeNote"), "The saved token is forgotten.");
+};
+$("token").addEventListener("keydown", function (e) { if (e.key === "Enter") doLogin(); });
+/* Disconnect: the page stays signed out (also after a reload) until Connect is pressed; the saved token stays, and fills the box. */
+$("logout").onclick = function () {
+    S.wantOnline = false;
+    stopTx(true);
+    if (S.ws) S.ws.close();
+    var saved = null;
+    try { saved = localStorage.getItem("openmtToken"); if (saved) localStorage.setItem("openmtOff", "1"); } catch (e) {}
+    $("token").value = saved || "";
+    text($("storeNote"), saved ? "Disconnected. The token is still saved: press Connect to sign in again." : "");
+    showLogin();
+};
+/* A saved token signs in by itself.  A browser lets sound play only after a touch, so the first touch anywhere wakes the audio. */
+(function () {
+    var wake = function () { unlockAudio(); document.removeEventListener("pointerdown", wake, true); document.removeEventListener("keydown", wake, true); };
+    document.addEventListener("pointerdown", wake, true);
+    document.addEventListener("keydown", wake, true);
+    var t = null;
+    try { t = localStorage.getItem("openmtToken"); } catch (e) { text($("storeNote"), "This browser blocks storage for this page (" + (e && e.name ? e.name : "?") + "): the token cannot be remembered."); }
+    if (!t) text($("storeNote"), $("storeNote").textContent || "No token is saved on this device yet.");
+    var off = false;
+    try { off = localStorage.getItem("openmtOff") === "1"; } catch (e) {}
+    if (t) {
+        $("token").value = t;
+        $("remember").checked = true;
+        if (off) text($("storeNote"), "Disconnected. The token is still saved: press Connect to sign in again.");
+        else if (window.crypto && crypto.subtle && normToken(t).length === 24) {
+            S.token = normToken(t);
+            S.wantOnline = true;
+            openSocket();
+        }
+    }
+})();
+</script>
+</body>
+</html>

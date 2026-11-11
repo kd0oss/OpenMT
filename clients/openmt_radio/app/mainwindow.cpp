@@ -3,6 +3,7 @@
 #include "audioio.h"
 #include "monitorwidget.h"
 #include "radiocontroller.h"
+#include "remotebridge.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -27,11 +28,16 @@
 #include <QSettings>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "../core/radio_engine.h"
+#include "../core/remote_settings.h"
+
+#include <cmath>
 
 static const char* const OFF_STYLE = "background:#444;color:#ccc;border-radius:4px;padding:6px;font-weight:bold;";
 
@@ -61,6 +67,16 @@ MainWindow::MainWindow(QWidget* parent) :
     QObject::connect(audio_, SIGNAL(playLevel(float)), this, SLOT(onSpeakerLevel(float)));
 
     openDongle();                       /* the dongle's port stays open from here until the program ends */
+
+    /* the remote control: the window is the RemoteUi, the radio the transmitter */
+    remote_ = new RemoteBridge(this, radio_, this);
+    QObject::connect(remote_, SIGNAL(remoteLog(QString)), this, SLOT(onLog(QString)));
+    remoteTimer_ = new QTimer(this);
+    remoteTimer_->setInterval(1000);
+    QObject::connect(remoteTimer_, SIGNAL(timeout()), this, SLOT(refreshRemoteInfo()));
+    remoteTimer_->start();
+    loadRemoteSettings();
+    applyRemote();
 }
 
 MainWindow::~MainWindow()
@@ -425,6 +441,34 @@ void MainWindow::buildUi()
     QVBoxLayout* right = new QVBoxLayout;
     right->addWidget(vo);
     right->addWidget(so);
+
+    /* the remote control (the Android app and other clients) */
+    QGroupBox* rc = new QGroupBox("Remote control", central);
+    QFormLayout* rcf = new QFormLayout(rc);
+    remoteEnable_ = new QCheckBox("Allow remote control", rc);
+    remoteEnable_->setToolTip("Lets a phone or another program connect over the network and use this radio: push to talk, listen, change the settings. "
+                              "Anyone who has the token and can reach the port can transmit: use a trusted network or a VPN, never the open internet");
+    remotePort_ = new QSpinBox(rc);
+    remotePort_->setRange(1024, 65535);
+    remotePort_->setValue(18060);
+    remoteToken_ = new QLineEdit(rc);
+    remoteToken_->setReadOnly(true);
+    remoteToken_->setToolTip("The pairing token: type it into the phone app. Select it to copy");
+    remoteNewToken_ = new QPushButton("New token", rc);
+    remoteNewToken_->setFocusPolicy(Qt::NoFocus);
+    remoteNewToken_->setToolTip("Makes a new token. The clients that have the old one are disconnected and cannot come back");
+    remoteInfo_ = new QLabel(rc);
+    remoteInfo_->setWordWrap(true);
+    remoteInfo_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    rcf->addRow("", remoteEnable_);
+    rcf->addRow("Port", remotePort_);
+    rcf->addRow("Token", remoteToken_);
+    rcf->addRow("", remoteNewToken_);
+    rcf->addRow(remoteInfo_);
+    right->addWidget(rc);
+    QObject::connect(remoteEnable_, SIGNAL(toggled(bool)), this, SLOT(onRemoteChanged()));
+    QObject::connect(remotePort_, SIGNAL(editingFinished()), this, SLOT(onRemoteChanged()));
+    QObject::connect(remoteNewToken_, SIGNAL(clicked()), this, SLOT(onRemoteNewToken()));
     settings->addLayout(left);
     settings->addLayout(right);
     top->addLayout(settings);
@@ -649,6 +693,10 @@ void MainWindow::saveSettings()
     s.setValue("rate", rate_->currentData().toInt());
     s.setValue("micGain", micGain_->value());
     s.setValue("spkGain", spkGain_->value());
+    s.setValue("remoteEnabled", remoteEnable_->isChecked());
+    s.setValue("remotePort", remotePort_->value());
+    if (!remoteTokenRaw_.isEmpty())
+        s.setValue("remoteToken", remoteTokenRaw_);
 }
 
 void MainWindow::setIndicator(QLabel* label, const QString& text, const QString& colour)
@@ -728,6 +776,8 @@ void MainWindow::setConnected(bool connected)
 
     if (!connected)
     {
+        rxOn_ = false;
+        txOn_ = false;
         setIndicator(rxLed_, "RX", QString());
         setIndicator(txLed_, "TX", QString());
         micMeter_->setValue(0);
@@ -916,6 +966,11 @@ void MainWindow::onPttPressed()
 {
     if (!connected_ || pttHeld_)
         return;
+    if (remote_ != nullptr && !remote_->localPtt(true))
+    {
+        onLog("push to talk: a remote client holds the key");
+        return;
+    }
     pttHeld_ = true;
     radio_->ptt(true);
 }
@@ -1029,6 +1084,8 @@ void MainWindow::onPttReleased()
         return;
     pttHeld_ = false;
     radio_->ptt(false);
+    if (remote_ != nullptr)
+        remote_->localPtt(false);
 }
 
 void MainWindow::onCallEvent(int event, unsigned int src, unsigned int dst, bool group, float ber, const QString& text)
@@ -1036,6 +1093,7 @@ void MainWindow::onCallEvent(int event, unsigned int src, unsigned int dst, bool
     switch (event)
     {
     case openmt::CALL_RX_START:
+        rxOn_ = true;
         setIndicator(rxLed_, "RX", "#2a8a2a");
         if (src == 0U && dst == 0U && !text.isEmpty())
             heard_->setText(QString("Last heard: %1").arg(text));
@@ -1048,6 +1106,7 @@ void MainWindow::onCallEvent(int event, unsigned int src, unsigned int dst, bool
         break;
     case openmt::CALL_RX_END:
     case openmt::CALL_RX_LOST:
+        rxOn_ = false;
         setIndicator(rxLed_, "RX", QString());
         if (src == 0U && dst == 0U)
             heard_->setText(QString("Last heard: %1  BER %2%  %3 (%4)")
@@ -1061,9 +1120,11 @@ void MainWindow::onCallEvent(int event, unsigned int src, unsigned int dst, bool
                                 .arg(event == openmt::CALL_RX_END ? "end" : "lost"));
         break;
     case openmt::CALL_TX_START:
+        txOn_ = true;
         setIndicator(txLed_, "TX", "#b02020");
         break;
     case openmt::CALL_TX_END:
+        txOn_ = false;
         setIndicator(txLed_, "TX", QString());
         break;
     default:
@@ -1130,7 +1191,308 @@ void MainWindow::onM17Meta()
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     saveSettings();
+    if (remote_ != nullptr)
+        remote_->stop();
     radio_->stop();
     audio_->stop();
     event->accept();
+}
+
+/* ------------------------------------------------------------------------------------------------------------ */
+/* Remote control                                                                                               */
+/* ------------------------------------------------------------------------------------------------------------ */
+
+void MainWindow::loadRemoteSettings()
+{
+    QSettings s("OpenMT", "OpenMT Radio");
+
+    remoteTokenRaw_ = s.value("remoteToken").toString();
+    if (remoteTokenRaw_.isEmpty())
+    {
+        remoteTokenRaw_ = RemoteBridge::newToken();
+        s.setValue("remoteToken", remoteTokenRaw_);
+    }
+    remotePort_->setValue(s.value("remotePort", 18060).toInt());
+    remoteToken_->setText(RemoteBridge::formatToken(remoteTokenRaw_));
+    remoteEnable_->setChecked(s.value("remoteEnabled", false).toBool());
+}
+
+void MainWindow::applyRemote()
+{
+    if (remote_ == nullptr)
+        return;
+
+    remote_->stop();
+    remoteError_.clear();
+    if (remoteEnable_->isChecked() && !remoteTokenRaw_.isEmpty())
+    {
+        QString dir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/remote";
+        QString error;
+
+        if (remote_->start((unsigned int)remotePort_->value(), remoteTokenRaw_, dir, error))
+            onLog(QString("remote control: listening on port %1").arg(remotePort_->value()));
+        else
+        {
+            remoteError_ = error;
+            onLog("remote control: " + error);
+        }
+    }
+    saveSettings();
+    refreshRemoteInfo();
+}
+
+void MainWindow::onRemoteChanged()
+{
+    if (remote_ != nullptr)
+        applyRemote();
+}
+
+void MainWindow::onRemoteNewToken()
+{
+    QString token = RemoteBridge::newToken();
+
+    if (token.isEmpty())
+    {
+        onLog("remote control: no token could be made");
+        return;
+    }
+    remoteTokenRaw_ = token;
+    remoteToken_->setText(RemoteBridge::formatToken(token));
+    applyRemote();                                  /* restarts the server: the clients with the old token are gone */
+    onLog("remote control: a new token was made; the clients that had the old one are disconnected");
+}
+
+void MainWindow::refreshRemoteInfo()
+{
+    QString text;
+
+    if (remoteInfo_ == nullptr || remote_ == nullptr)
+        return;
+    if (!RemoteBridge::available())
+        text = "This build has no remote control (OpenSSL was not found).";
+    else if (!remoteEnable_->isChecked())
+        text = "Off.";
+    else if (!remoteError_.isEmpty())
+        text = "Not listening: " + remoteError_;
+    else if (remote_->running())
+        text = QString("Listening on port %1, %2 client(s) connected.\nWeb page: https://this-computer:%1/\nCertificate fingerprint (SHA-256), to check on the phone:\n%3")
+                   .arg(remote_->port()).arg(remote_->clients()).arg(remote_->fingerprint());
+    remoteInfo_->setText(text);
+    remoteEnable_->setEnabled(RemoteBridge::available());
+}
+
+/* the settings of the table, in their types.  The window's widgets are saved first, so what the client sees is what the window shows */
+static openmt::Json jsonFromVariant(const QVariant& v, char type)
+{
+    switch (type)
+    {
+        case 'i': return openmt::Json((long long)v.toLongLong());
+        case 'd': return openmt::Json(v.toDouble());
+        case 'b': return openmt::Json(v.toBool());
+        default:  return openmt::Json(v.toString().toStdString());
+    }
+}
+
+static QVariant variantFromJson(const openmt::Json& j, char type)
+{
+    switch (type)
+    {
+        case 'i': return QVariant((qlonglong)j.asInt());
+        case 'd': return QVariant(j.asNumber());
+        case 'b': return QVariant(j.asBool());
+        default:
+            if (j.isNumber())
+            {
+                double d = j.asNumber();
+
+                return QVariant(std::floor(d) == d ? QString::number((qlonglong)d) : QString::number(d, 'g', 10));
+            }
+            return QVariant(QString::fromStdString(j.asString()));
+    }
+}
+
+std::map<std::string, openmt::Json> MainWindow::remoteSettings()
+{
+    std::map<std::string, openmt::Json> out;
+    size_t n;
+    const openmt::SettingDef* table = openmt::remoteSettingTable(n);
+
+    saveSettings();
+
+    QSettings s("OpenMT", "OpenMT Radio");
+
+    for (size_t i = 0U; i < n; i++)
+        out[table[i].key] = jsonFromVariant(s.value(table[i].key), table[i].type);
+    return out;
+}
+
+std::string MainWindow::remoteApplySettings(const std::map<std::string, openmt::Json>& values)
+{
+    size_t n;
+    const openmt::SettingDef* table = openmt::remoteSettingTable(n);
+
+    /* the window's controls fall back to their first entry for a value they do not have: refuse such a value instead */
+    for (std::map<std::string, openmt::Json>::const_iterator it = values.begin(); it != values.end(); ++it)
+    {
+        const QString key = QString::fromStdString(it->first);
+        QComboBox* combo = nullptr;
+        bool byData = true;
+
+        if (key == "mode") combo = mode_;
+        else if (key == "rate") combo = rate_;
+        else if (key == "layout") combo = layout_;
+        else if (key == "fmSquelch") combo = fmSquelch_;
+        else if (key == "dmrRepeater") combo = dmrOperation_;
+        else if (key == "dmrSlot") combo = dmrSlot_;
+        else if (key == "m17Filter") combo = m17Filter_;
+        else if (key == "ambeBaud") { combo = ambeBaud_; byData = false; }
+        else if (key == "audioIn") { combo = audioIn_; byData = false; }
+        else if (key == "audioOut") { combo = audioOut_; byData = false; }
+
+        if (combo != nullptr)
+        {
+            const openmt::Json& v = it->second;
+            int index = byData ? combo->findData((int)v.asInt())
+                               : combo->findText(variantFromJson(v, 's').toString());
+
+            if (index < 0)
+                return "\"" + it->first + "\" has no such choice (see get_options)";
+        }
+        if (key == "mode" && !openmt::modeAvailable((openmt::ModeId)it->second.asInt()))
+            return "that mode is not available in this version";
+    }
+
+    saveSettings();                                 /* what the window shows now stays */
+
+    QSettings s("OpenMT", "OpenMT Radio");
+
+    for (std::map<std::string, openmt::Json>::const_iterator it = values.begin(); it != values.end(); ++it)
+    {
+        for (size_t i = 0U; i < n; i++)
+            if (it->first == table[i].key)
+                s.setValue(table[i].key, variantFromJson(it->second, table[i].type));
+    }
+    s.sync();
+    loadSettings();                                 /* the controls take the values */
+    onGains();
+    if (connected_ && values.count("m17Meta") != 0U)
+        onM17Meta();
+    return std::string();
+}
+
+static void addChoices(openmt::Json& choices, const char* key, QComboBox* combo, bool byData)
+{
+    openmt::Json list = openmt::Json::array();
+
+    for (int i = 0; i < combo->count(); i++)
+    {
+        openmt::Json item = openmt::Json::object();
+
+        if (byData)
+            item.set("value", openmt::Json((long long)combo->itemData(i).toInt()));
+        else
+            item.set("value", openmt::Json(combo->itemText(i).toStdString()));
+        item.set("label", openmt::Json(combo->itemText(i).toStdString()));
+        list.push(item);
+    }
+    choices.set(key, list);
+}
+
+openmt::Json MainWindow::remoteOptions()
+{
+    openmt::Json o = openmt::Json::object();
+    openmt::Json modes = openmt::Json::array();
+    openmt::Json choices = openmt::Json::object();
+
+    for (int i = 0; i < mode_->count(); i++)
+    {
+        openmt::Json m = openmt::Json::object();
+        int id = mode_->itemData(i).toInt();
+
+        m.set("id", openmt::Json((long long)id));
+        m.set("label", openmt::Json(mode_->itemText(i).toStdString()));
+        m.set("available", openmt::Json(openmt::modeAvailable((openmt::ModeId)id)));
+        modes.push(m);
+    }
+    o.set("modes", modes);
+    addChoices(choices, "mode", mode_, true);
+    addChoices(choices, "rate", rate_, true);
+    addChoices(choices, "layout", layout_, true);
+    addChoices(choices, "fmSquelch", fmSquelch_, true);
+    addChoices(choices, "dmrRepeater", dmrOperation_, true);
+    addChoices(choices, "dmrSlot", dmrSlot_, true);
+    addChoices(choices, "m17Filter", m17Filter_, true);
+    addChoices(choices, "ambeBaud", ambeBaud_, false);
+    addChoices(choices, "audioIn", audioIn_, false);
+    addChoices(choices, "audioOut", audioOut_, false);
+    o.set("choices", choices);
+    return o;
+}
+
+openmt::Json MainWindow::remoteStatus()
+{
+    openmt::Json s = openmt::Json::object();
+    int mode = mode_->currentData().toInt();
+
+    s.set("connected", openmt::Json(connected_));
+    s.set("mode", openmt::Json((long long)mode));
+    s.set("modeLabel", openmt::Json(std::string(openmt::modeLabel((openmt::ModeId)mode))));
+    s.set("status", openmt::Json(status_->text().toStdString()));
+    s.set("heard", openmt::Json(heard_->text().toStdString()));
+    s.set("vocoder", openmt::Json(connected_ ? radio_->vocoderDescription().toStdString() : std::string()));
+    s.set("dtmf", openmt::Json(connected_ && radio_->dtmfSupported()));
+    s.set("messages", openmt::Json(connected_ && radio_->messagesSupported()));
+    s.set("rx", openmt::Json(rxOn_));
+    s.set("tx", openmt::Json(txOn_));
+    return s;
+}
+
+std::string MainWindow::remoteConnect()
+{
+    if (connected_)
+        return std::string();
+    onConnect();
+    return connected_ ? std::string() : status_->text().toStdString();
+}
+
+std::string MainWindow::remoteDisconnect()
+{
+    if (connected_)
+        onConnect();
+    return std::string();
+}
+
+std::string MainWindow::remoteRelease()
+{
+    if (!connected_)
+        return "release: not connected";
+    onRelease();
+    return std::string();
+}
+
+std::string MainWindow::remoteOpenDongle()
+{
+    if (noVocoder_->isChecked())
+        return "the \"No dongle\" setting is on";
+    openDongle();
+    return radio_->dongleOpen() ? std::string() : std::string("the dongle could not be opened (see the log)");
+}
+
+std::string MainWindow::remoteSendMessage(const std::string& to, const std::string& text)
+{
+    if (!connected_)
+        return "not connected";
+
+    QString error;
+
+    if (!radio_->sendMessage(QString::fromStdString(to).trimmed().toUpper(), QString::fromStdString(text), error))
+        return error.toStdString();
+    return std::string();
+}
+
+std::string MainWindow::remoteSetMeta(const std::string& text)
+{
+    m17Meta_->setText(QString::fromStdString(text));
+    onM17Meta();
+    return std::string();
 }

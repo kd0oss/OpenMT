@@ -11,10 +11,23 @@ RadioController::~RadioController()
     stop();
 }
 
+void RadioController::setRxAudioTap(const std::function<void(const int16_t*, size_t)>& tap)
+{
+    std::lock_guard<std::mutex> lock(tapMutex_);
+
+    rxTap_ = tap;
+}
+
 bool RadioController::start(const openmt::EngineSettings& settings, QString& error)
 {
     engine_.events.rxAudio = [this](const int16_t* pcm, size_t count)
     {
+        {
+            std::lock_guard<std::mutex> lock(tapMutex_);
+
+            if (rxTap_)
+                rxTap_(pcm, count);
+        }
         QVector<qint16> v(pcm, pcm + count);
         emit rxAudio(v);
     };

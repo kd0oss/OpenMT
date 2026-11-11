@@ -4,8 +4,10 @@
 #ifndef OPENMT_RADIO_ENGINE_H
 #define OPENMT_RADIO_ENGINE_H
 
+#include <atomic>
 #include <cstdio>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "modem_link.h"
@@ -75,6 +77,8 @@ public:
     void stop();
     bool running() const;
 
+    /* ptt(), pushMic() and sendDtmf() can be called from any thread (the remote server calls them); the rest from the thread that
+       starts and stops the engine */
     void ptt(bool down);
 
     /* Tells Modem_Host to let go of this mode, if it is holding it (after a crash or a lost message it can keep the mode and
@@ -123,7 +127,8 @@ private:
     RfMonitor                    monitor_;
     IqMonitor                    iq_;               /* before spectrum_: the client thread feeds it, so it is destroyed after */
     SpectrumClient               spectrum_;
-    bool                         running_;
+    std::atomic<bool>            running_;
+    mutable std::mutex           modeMutex_;        /* ptt(), pushMic() and sendDtmf() may come from the remote server's threads: they hold it while they use mode_, stop() while it resets it */
     FILE*                        capture_;
 };
 

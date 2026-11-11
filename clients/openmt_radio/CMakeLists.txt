@@ -71,9 +71,33 @@ add_library(openmt_radio_core STATIC
     ${OPENMT_ROOT}/protocols/m17/M17/M17LinkSetupFrame.cpp
     ${OPENMT_ROOT}/protocols/m17/M17/M17Golay.cpp
     core/radio_engine.cpp
+    core/remote_json.cpp
+    core/remote_settings.cpp
 )
 target_include_directories(openmt_radio_core PUBLIC core third_party/imbe_vocoder ${OPENMT_ROOT}/protocols/m17 ${OPENMT_ROOT}/tools)
 target_link_libraries(openmt_radio_core PUBLIC openmt_repo_c Threads::Threads ${CMAKE_DL_LIBS})
+
+# The remote control server (WebSocket over TLS) needs OpenSSL.  Without it the program is built without the remote control.
+option(BUILD_REMOTE "Build the remote control server (needs OpenSSL)" ON)
+set(OPENMT_HAVE_REMOTE OFF)
+if (BUILD_REMOTE)
+    find_package(OpenSSL QUIET)
+    if (OPENSSL_FOUND)
+        # The web client (web/index.html) is built into the program as a C array, so the radio can serve it by itself
+        file(READ ${CMAKE_CURRENT_SOURCE_DIR}/web/index.html OPENMT_WEB_HEX HEX)
+        string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," OPENMT_WEB_HEX "${OPENMT_WEB_HEX}")
+        file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/web_client_data.cpp
+            "#include \"web_client.h\"\nnamespace openmt\n{\nstatic const unsigned char kPage[] = {${OPENMT_WEB_HEX}0x00};\n"
+            "const std::string& webClientPage()\n{\n    static const std::string page((const char*)kPage, sizeof(kPage) - 1U);\n    return page;\n}\n}\n")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/web/index.html)
+        target_sources(openmt_radio_core PRIVATE core/remote_server.cpp core/remote_control.cpp ${CMAKE_CURRENT_BINARY_DIR}/web_client_data.cpp)
+        target_link_libraries(openmt_radio_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+        target_compile_definitions(openmt_radio_core PUBLIC OPENMT_REMOTE=1)
+        set(OPENMT_HAVE_REMOTE ON)
+    else()
+        message(STATUS "OpenSSL not found: OpenMT Radio is built without the remote control (install libssl-dev to get it)")
+    endif()
+endif()
 
 if (BUILD_TESTS)
     add_executable(spectrum_client_test tests/spectrum_client_test.cpp)
@@ -97,7 +121,23 @@ if (BUILD_TESTS)
     target_link_libraries(fm_interop_tool PRIVATE openmt_radio_core)
     add_executable(ysf_interop_tool tests/ysf_interop_tool.cpp)
     target_link_libraries(ysf_interop_tool PRIVATE openmt_radio_core)
+    add_executable(remote_json_test tests/remote_json_test.cpp)
+    target_link_libraries(remote_json_test PRIVATE openmt_radio_core)
     enable_testing()
+    add_test(NAME remote_json_test COMMAND remote_json_test)
+    if (OPENMT_HAVE_REMOTE)
+        add_executable(remote_test_server tests/remote_test_server.cpp)
+        target_link_libraries(remote_test_server PRIVATE openmt_radio_core)
+        add_executable(remote_control_server tests/remote_control_server.cpp)
+        target_link_libraries(remote_control_server PRIVATE openmt_radio_core)
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if (Python3_FOUND)
+            add_test(NAME remote_protocol COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/remote_test.py $<TARGET_FILE:remote_test_server>)
+            add_test(NAME remote_control COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/remote_control_test.py $<TARGET_FILE:remote_control_server>)
+            add_test(NAME android_core COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/android_core_test.py $<TARGET_FILE:remote_control_server>)
+            add_test(NAME web_client COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/web_client_test.py $<TARGET_FILE:remote_control_server>)
+        endif()
+    endif()
     add_test(NAME core_test COMMAND core_test)
     add_test(NAME monitor_test COMMAND monitor_test)
     add_test(NAME iq_monitor_test COMMAND iq_monitor_test)
@@ -117,6 +157,8 @@ if (BUILD_GUI)
             app/audioio.h
             app/radiocontroller.cpp
             app/radiocontroller.h
+            app/remotebridge.cpp
+            app/remotebridge.h
             app/monitorwidget.cpp
             app/monitorwidget.h
         )

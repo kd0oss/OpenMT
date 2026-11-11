@@ -325,7 +325,10 @@ void RadioEngine::stop()
         std::fclose(capture_);
         capture_ = NULL;
     }
-    mode_.reset();
+    {
+        std::lock_guard<std::mutex> lock(modeMutex_);
+        mode_.reset();
+    }
     if (dongle_ && vocoder_ == dongle_.get())
         vocoder_->setCodec(Vocoder::CODEC_AMBE2);    /* the port stays open, the chip goes back to its usual rate */
     vocoder_ = NULL;
@@ -348,6 +351,8 @@ bool RadioEngine::dtmfSupported() const
 
 bool RadioEngine::sendDtmf(char digit)
 {
+    std::lock_guard<std::mutex> lock(modeMutex_);
+
     if (!running_ || !mode_)
         return false;
     return mode_->sendDtmf(digit);
@@ -376,6 +381,8 @@ void RadioEngine::setMetaText(const std::string& text)
 
 void RadioEngine::ptt(bool down)
 {
+    std::lock_guard<std::mutex> lock(modeMutex_);
+
     if (!running_ || !mode_)
         return;
 
@@ -387,6 +394,8 @@ void RadioEngine::ptt(bool down)
 
 void RadioEngine::pushMic(const int16_t* pcm8k, size_t count)
 {
+    std::lock_guard<std::mutex> lock(modeMutex_);
+
     if (running_ && mode_)
         mode_->micAudio(pcm8k, count);
 }

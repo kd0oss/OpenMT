@@ -264,6 +264,20 @@ The receiver accepts the base station, mobile and direct mode slot 1 and 2 sync 
 
 The block layout is detected when connecting; set it by hand only if reception or transmission sounds wrong.
 
+## Remote control
+
+OpenMT Radio can be used from another device: a phone app, a web page or a script. Tick *Allow remote control* (right column of the
+Radio tab) and note the token and the certificate fingerprint. A client connects to `wss://this-machine:18060/openmt`, proves it knows
+the token, and can then listen, push to talk and send its microphone, connect and disconnect, change every setting of the window and
+watch the signal monitor. The radio, the dongle and the vocoders stay on this machine: the client only needs the network.
+
+**A client that has the token can transmit.** Use it on your own network or over a VPN, never open the port to the internet, and
+pin the certificate fingerprint on the client. A transmission that a client starts stops by itself when the client goes silent
+(1.5 s), disconnects or transmits for 180 s. The protocol is in [REMOTE_PROTOCOL.md](REMOTE_PROTOCOL.md); `tests/remote_client.py` is a
+working client. The radio also serves a **web client** for phones and PCs: open `https://this-machine:18060/` in a browser, accept the
+certificate once, enter the token, and you have the radio's controls, settings, monitor and log, push to talk and audio (the browser
+asks for the microphone). An Android app is in [android/](android/README.md). It needs OpenSSL (`libssl-dev`) when building; without it the program builds without the remote control.
+
 ## Monitor tab
 
 The Monitor tab is a virtual service monitor.  From the samples received from Modem_Host it shows the eye diagram, the histogram of
@@ -278,7 +292,9 @@ levels and the deviation come from:
   the deviation is in real Hz (no assumption about the modem's scaling), the carrier's frequency error is shown, and the eye has
   13 samples a symbol.  It is the transmitter that is measured, like a service monitor does.  Only these two bridges send IQ.
 - *Modem samples*: what Modem_Host delivers, i.e. what the decoder sees (0.7 counts per Hz).  Works with every modem.
-- *Automatic* (default): the IQ when the bridge sends it and there is a signal in it, otherwise the modem samples.
+- *Automatic* (default): the IQ when the bridge sends it and there is a signal in it, otherwise the modem samples.  When the modem's
+  samples stop for more than a second (Modem_Host sends none while it serves another mode, M17 for instance) the IQ is used
+  whenever it arrives, so the charts stay live; without IQ they hold the last signal and the yellow line counts the silence.
 
 For P25 and DMR the monitor also looks for the frame syncs.  The sync symbols are all +3 or -3, so their mean is the outer level
 without the bias that noise puts on a blind reading: with syncs found the deviation is exact (the readout says so and how many syncs

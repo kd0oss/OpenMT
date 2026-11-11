@@ -4,6 +4,9 @@
 #ifndef OPENMT_RADIOCONTROLLER_H
 #define OPENMT_RADIOCONTROLLER_H
 
+#include <functional>
+#include <mutex>
+
 #include <QObject>
 #include <QString>
 #include <QVector>
@@ -25,6 +28,10 @@ public:
     openmt::RfMonitor& monitor() { return engine_.monitor(); }
     openmt::SpectrumClient& spectrum() { return engine_.spectrum(); }
     openmt::IqMonitor& iq() { return engine_.iq(); }
+    openmt::RadioEngine& engine() { return engine_; }
+
+    /* Sees the received speech (8 kHz, from the engine's thread) as well as the window does; the remote control sends it on */
+    void setRxAudioTap(const std::function<void(const int16_t*, size_t)>& tap);
 
     void ptt(bool down);
     bool releaseModem();
@@ -47,6 +54,8 @@ signals:
 
 private:
     openmt::RadioEngine engine_;
+    std::mutex          tapMutex_;
+    std::function<void(const int16_t*, size_t)> rxTap_;
 };
 
 #endif
