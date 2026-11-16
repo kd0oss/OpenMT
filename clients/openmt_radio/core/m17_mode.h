@@ -34,7 +34,7 @@ namespace openmt
 struct M17Config
 {
     std::string  callsign   = "N0CALL"; /* this radio, up to 9 characters */
-    std::string  dest       = "ALL";    /* the station called; "ALL" or "@ALL" call everyone */
+    std::string  dest       = "ALL";    /* the station called; ALL or @ALL (any case) call everyone (the broadcast address); PARROT is sent as @PARROT */
     unsigned int can        = 0;        /* channel access number, 0 - 15 */
     unsigned int txDelayMs  = 200;      /* preamble before the call */
     unsigned int modeHangMs = 1500;     /* the modem is kept for this long after a call, then handed back */
@@ -73,6 +73,10 @@ public:
        (SMS, M17 packet mode).  A message is sent as soon as the transmitter is free. */
     bool supportsMessages() const { return true; }
     bool sendMessage(const std::string& to, const std::string& text, std::string& error);
+
+    /* The name that goes on the air for what was typed (ALL, @PARROT, or the name in capitals), and putting it in a new link setup frame */
+    static std::string destinationName(const std::string& typed);
+    static void setDestination(M17::M17LinkSetupFrame& lsf, const std::string& typed);
     void setMetaText(const std::string& text);
 
     /* Limits of the text: the metadata holds four blocks of 13 bytes; a packet is at most 800 bytes: the type byte, the text, a

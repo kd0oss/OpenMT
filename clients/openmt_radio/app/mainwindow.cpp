@@ -266,7 +266,7 @@ void MainWindow::buildUi()
     m17Call_->setToolTip("The source callsign of this radio (up to 9 characters)");
     m17Dest_ = new QLineEdit("ALL", mg);
     m17Dest_->setMaxLength(9);
-    m17Dest_->setToolTip("The destination: ALL calls everyone");
+    m17Dest_->setToolTip("The destination: ALL or @ALL calls everyone; PARROT is sent as @PARROT");
     m17Can_ = new QSpinBox(mg);
     m17Can_->setRange(0, 15);
     m17Can_->setToolTip("Channel access number (0 - 15); the host may ignore calls with another number");
@@ -287,7 +287,7 @@ void MainWindow::buildUi()
     m17f->addRow("Text with voice", m17Meta_);
     m17MsgTo_ = new QLineEdit("ALL", mg);
     m17MsgTo_->setMaxLength(9);
-    m17MsgTo_->setToolTip("The callsign a text message is for (ALL for everyone)");
+    m17MsgTo_->setToolTip("The callsign a text message is for (ALL or @ALL for everyone; PARROT is sent as @PARROT)");
     m17Msg_ = new QLineEdit(mg);
     m17Msg_->setPlaceholderText("message, sent in packet mode");
     m17Msg_->setToolTip("A text message (SMS) sent as an M17 packet to the callsign above. Press Enter or Send. Up to 796 bytes");

@@ -60,6 +60,37 @@ static std::string trimmed(const std::string& s)
     return s.substr(0U, n);
 }
 
+/* ALL and @ALL, in any case, call everyone: the broadcast address.  PARROT is sent as @PARROT (the reflectors' parrot answers to that
+   name).  Any other name is sent as typed, in capitals (the base 40 address has no lower case). */
+std::string M17Mode::destinationName(const std::string& typed)
+{
+    std::string d;
+    size_t first = 0U;
+
+    while (first < typed.size() && typed[first] == ' ')
+        first++;
+    d = trimmed(typed.substr(first));
+    for (size_t i = 0U; i < d.size(); i++)
+        if (d[i] >= 'a' && d[i] <= 'z')
+            d[i] = (char)(d[i] - 'a' + 'A');
+    if (d.empty() || d == "ALL" || d == "@ALL")
+        return "ALL";
+    if (d == "PARROT")
+        return "@PARROT";
+    return d;
+}
+
+void M17Mode::setDestination(M17::M17LinkSetupFrame& lsf, const std::string& typed)
+{
+    std::string d = destinationName(typed);
+
+    /* A new link setup frame has the broadcast address (all ones) in it, so for ALL there is nothing to set (use a frame that has not had
+       another destination put in it).  The '@' of @PARROT has no base 40 digit and becomes a blank: that is how the M17 address
+       encoding defines it, and how the other M17 programs send it. */
+    if (d != "ALL")
+        lsf.setDestination(d);
+}
+
 /* The first 'max' bytes of UTF-8 text, without cutting a character in two */
 static std::string cutUtf8(const std::string& text, size_t max)
 {
@@ -953,11 +984,9 @@ void M17Mode::txPreamble()
 
 bool M17Mode::sendMessage(const std::string& to, const std::string& text, std::string& error)
 {
-    std::string dest = trimmed(to);
+    std::string dest = destinationName(to);
     std::string body = text;
 
-    if (dest.empty())
-        dest = "ALL";
     if (dest.size() > 9U)
     {
         error = "the callsign the message is for is longer than 9 characters";
@@ -1055,7 +1084,7 @@ void M17Mode::txPacket(const std::string& to, const std::string& text)
 
     encoder.reset();
     lsf.setSource(cfg_.callsign);
-    lsf.setDestination(to);
+    setDestination(lsf, to);
 
     M17::streamType_t st;
     st.value = 0U;
@@ -1159,7 +1188,7 @@ void M17Mode::txCall()
     info.src = info.dst = 0U;
     info.group = true;
     info.ber = 0.0F;
-    info.text = cfg_.callsign + ">" + cfg_.dest;
+    info.text = cfg_.callsign + ">" + destinationName(cfg_.dest);
     if (ev_.call)
         ev_.call(info);
 
@@ -1173,7 +1202,7 @@ void M17Mode::txCall()
 
     encoder.reset();
     lsf.setSource(cfg_.callsign);
-    lsf.setDestination(cfg_.dest);
+    setDestination(lsf, cfg_.dest);
 
     /* The metadata text: blocks of 13 bytes, at most four, one in the link setup frame of each superframe in turn */
     std::string meta;
