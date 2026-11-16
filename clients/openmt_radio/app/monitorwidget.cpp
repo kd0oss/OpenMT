@@ -301,6 +301,10 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
     {
         QRect g = eyeR.adjusted(8, 22, -8, -8);
         double top = std::max(1.0, std::fabs(s.histMax));
+
+        /* nothing of the plot may leave its frame: a level line of a weak signal is far outside it */
+        p.save();
+        p.setClipRect(g);
         p.setPen(QColor(50, 60, 70));
         p.drawLine(g.left(), g.center().y(), g.right(), g.center().y());
         p.drawLine(g.center().x(), g.top(), g.center().x(), g.bottom());
@@ -339,6 +343,7 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
                 prev = pt;
             }
         }
+        p.restore();
     }
 
     /* histogram */
@@ -349,6 +354,9 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
         uint32_t mx = *std::max_element(s.hist.begin(), s.hist.end());
         double bw = (double)g.width() / (double)s.hist.size();
 
+        /* the nominal level lines of a weak signal fall far to the side of the plot (into the eye next to it): keep them inside */
+        p.save();
+        p.setClipRect(g);
         p.setPen(Qt::NoPen);
         p.setBrush(QColor(90, 170, 255));
         for (size_t i = 0U; i < s.hist.size(); i++)
@@ -373,6 +381,7 @@ void MonitorWidget::paintEvent(QPaintEvent* event)
                 p.drawLine(x, g.top(), x, g.bottom());
             }
         }
+        p.restore();
         p.setPen(QColor(160, 170, 180));
         p.drawText(QRect(g.left(), g.bottom() + 2, g.width(), 14), Qt::AlignLeft, QString("%1").arg(s.histMin, 0, 'f', 0));
         p.drawText(QRect(g.left(), g.bottom() + 2, g.width(), 14), Qt::AlignRight, QString("%1 counts").arg(s.histMax, 0, 'f', 0));
