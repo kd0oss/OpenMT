@@ -266,8 +266,8 @@ The block layout is detected when connecting; set it by hand only if reception o
 
 ## Remote control
 
-OpenMT Radio can be used from another device: a phone app, a web page or a script. Tick *Allow remote control* (right column of the
-Radio tab) and note the token and the certificate fingerprint. A client connects to `wss://this-machine:18060/openmt`, proves it knows
+OpenMT Radio can be used from another device: a phone app, a web page or a script. Tick *Allow remote control* (on the Remote Control tab of the
+window) and note the token and the certificate fingerprint. A client connects to `wss://this-machine:18060/openmt`, proves it knows
 the token, and can then listen, push to talk and send its microphone, connect and disconnect, change every setting of the window and
 watch the signal monitor. The radio, the dongle and the vocoders stay on this machine: the client only needs the network.
 

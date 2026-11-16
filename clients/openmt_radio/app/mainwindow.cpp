@@ -428,7 +428,7 @@ void MainWindow::buildUi()
     sf->addRow("Speaker gain %", spkGain_);
     sf->addRow("", spkMeter_);
 
-    QHBoxLayout* settings = new QHBoxLayout;
+    /* the protocol settings stay on the Radio tab; the dongle, the sound card and the remote control have a tab each */
     QVBoxLayout* left = new QVBoxLayout;
     left->addWidget(conn);
     left->addWidget(nx);
@@ -438,9 +438,6 @@ void MainWindow::buildUi()
     left->addWidget(dg);
     left->addWidget(mg);
     left->addWidget(fg);
-    QVBoxLayout* right = new QVBoxLayout;
-    right->addWidget(vo);
-    right->addWidget(so);
 
     /* the remote control (the Android app and other clients) */
     QGroupBox* rc = new QGroupBox("Remote control", central);
@@ -465,13 +462,10 @@ void MainWindow::buildUi()
     rcf->addRow("Token", remoteToken_);
     rcf->addRow("", remoteNewToken_);
     rcf->addRow(remoteInfo_);
-    right->addWidget(rc);
     QObject::connect(remoteEnable_, SIGNAL(toggled(bool)), this, SLOT(onRemoteChanged()));
     QObject::connect(remotePort_, SIGNAL(editingFinished()), this, SLOT(onRemoteChanged()));
     QObject::connect(remoteNewToken_, SIGNAL(clicked()), this, SLOT(onRemoteNewToken()));
-    settings->addLayout(left);
-    settings->addLayout(right);
-    top->addLayout(settings);
+    top->addLayout(left);
 
     /* operation */
     QHBoxLayout* op = new QHBoxLayout;
@@ -545,6 +539,20 @@ void MainWindow::buildUi()
     tabs->tabBar()->setFocusPolicy(Qt::NoFocus);
     tabs->addTab(central, "Radio");
     tabs->addTab(new MonitorWidget(&radio_->monitor(), &radio_->spectrum(), &radio_->iq(), tabs), "Monitor");
+
+    /* a tab for each of the three panels: the box goes into a page of its own (the layout takes it over), pushed to the top */
+    QGroupBox* boxes[3] = {vo, so, rc};
+    const char* names[3] = {"AMBE Dongle", "Sound card", "Remote Control"};
+
+    for (int i = 0; i < 3; i++)
+    {
+        QWidget* page = new QWidget(tabs);
+        QVBoxLayout* pl = new QVBoxLayout(page);
+
+        pl->addWidget(boxes[i]);
+        pl->addStretch(1);
+        tabs->addTab(page, names[i]);
+    }
     setCentralWidget(tabs);
 
     QObject::connect(mode_, SIGNAL(currentIndexChanged(int)), this, SLOT(onModeChanged()));
